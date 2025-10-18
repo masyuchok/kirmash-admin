@@ -18,3 +18,5 @@ obj/
 node_modules/
 .next/
 .env
+/backend/Migrations/20251018173256_UpdateSupplierFields.cs
+*.cs
