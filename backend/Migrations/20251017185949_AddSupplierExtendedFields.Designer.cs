@@ -12,8 +12,8 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20250429200905_InitialCreate")]
-    partial class InitialCreate
+    [Migration("20251017185949_AddSupplierExtendedFields")]
+    partial class AddSupplierExtendedFields
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -59,10 +59,6 @@ namespace backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<string>("Contact")
-                        .IsRequired()
-                        .HasColumnType("text");
-
                     b.Property<string>("ContactName")
                         .IsRequired()
                         .HasColumnType("text");
@@ -75,7 +71,27 @@ namespace backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Instagram")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Phone")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("TGContact")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Website")
                         .IsRequired()
                         .HasColumnType("text");
 
