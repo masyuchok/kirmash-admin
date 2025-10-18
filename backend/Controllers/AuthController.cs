@@ -1,6 +1,7 @@
 ﻿using backend.Models;
 using backend.Services.Auth;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web;
@@ -13,11 +14,13 @@ namespace backend.Controllers
     {
         private readonly IConfiguration _config;
         private readonly JwtService _jwt;
+        private readonly IWebHostEnvironment _env;
 
-        public AuthController( IConfiguration config, JwtService jwt )
+        public AuthController( IConfiguration config, JwtService jwt, IWebHostEnvironment env )
         {
             _config = config;
             _jwt = jwt;
+            _env = env;
         }
 
         [HttpGet( "login" )]
@@ -70,13 +73,14 @@ namespace backend.Controllers
             Response.Cookies.Append( "jwt_token", jwt, new CookieOptions
             {
                 HttpOnly = true,
-                Secure = true,
+                Secure = !_env.IsDevelopment( ),
                 SameSite = SameSiteMode.Lax,
-                Path = "/"
+                Path = "/",
+                //Domain = ".kirma.sh" // for prod only
             } );
 
             // Redirect to landing page
-            return Redirect( $"{_config["BaseUrl"]}/" );
+            return Redirect( $"{_config["ClientUrl"]}/" );
         }
 
         private bool IsHmacValid( IQueryCollection query, string receivedHmac )
