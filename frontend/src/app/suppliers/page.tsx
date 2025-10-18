@@ -1,4 +1,4 @@
-import SuppliersClient from './SuppliersClient';
+import SuppliersClient from '@/components/suppliers/SuppliersClient';
 
 export default function SuppliersPage() {
   return <SuppliersClient />;

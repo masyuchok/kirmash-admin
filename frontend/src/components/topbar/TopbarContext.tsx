@@ -1,6 +1,12 @@
 'use client';
 import { createContext, useContext, useState, ReactNode } from 'react';
-import { TopbarButton } from '@/components/Topbar';
+
+export type TopbarButton = {
+  icon?: React.ReactNode;
+  label: string;
+  onClick?: () => void;
+  disabled?: boolean;
+};
 
 interface TopbarContextType {
   topbarButtons: TopbarButton[];
