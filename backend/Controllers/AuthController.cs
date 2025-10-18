@@ -1,7 +1,6 @@
 ﻿using backend.Models;
 using backend.Services.Auth;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web;
@@ -9,7 +8,7 @@ using System.Web;
 namespace backend.Controllers
 {
     [ApiController]
-    [Route( "auth" )]
+    [Route( "[controller]" )]
     public class AuthController : Controller
     {
         private readonly IConfiguration _config;
@@ -73,8 +72,8 @@ namespace backend.Controllers
             Response.Cookies.Append( "jwt_token", jwt, new CookieOptions
             {
                 HttpOnly = true,
-                Secure = !_env.IsDevelopment( ),
-                SameSite = SameSiteMode.Lax,
+                Secure = true,
+                SameSite = SameSiteMode.None,
                 Path = "/",
                 //Domain = ".kirma.sh" // for prod only
             } );
