@@ -1,4 +1,4 @@
-import { Supplier } from './SuppliersClient';
+import type { Supplier } from '@/types/supplier';
 import { FiEdit } from 'react-icons/fi';
 import { HiMiniArchiveBoxXMark } from 'react-icons/hi2';
 import { ImBooks } from 'react-icons/im';
@@ -6,7 +6,7 @@ import { TiDocumentText } from 'react-icons/ti';
 
 interface Props {
   suppliers: Supplier[];
-  onEdit?: (supplier: Supplier) => void;
+  onEdit: (supplier: Supplier) => void;
   /** When true and the list is empty, copy assumes an active search filter. */
   hasActiveFilter?: boolean;
 }
@@ -79,7 +79,7 @@ const SuppliersTable = ({ suppliers, onEdit, hasActiveFilter }: Props) => {
                     type="button"
                     className={ghostBtn}
                     aria-label="Рэдагаваць"
-                    onClick={() => onEdit?.(s)}
+                    onClick={() => onEdit(s)}
                   >
                     <FiEdit className="size-4" />
                   </button>
