@@ -13,7 +13,7 @@ import {
 } from '@/lib/suppliers/supplierFormTypes';
 
 const btnPrimary =
-  'rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:pointer-events-none';
+  'rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50 disabled:pointer-events-none';
 const btnSecondary =
   'rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50';
 
@@ -104,7 +104,7 @@ export default function EditSupplierClient({ supplierId }: Props) {
     return (
       <div className="mx-auto w-full max-w-3xl space-y-4 rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
         <p className="text-sm text-red-600">{loadError ?? 'Даныя недаступныя'}</p>
-        <Link href="/suppliers" className="text-sm font-medium text-blue-600 hover:underline">
+        <Link href="/suppliers" className="text-sm font-medium text-primary hover:text-primary-hover hover:underline">
           Вярнуцца да спісу
         </Link>
       </div>

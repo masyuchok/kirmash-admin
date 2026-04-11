@@ -54,7 +54,7 @@ export default function SupplierNameSearch({ suppliers, value, onChange }: Props
           id="supplier-name-search"
           type="search"
           autoComplete="off"
-          className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-10 pr-3 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus-visible:border-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/25"
+          className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-10 pr-3 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
           placeholder="Пачніце ўводзіць назву..."
           value={value}
           onChange={(e) => {

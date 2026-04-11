@@ -1,7 +1,7 @@
 import type { SupplierFormValues } from '@/lib/suppliers/supplierFormTypes';
 
 const inputClass =
-  'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus-visible:border-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/25';
+  'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25';
 
 type Props = {
   values: SupplierFormValues;
@@ -124,7 +124,7 @@ export default function SupplierFormFields({
             name="isVATPayer"
             checked={values.isVATPayer}
             onChange={handleChange}
-            className="size-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            className="size-4 rounded border-gray-300 text-primary focus:ring-primary"
           />
           <span className="text-sm text-gray-700">Плаціць ВАТы</span>
         </label>

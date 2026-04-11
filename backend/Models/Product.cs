@@ -5,7 +5,6 @@
         public int Id { get; set; }
         public string ShopifyId { get; set; }
 
-        public int SupplierId { get; set; }
-        public Supplier Supplier { get; set; }
+        public List<Supply> Supplies = new List<Supply>();
     }
 }

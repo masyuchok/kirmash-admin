@@ -10,12 +10,7 @@ import {
   mapApiDetailToFormValues,
   mapListSupplierToFormValues,
 } from '@/lib/suppliers/supplierFormTypes';
-
-const baseUrl = () => {
-  const url = process.env.NEXT_PUBLIC_API_URL;
-  if (!url) throw new Error('NEXT_PUBLIC_API_URL is not set');
-  return url.replace(/\/$/, '');
-};
+import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
 
 /** Response shape for GET /suppliers/:id — extend when backend is ready. */
 export type SupplierApiDetail = Partial<SupplierFormValues> & {
@@ -24,20 +19,13 @@ export type SupplierApiDetail = Partial<SupplierFormValues> & {
   isVatPayer?: boolean;
 };
 
-function readErrorMessage(res: Response, fallback: string): Promise<string> {
-  return res
-    .json()
-    .then((data) => (typeof data?.error === 'string' ? data.error : data?.message) || fallback)
-    .catch(() => res.text().catch(() => fallback));
-}
-
 export async function createSupplier(
   payload: SupplierFormValues
 ): Promise<{ id?: number }> {
-  const res = await fetch(`${baseUrl()}/suppliers/add`, {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/add`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
+    credentials: apiCredentials,
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -56,10 +44,10 @@ export async function updateSupplier(
   id: number,
   payload: SupplierFormValues
 ): Promise<void> {
-  const res = await fetch(`${baseUrl()}/suppliers/${id}`, {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
+    credentials: apiCredentials,
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -72,8 +60,8 @@ export async function updateSupplier(
  * Load one supplier for editing. Falls back to list fetch + merge if GET by id fails (optional UX).
  */
 export async function fetchSupplierById(id: number): Promise<SupplierFormValues> {
-  const res = await fetch(`${baseUrl()}/suppliers/${id}`, {
-    credentials: 'include',
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/${id}`, {
+    credentials: apiCredentials,
   });
   if (res.ok) {
     const detail = (await res.json()) as SupplierApiDetail;
@@ -81,7 +69,7 @@ export async function fetchSupplierById(id: number): Promise<SupplierFormValues>
   }
 
   // Fallback: use list endpoint and pick row (works before dedicated GET exists).
-  const listRes = await fetch(`${baseUrl()}/suppliers`, { credentials: 'include' });
+  const listRes = await fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials });
   if (!listRes.ok) {
     const msg = await readErrorMessage(listRes, 'Не ўдалося загрузіць пастаўшчыка');
     throw new Error(msg);

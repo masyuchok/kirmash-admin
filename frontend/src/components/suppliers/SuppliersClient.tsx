@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import type { Supplier } from '@/types/supplier';
 import { FiPlus, FiPackage, FiFileText } from 'react-icons/fi';
+import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
 import SuppliersTable from './SuppliersTable';
@@ -52,8 +53,8 @@ const SuppliersClient = () => {
   }, [setTopbarButtons]);
 
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/suppliers`, {
-      credentials: 'include',
+    fetch(`${getApiBaseUrl()}/suppliers`, {
+      credentials: apiCredentials,
     })
       .then((res) => res.json())
       .then((data) => {

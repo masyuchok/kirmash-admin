@@ -17,5 +17,6 @@
         public bool isVATPayer { get; set; }
 
         public List<Product> Products { get; set; } = new List<Product>( );
+        public List<Supply> Supplies { get; set; } = new List<Supply>();
     }
 }

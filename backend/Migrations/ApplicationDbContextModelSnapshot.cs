@@ -34,7 +34,7 @@ namespace backend.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<int>("SupplierId")
+                    b.Property<int?>("SupplierId")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -84,7 +84,7 @@ namespace backend.Migrations
                     b.Property<string>("Website")
                         .HasColumnType("text");
 
-                    b.Property<DateOnly>("WorkStart")
+                    b.Property<DateOnly?>("WorkStart")
                         .HasColumnType("date");
 
                     b.Property<bool>("isVATPayer")
@@ -95,10 +95,38 @@ namespace backend.Migrations
                     b.ToTable("Suppliers");
                 });
 
+            modelBuilder.Entity("backend.Models.Supply", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateOnly>("Date")
+                        .HasColumnType("date");
+
+                    b.Property<int>("SupplierId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SupplierId");
+
+                    b.ToTable("Supplies");
+                });
+
             modelBuilder.Entity("backend.Models.Product", b =>
                 {
-                    b.HasOne("backend.Models.Supplier", "Supplier")
+                    b.HasOne("backend.Models.Supplier", null)
                         .WithMany("Products")
+                        .HasForeignKey("SupplierId");
+                });
+
+            modelBuilder.Entity("backend.Models.Supply", b =>
+                {
+                    b.HasOne("backend.Models.Supplier", "Supplier")
+                        .WithMany("Supplies")
                         .HasForeignKey("SupplierId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -109,6 +137,8 @@ namespace backend.Migrations
             modelBuilder.Entity("backend.Models.Supplier", b =>
                 {
                     b.Navigation("Products");
+
+                    b.Navigation("Supplies");
                 });
 #pragma warning restore 612, 618
         }
