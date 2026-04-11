@@ -1,6 +1,8 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import type { Supplier } from '@/types/supplier';
 import { FiPlus, FiPackage, FiFileText } from 'react-icons/fi';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
@@ -13,19 +15,9 @@ enum ViewMode {
   Documents = 'documents',
 }
 
-export interface Supplier {
-  id: number;
-  name: string;
-  telegram: string;
-  website: string;
-  country: string;
-  city: string;
-  isVatPayer: boolean;
-}
-
 const SuppliersClient = () => {
+  const router = useRouter();
   const [mode, setMode] = useState<ViewMode>(ViewMode.Default);
-  //   const [editingId, setEditingId] = useState<number | null>(null);
   const { setTopbarButtons } = useTopbar();
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -140,6 +132,7 @@ const SuppliersClient = () => {
             <SuppliersTable
               suppliers={filteredSuppliers}
               hasActiveFilter={Boolean(searchQuery.trim())}
+              onEdit={(s) => router.push(`/suppliers/${s.id}/edit`)}
             />
           </div>
         </div>

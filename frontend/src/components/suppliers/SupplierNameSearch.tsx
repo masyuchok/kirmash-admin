@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { FiSearch } from 'react-icons/fi';
-import type { Supplier } from './SuppliersClient';
+import type { Supplier } from '@/types/supplier';
 
 const MAX_SUGGESTIONS = 15;
 
