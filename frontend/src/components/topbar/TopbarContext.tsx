@@ -1,24 +1,37 @@
 'use client';
 import { createContext, useContext, useState, ReactNode } from 'react';
 
+export type TopbarButtonVariant = 'primary' | 'secondary';
+
 export type TopbarButton = {
   icon?: React.ReactNode;
   label: string;
   onClick?: () => void;
   disabled?: boolean;
+  variant?: TopbarButtonVariant;
 };
+
+export type TopbarPage = {
+  title: string;
+  subtitle?: string;
+} | null;
 
 interface TopbarContextType {
   topbarButtons: TopbarButton[];
   setTopbarButtons: (buttons: TopbarButton[]) => void;
+  topbarPage: TopbarPage;
+  setTopbarPage: (page: TopbarPage) => void;
 }
 
 const TopbarContext = createContext<TopbarContextType | undefined>(undefined);
 
 export const TopbarProvider = ({ children }: { children: ReactNode }) => {
   const [topbarButtons, setTopbarButtons] = useState<TopbarButton[]>([]);
+  const [topbarPage, setTopbarPage] = useState<TopbarPage>(null);
   return (
-    <TopbarContext.Provider value={{ topbarButtons, setTopbarButtons }}>
+    <TopbarContext.Provider
+      value={{ topbarButtons, setTopbarButtons, topbarPage, setTopbarPage }}
+    >
       {children}
     </TopbarContext.Provider>
   );
