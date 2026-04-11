@@ -4,32 +4,32 @@ const Sidebar = () => {
       <nav>
         <ul className="space-y-2">
           <li>
-            <a href="/" className="block hover:text-blue-600">
+            <a href="/" className="block hover:text-primary">
               Аналітыка
             </a>
           </li>
           <li>
-            <a href="/suppliers" className="block hover:text-blue-600">
+            <a href="/suppliers" className="block hover:text-primary">
               Пастаўшчыкі
             </a>
           </li>
           <li>
-            <a href="/supplies" className="block hover:text-blue-600">
+            <a href="/supplies" className="block hover:text-primary">
               Пастаўкі
             </a>
           </li>
           <li>
-            <a href="/products" className="block hover:text-blue-600">
+            <a href="/products" className="block hover:text-primary">
               Прадукты
             </a>
           </li>
           <li>
-            <a href="/sales" className="block hover:text-blue-600">
+            <a href="/sales" className="block hover:text-primary">
               Продажы
             </a>
           </li>
           <li>
-            <a href="/documents" className="block hover:text-blue-600">
+            <a href="/documents" className="block hover:text-primary">
               Дакументы
             </a>
           </li>

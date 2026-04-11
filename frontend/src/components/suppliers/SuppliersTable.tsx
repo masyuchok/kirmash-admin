@@ -12,14 +12,14 @@ interface Props {
 }
 
 const ghostBtn =
-  'inline-flex size-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30';
+  'inline-flex size-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30';
 
 const SuppliersTable = ({ suppliers, onEdit, hasActiveFilter }: Props) => {
   if (suppliers.length === 0) {
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-sm font-medium text-gray-900">
-          {hasActiveFilter ? 'Нічога не знойдзена' : 'Пастаўшчыкаў пакуль няма'}
+          {hasActiveFilter ? 'Нічога не знойдзена' : 'Пастаўшчыкоў пакуль няма'}
         </p>
         <p className="mt-1 text-sm text-gray-500">
           {hasActiveFilter ? 'Паспрабуйце змяніць запыт пошуку.' : 'Дадайце першага пастаўшчыка праз кнопку ўверсе.'}
@@ -52,7 +52,7 @@ const SuppliersTable = ({ suppliers, onEdit, hasActiveFilter }: Props) => {
               <td className="max-w-[14rem] px-4 py-3.5">
                 <a
                   href={s.website}
-                  className="block truncate text-blue-600 hover:text-blue-700 hover:underline"
+                  className="block truncate text-primary hover:text-primary-hover hover:underline"
                   title={s.website}
                   target="_blank"
                   rel="noopener noreferrer"

@@ -10,5 +10,6 @@ namespace backend.Data
 
         public DbSet<Product> Products { get; set; } = default!;
         public DbSet<Supplier> Suppliers { get; set; } = default!;
+        public DbSet<Supply> Supplies { get; set; } = default!;
     }
 }
