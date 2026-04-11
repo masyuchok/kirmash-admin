@@ -39,9 +39,6 @@ const AddSupplierForm = ({ onSuccess, onCancel }: Props) => {
 
   return (
     <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-      <div className="border-b border-gray-100 px-6 py-5">
-        <h2 className="text-xl font-semibold tracking-tight text-gray-900">Дадаць пастаўшчыка</h2>
-      </div>
       <form onSubmit={submit} className="space-y-4 px-6 py-6">
         <SupplierFormFields values={form} onChange={setForm} showDuplicateNameHint />
         {error && <p className="text-sm text-red-600">{error}</p>}

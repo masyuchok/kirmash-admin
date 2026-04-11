@@ -1,21 +1,36 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { FiPlus } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import { fetchSupplies } from '@/lib/api/supplies';
 import type { SupplyListItem } from '@/types/supply';
 import SuppliesTable from './SuppliesTable';
 
 export default function SuppliesClient() {
-  const { setTopbarButtons } = useTopbar();
+  const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [rows, setRows] = useState<SupplyListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setTopbarButtons([]);
-    return () => setTopbarButtons([]);
-  }, [setTopbarButtons]);
+    setTopbarPage({
+      title: 'Пастаўкі',
+      subtitle: loading ? 'Загрузка…' : `Спіс паставак (${rows.length})`,
+    });
+    setTopbarButtons([
+      {
+        label: 'Новая пастаўка',
+        icon: <FiPlus />,
+        onClick: () => {},
+        variant: 'primary',
+      },
+    ]);
+    return () => {
+      setTopbarButtons([]);
+      setTopbarPage(null);
+    };
+  }, [loading, rows.length, setTopbarButtons, setTopbarPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,11 +73,6 @@ export default function SuppliesClient() {
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Пастаўкі</h1>
-        <p className="text-sm text-gray-500">Спіс паставак ({rows.length})</p>
-      </header>
-
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}

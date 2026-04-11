@@ -26,9 +26,9 @@ export default function RootLayout({
         <TopbarProvider>
           <div className="flex h-screen">
             <Sidebar />
-            <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <Topbar />
-              <main className="flex-1 overflow-auto bg-gray-50/80 p-6">
+              <main className="min-h-0 flex-1 overflow-auto bg-gray-50/80 p-6">
                 {children}
               </main>
             </div>

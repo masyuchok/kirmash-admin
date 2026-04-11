@@ -19,7 +19,7 @@ enum ViewMode {
 const SuppliersClient = () => {
   const router = useRouter();
   const [mode, setMode] = useState<ViewMode>(ViewMode.Default);
-  const { setTopbarButtons } = useTopbar();
+  const { setTopbarButtons, setTopbarPage } = useTopbar();
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,25 +32,62 @@ const SuppliersClient = () => {
   }, [suppliers, searchQuery]);
 
   useEffect(() => {
-    setTopbarButtons([
-      {
-        label: 'Новы пастаўшчык',
-        icon: <FiPlus />,
-        onClick: () => setMode(ViewMode.AddSupplier),
-      },
-      {
-        label: 'Інвентарызацыя',
-        icon: <FiPackage />,
-        onClick: () => setMode(ViewMode.Inventory),
-      },
-      {
-        label: 'Дакументы',
-        icon: <FiFileText />,
-        onClick: () => setMode(ViewMode.Documents),
-      },
-    ]);
-    return () => setTopbarButtons([]);
-  }, [setTopbarButtons]);
+    const clear = () => {
+      setTopbarButtons([]);
+      setTopbarPage(null);
+    };
+
+    switch (mode) {
+      case ViewMode.AddSupplier:
+        setTopbarPage({ title: 'Дадаць пастаўшчыка' });
+        setTopbarButtons([]);
+        return clear;
+      case ViewMode.Inventory:
+        setTopbarPage({ title: 'Інвентарызацыя' });
+        setTopbarButtons([]);
+        return clear;
+      case ViewMode.Documents:
+        setTopbarPage({ title: 'Дакументы' });
+        setTopbarButtons([]);
+        return clear;
+      default:
+        setTopbarPage({
+          title: 'Пастаўшчыкі',
+          subtitle: loading
+            ? 'Загрузка…'
+            : `Усяго: ${suppliers.length}${searchQuery.trim() ? ` · паказана: ${filteredSuppliers.length}` : ''}`,
+        });
+        setTopbarButtons([
+          {
+            label: 'Новы пастаўшчык',
+            icon: <FiPlus />,
+            onClick: () => setMode(ViewMode.AddSupplier),
+            variant: 'primary',
+          },
+          {
+            label: 'Інвентарызацыя',
+            icon: <FiPackage />,
+            onClick: () => setMode(ViewMode.Inventory),
+            variant: 'secondary',
+          },
+          {
+            label: 'Дакументы',
+            icon: <FiFileText />,
+            onClick: () => setMode(ViewMode.Documents),
+            variant: 'secondary',
+          },
+        ]);
+        return clear;
+    }
+  }, [
+    mode,
+    loading,
+    suppliers.length,
+    searchQuery,
+    filteredSuppliers.length,
+    setTopbarButtons,
+    setTopbarPage,
+  ]);
 
   useEffect(() => {
     fetch(`${getApiBaseUrl()}/suppliers`, {
@@ -110,18 +147,8 @@ const SuppliersClient = () => {
         </div>
       );
     default: {
-      const total = suppliers.length;
-      const shown = filteredSuppliers.length;
       return (
         <div className="mx-auto w-full max-w-6xl space-y-6">
-          <header className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Пастаўшчыкі</h1>
-            <p className="text-sm text-gray-500">
-              Усяго: {total}
-              {searchQuery.trim() ? ` · паказана: ${shown}` : ''}
-            </p>
-          </header>
-
           <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-100 p-5 sm:p-6">
               <SupplierNameSearch

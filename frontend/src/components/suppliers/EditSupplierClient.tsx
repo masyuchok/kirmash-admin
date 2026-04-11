@@ -23,7 +23,7 @@ type Props = {
 
 export default function EditSupplierClient({ supplierId }: Props) {
   const router = useRouter();
-  const { setTopbarButtons } = useTopbar();
+  const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [form, setForm] = useState<SupplierFormValues | null>(null);
   const [initialSnapshot, setInitialSnapshot] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -38,15 +38,42 @@ export default function EditSupplierClient({ supplierId }: Props) {
   }, [form, initialSnapshot]);
 
   useEffect(() => {
+    const clear = () => {
+      setTopbarButtons([]);
+      setTopbarPage(null);
+    };
+
+    if (loading) {
+      setTopbarPage({ title: 'Рэдагаваць пастаўшчыка', subtitle: 'Загрузка…' });
+      setTopbarButtons([]);
+      return clear;
+    }
+    if (loadError || !form) {
+      setTopbarPage({
+        title: 'Рэдагаваць пастаўшчыка',
+        subtitle: loadError ?? undefined,
+      });
+      setTopbarButtons([
+        {
+          label: 'Да спісу',
+          icon: <FiArrowLeft />,
+          onClick: () => router.push('/suppliers'),
+          variant: 'secondary',
+        },
+      ]);
+      return clear;
+    }
+    setTopbarPage({ title: 'Рэдагаваць пастаўшчыка', subtitle: `ID: ${supplierId}` });
     setTopbarButtons([
       {
         label: 'Да спісу',
         icon: <FiArrowLeft />,
         onClick: () => router.push('/suppliers'),
+        variant: 'secondary',
       },
     ]);
-    return () => setTopbarButtons([]);
-  }, [router, setTopbarButtons]);
+    return clear;
+  }, [loading, loadError, form, supplierId, router, setTopbarButtons, setTopbarPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,10 +141,6 @@ export default function EditSupplierClient({ supplierId }: Props) {
   return (
     <>
       <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="border-b border-gray-100 px-6 py-5">
-          <h1 className="text-xl font-semibold tracking-tight text-gray-900">Рэдагаваць пастаўшчыка</h1>
-          <p className="mt-1 text-sm text-gray-500">ID: {supplierId}</p>
-        </div>
         <div className="space-y-4 px-6 py-6">
           <SupplierFormFields values={form} onChange={setForm} />
           {saveError && <p className="text-sm text-red-600">{saveError}</p>}
