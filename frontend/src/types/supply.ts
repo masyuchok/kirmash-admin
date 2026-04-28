@@ -4,6 +4,6 @@ export type SupplyListItem = {
   supplierName: string;
   /** ISO date string (YYYY-MM-DD). */
   date: string;
-  /** Backend `BooksNumber`. */
-  booksNumber: number;
+  /** Backend `ProductNumber`. */
+  productNumber: number;
 };
