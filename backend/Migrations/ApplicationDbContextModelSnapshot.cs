@@ -124,13 +124,30 @@ namespace backend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
+                    b.Property<decimal>("MarginPercent")
+                        .HasColumnType("numeric(7,2)");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("SalePrice")
+                        .HasColumnType("numeric(12,2)");
+
                     b.Property<string>("ShopifyProductId")
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<decimal>("SupplierPrice")
+                        .HasColumnType("numeric(12,2)");
+
                     b.Property<int>("SupplyId")
                         .HasColumnType("integer");
+
+                    b.Property<bool>("SyncWithShopify")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
 
                     b.HasKey("Id");
 

@@ -7,7 +7,14 @@ import { useTopbar } from '@/components/topbar/TopbarContext';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import type { ProductWithSuppliers } from '@/types/product';
 
+type ProductTableRow = ProductWithSuppliers & {
+  supplierName: string;
+  rowKey: string;
+  rowSource: 'shopify' | 'supply';
+};
+
 export default function ProductsClient() {
+  const pageSize = 50;
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [rows, setRows] = useState<ProductWithSuppliers[]>([]);
   const [loading, setLoading] = useState(true);
@@ -15,7 +22,9 @@ export default function ProductsClient() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProductTypes, setSelectedProductTypes] = useState<string[]>([]);
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
+  const [syncFilter, setSyncFilter] = useState<'all' | 'supply' | 'shopify'>('all');
   const [quantitySortDirection, setQuantitySortDirection] = useState<'asc' | 'desc'>('desc');
+  const [page, setPage] = useState(1);
   const [supplierMenuOpen, setSupplierMenuOpen] = useState(false);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const [menuMounted, setMenuMounted] = useState(false);
@@ -26,11 +35,51 @@ export default function ProductsClient() {
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
   const typeMenuRef = useRef<HTMLDivElement | null>(null);
 
-  const supplierOptions = useMemo(() => {
-    return Array.from(
-      new Set(rows.flatMap((row) => row.suppliers).filter((name) => name.trim().length > 0))
-    ).sort((a, b) => a.localeCompare(b, 'be'));
+  const displayRows = useMemo<ProductTableRow[]>(() => {
+    return rows.flatMap((row) => {
+      const list: ProductTableRow[] = [];
+      list.push({
+        ...row,
+        supplierName: 'Shopify',
+        quantityInStock: row.shopifyQuantityInStock,
+        rowSource: 'shopify',
+        rowKey: `${row.shopifyProductId}::shopify`,
+      });
+
+      const suppliers = row.suppliers;
+      for (const supplierName of suppliers) {
+        list.push({
+          ...row,
+          rowSource: 'supply',
+          rowKey: `${row.shopifyProductId}::supply::${supplierName}`,
+          supplierName,
+        });
+      }
+
+      if (suppliers.length === 0) {
+        list[0] = {
+          ...list[0],
+          supplierName: '—',
+        };
+      }
+
+      return list.map((item) => ({
+        ...item,
+        ...row,
+        quantityInStock: item.quantityInStock,
+        supplierName: item.supplierName,
+        rowSource: item.rowSource,
+        rowKey: item.rowKey,
+      }));
+    });
   }, [rows]);
+
+  const supplierOptions = useMemo(() => {
+    const names = displayRows
+      .map((row) => row.supplierName)
+      .filter((name) => name.trim().length > 0 && name !== '—');
+    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b, 'be'));
+  }, [displayRows]);
 
   const productTypeOptions = useMemo(() => {
     return Array.from(
@@ -43,8 +92,8 @@ export default function ProductsClient() {
 
     const filteredBySupplier =
       selectedSuppliers.length === 0
-        ? rows
-        : rows.filter((row) => row.suppliers.some((name) => selectedSuppliers.includes(name)));
+        ? displayRows
+        : displayRows.filter((row) => selectedSuppliers.includes(row.supplierName));
 
     const filtered =
       q.length === 0
@@ -56,12 +105,32 @@ export default function ProductsClient() {
         ? filtered
         : filtered.filter((row) => selectedProductTypes.includes(row.productType));
 
-    return [...filteredByType].sort((a, b) =>
+    const filteredBySyncFlag =
+      syncFilter === 'all'
+        ? filteredByType
+        : filteredByType.filter((row) =>
+            syncFilter === 'supply'
+              ? row.rowSource === 'supply' && row.hasSupplyQuantityOverride
+              : row.rowSource === 'shopify' || !row.hasSupplyQuantityOverride
+          );
+
+    return [...filteredBySyncFlag].sort((a, b) =>
       quantitySortDirection === 'asc'
         ? a.quantityInStock - b.quantityInStock
         : b.quantityInStock - a.quantityInStock
     );
-  }, [rows, selectedSuppliers, searchQuery, selectedProductTypes, quantitySortDirection]);
+  }, [displayRows, selectedSuppliers, searchQuery, selectedProductTypes, syncFilter, quantitySortDirection]);
+
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+  const pagedRows = useMemo(() => {
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * pageSize;
+    return visibleRows.slice(start, start + pageSize);
+  }, [visibleRows, page, totalPages]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, selectedSuppliers, selectedProductTypes, syncFilter, quantitySortDirection]);
 
   const toggleSupplierFilter = (supplier: string) => {
     setSelectedSuppliers((prev) =>
@@ -175,6 +244,7 @@ export default function ProductsClient() {
         : `Усяго прадуктаў: ${rows.length}${
             selectedSuppliers.length > 0 || searchQuery.trim()
               || selectedProductTypes.length > 0
+              || syncFilter !== 'all'
               ? ` · паказана: ${visibleRows.length}`
               : ''
           }`,
@@ -189,6 +259,7 @@ export default function ProductsClient() {
     rows.length,
     selectedSuppliers.length,
     selectedProductTypes.length,
+    syncFilter,
     searchQuery,
     visibleRows.length,
     setTopbarButtons,
@@ -276,6 +347,25 @@ export default function ProductsClient() {
                 <span aria-hidden>{typeMenuOpen ? '▴' : '▾'}</span>
               </button>
             </div>
+            <label className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 shadow-sm">
+              <span className="font-medium">Крыніца колькасці</span>
+              <select
+                value={syncFilter}
+                onChange={(e) => setSyncFilter(e.currentTarget.value as 'all' | 'supply' | 'shopify')}
+                className="rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+              >
+                <option value="all">Усе</option>
+                <option value="supply">З пастаўкі (без Shopify sync)</option>
+                <option value="shopify">Shopify sync</option>
+              </select>
+            </label>
+            <div
+              className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+              title="Падсветка радка азначае: колькасць узята з пастаўкі, бо сінхранізацыя з Shopify адключаная."
+            >
+              <span className="inline-block size-2 rounded-full bg-amber-500" />
+              Радкі з пастаўкі без Shopify sync
+            </div>
           </div>
         </div>
         {visibleRows.length === 0 ? (
@@ -325,8 +415,15 @@ export default function ProductsClient() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {visibleRows.map((row) => (
-                  <tr key={row.shopifyProductId} className="transition hover:bg-gray-50/80">
+                {pagedRows.map((row) => (
+                  <tr
+                    key={row.rowKey}
+                    className={`transition hover:bg-gray-50/80 ${
+                      row.rowSource === 'supply' && row.hasSupplyQuantityOverride
+                        ? 'bg-amber-50/70'
+                        : ''
+                    }`}
+                  >
                     <td className="px-6 py-3.5 font-medium text-gray-900">
                       <div className="flex items-center gap-3">
                         {row.mainImageUrl ? (
@@ -363,21 +460,53 @@ export default function ProductsClient() {
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums">
-                      {row.quantityInStock <= 0 ? (
-                        <span className="inline-flex rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
-                          0
-                        </span>
-                      ) : (
-                        <span className="text-gray-700">{row.quantityInStock}</span>
-                      )}
+                      <div className="inline-flex items-center gap-2">
+                        {row.rowSource === 'supply' && row.hasSupplyQuantityOverride && (
+                          <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/30">
+                            з пастаўкі
+                          </span>
+                        )}
+                        {row.quantityInStock <= 0 ? (
+                          <span className="inline-flex rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
+                            0
+                          </span>
+                        ) : (
+                          <span className="text-gray-700">{row.quantityInStock}</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-3.5 text-gray-700">
-                      {row.suppliers.length > 0 ? row.suppliers.join(', ') : '—'}
+                      {row.supplierName}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {visibleRows.length > 0 && (
+          <div className="flex items-center justify-between border-t border-gray-100 px-6 py-3">
+            <p className="text-sm text-gray-500">
+              Старонка {Math.min(page, totalPages)} з {totalPages}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+              >
+                Назад
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+              >
+                Далей
+              </button>
+            </div>
           </div>
         )}
       </div>
