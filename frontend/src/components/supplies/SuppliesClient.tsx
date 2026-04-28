@@ -168,6 +168,7 @@ export default function SuppliesClient() {
 
   const openSupply = (supply: SupplyListItem) => {
     const query = new URLSearchParams({
+      supplierId: String(supply.supplierId),
       supplierName: supply.supplierName,
       date: supply.date,
     });

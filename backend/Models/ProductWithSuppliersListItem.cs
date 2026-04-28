@@ -8,6 +8,8 @@ namespace backend.Models
         public string ProductAdminUrl { get; set; } = string.Empty;
         public string? MainImageUrl { get; set; }
         public int QuantityInStock { get; set; }
+        public int ShopifyQuantityInStock { get; set; }
+        public bool HasSupplyQuantityOverride { get; set; }
         public List<string> Suppliers { get; set; } = new();
     }
 }

@@ -1,12 +1,15 @@
 namespace backend.Models
 {
-    public class SupplyProduct
+    public class SupplySaveRequest
     {
-        public int Id { get; set; }
+        public int? SupplyId { get; set; }
+        public int SupplierId { get; set; }
+        public DateOnly Date { get; set; }
+        public List<SupplyProductSaveItem> Products { get; set; } = new();
+    }
 
-        public int SupplyId { get; set; }
-        public Supply Supply { get; set; } = default!;
-
+    public class SupplyProductSaveItem
+    {
         public string ShopifyProductId { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public decimal SupplierPrice { get; set; }

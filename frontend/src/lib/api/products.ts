@@ -43,6 +43,10 @@ export async function fetchProductsWithSuppliers(): Promise<ProductWithSuppliers
       productAdminUrl: readString(r.productAdminUrl ?? r.ProductAdminUrl),
       mainImageUrl: readString(r.mainImageUrl ?? r.MainImageUrl) || null,
       quantityInStock: readInt(r.quantityInStock ?? r.QuantityInStock),
+      shopifyQuantityInStock: readInt(r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock),
+      hasSupplyQuantityOverride: Boolean(
+        r.hasSupplyQuantityOverride ?? r.HasSupplyQuantityOverride ?? false
+      ),
       suppliers,
     };
   });

@@ -38,7 +38,16 @@ namespace backend.Services
                           .ToHashSet( StringComparer.OrdinalIgnoreCase )
                 );
 
-            return await FetchShopifyProductsAsync( shop, accessToken, suppliersByProductId );
+            Dictionary<string, int> unsyncedQuantityByProductId = await _db.SupplyProducts
+                .AsNoTracking()
+                .Where( sp => !sp.SyncWithShopify )
+                .GroupBy( sp => sp.ShopifyProductId )
+                .ToDictionaryAsync(
+                    g => NormalizeFromShopifyGid( g.Key ),
+                    g => g.Sum( sp => sp.Quantity )
+                );
+
+            return await FetchShopifyProductsAsync( shop, accessToken, suppliersByProductId, unsyncedQuantityByProductId );
         }
 
         private static string NormalizeFromShopifyGid( string id )
@@ -52,7 +61,8 @@ namespace backend.Services
         private async Task<List<ProductWithSuppliersListItem>> FetchShopifyProductsAsync(
             string shop,
             string accessToken,
-            Dictionary<string, HashSet<string>> suppliersByProductId
+            Dictionary<string, HashSet<string>> suppliersByProductId,
+            Dictionary<string, int> unsyncedQuantityByProductId
         )
         {
             List<ProductWithSuppliersListItem> result = new();
@@ -158,6 +168,8 @@ namespace backend.Services
                     List<string> suppliers = (suppliersSet ?? [])
                         .OrderBy( n => n, StringComparer.OrdinalIgnoreCase )
                         .ToList();
+                    bool hasSupplyQuantityOverride = unsyncedQuantityByProductId.TryGetValue( productId, out int overrideQuantity );
+                    int effectiveQuantity = hasSupplyQuantityOverride ? overrideQuantity : quantityInStock;
 
                     result.Add( new ProductWithSuppliersListItem
                     {
@@ -166,7 +178,9 @@ namespace backend.Services
                         ProductType = productType,
                         ProductAdminUrl = $"https://admin.shopify.com/store/{shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase )}/products/{productId}",
                         MainImageUrl = string.IsNullOrWhiteSpace( mainImageUrl ) ? null : mainImageUrl,
-                        QuantityInStock = quantityInStock,
+                        QuantityInStock = effectiveQuantity,
+                        ShopifyQuantityInStock = quantityInStock,
+                        HasSupplyQuantityOverride = hasSupplyQuantityOverride,
                         Suppliers = suppliers
                     } );
                 }

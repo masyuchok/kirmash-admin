@@ -5,5 +5,7 @@ export type ProductWithSuppliers = {
   productAdminUrl: string;
   mainImageUrl: string | null;
   quantityInStock: number;
+  shopifyQuantityInStock: number;
+  hasSupplyQuantityOverride: boolean;
   suppliers: string[];
 };

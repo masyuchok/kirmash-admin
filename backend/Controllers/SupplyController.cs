@@ -31,5 +31,46 @@ namespace backend.Controllers
                 return StatusCode(500, new { error = "Памылка атрымання спіса паставак", details = ex.Message });
             }
         }
+
+        [HttpGet("{id:int}")]
+        public async Task<ActionResult<SupplyDetailsResponse>> GetOne( int id )
+        {
+            try
+            {
+                SupplyDetailsResponse? supply = await _service.GetSupplyDetailsAsync( id );
+                if (supply == null)
+                {
+                    return NotFound( new { error = "Пастаўка не знойдзена" } );
+                }
+                return Ok( supply );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = "Памылка атрымання пастаўкі", details = ex.Message });
+            }
+        }
+
+        [HttpPost("save")]
+        public async Task<ActionResult<object>> Save( [FromBody] SupplySaveRequest request )
+        {
+            try
+            {
+                SupplySaveResult result = await _service.SaveSupplyAsync( request );
+                return Ok( new
+                {
+                    id = result.SupplyId,
+                    warning = result.Warning,
+                    inventoryUpdates = result.InventoryUpdates
+                } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = "Памылка захавання пастаўкі", details = ex.Message });
+            }
+        }
     }
 }
