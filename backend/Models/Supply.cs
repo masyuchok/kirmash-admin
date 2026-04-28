@@ -3,9 +3,9 @@
     public class Supply
     {
         public int Id { get; set; }
-        public Supplier Supplier { get; set; }
+        public Supplier Supplier { get; set; } = default!;
 
-        public List<Product> Products = new List<Product>();
+        public List<SupplyProduct> SupplyProducts { get; set; } = new();
         public DateOnly Date {  get; set; }
     }
 }

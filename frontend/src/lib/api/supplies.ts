@@ -26,7 +26,9 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
   const supplierName =
     typeof nameRaw === 'string' && nameRaw.length > 0 ? nameRaw : '—';
 
-  const booksNumber = readInt(r.booksNumber ?? r.BooksNumber);
+  const productNumber = readInt(
+    r.productNumber ?? r.ProductNumber ?? r.booksNumber ?? r.BooksNumber
+  );
 
   const dateVal = r.date ?? r.Date;
   let date = '';
@@ -43,7 +45,7 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
     id: String(Number.isFinite(idNum) ? idNum : ''),
     supplierName,
     date,
-    booksNumber,
+    productNumber,
   };
 }
 

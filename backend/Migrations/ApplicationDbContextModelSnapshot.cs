@@ -116,6 +116,30 @@ namespace backend.Migrations
                     b.ToTable("Supplies");
                 });
 
+            modelBuilder.Entity("backend.Models.SupplyProduct", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ShopifyProductId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("SupplyId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SupplyId", "ShopifyProductId")
+                        .IsUnique();
+
+                    b.ToTable("SupplyProducts");
+                });
+
             modelBuilder.Entity("backend.Models.Product", b =>
                 {
                     b.HasOne("backend.Models.Supplier", null)
@@ -134,11 +158,27 @@ namespace backend.Migrations
                     b.Navigation("Supplier");
                 });
 
+            modelBuilder.Entity("backend.Models.SupplyProduct", b =>
+                {
+                    b.HasOne("backend.Models.Supply", "Supply")
+                        .WithMany("SupplyProducts")
+                        .HasForeignKey("SupplyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Supply");
+                });
+
             modelBuilder.Entity("backend.Models.Supplier", b =>
                 {
                     b.Navigation("Products");
 
                     b.Navigation("Supplies");
+                });
+
+            modelBuilder.Entity("backend.Models.Supply", b =>
+                {
+                    b.Navigation("SupplyProducts");
                 });
 #pragma warning restore 612, 618
         }
