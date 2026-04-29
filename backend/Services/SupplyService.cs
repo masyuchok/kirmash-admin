@@ -2,6 +2,7 @@
 using backend.Models;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using System.Globalization;
 
 namespace backend.Services
 {
@@ -134,6 +135,15 @@ namespace backend.Services
                 .GroupBy( p => p.ShopifyProductId.Trim(), StringComparer.OrdinalIgnoreCase )
                 .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
+            Dictionary<string, decimal> syncedSalePrices = requestProducts
+                .Where( p => p.SyncWithShopify )
+                .GroupBy( p => p.ShopifyProductId.Trim(), StringComparer.OrdinalIgnoreCase )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Last().SalePrice,
+                    StringComparer.OrdinalIgnoreCase
+                );
+
             Dictionary<string, int> deltas = new( StringComparer.OrdinalIgnoreCase );
             foreach (string key in previousQuantities.Keys.Union( newQuantities.Keys, StringComparer.OrdinalIgnoreCase ))
             {
@@ -151,7 +161,7 @@ namespace backend.Services
             {
                 try
                 {
-                    updates = await ApplyInventoryToShopifyAsync( shop, accessToken, deltas );
+                    updates = await ApplyInventoryToShopifyAsync( shop, accessToken, deltas, syncedSalePrices );
                 }
                 catch (Exception ex)
                 {
@@ -211,7 +221,8 @@ namespace backend.Services
         private async Task<List<SupplyInventoryUpdateResult>> ApplyInventoryToShopifyAsync(
             string shop,
             string accessToken,
-            Dictionary<string, int> deltas
+            Dictionary<string, int> deltas,
+            Dictionary<string, decimal> syncedSalePrices
         )
         {
             List<SupplyInventoryUpdateResult> result = new();
@@ -219,23 +230,40 @@ namespace backend.Services
             client.DefaultRequestHeaders.Add( "X-Shopify-Access-Token", accessToken );
 
             long locationId = await GetDefaultLocationIdAsync( client, shop );
+            HashSet<string> allKeys = new(
+                deltas.Keys.Union( syncedSalePrices.Keys, StringComparer.OrdinalIgnoreCase ),
+                StringComparer.OrdinalIgnoreCase
+            );
 
-            foreach (KeyValuePair<string, int> item in deltas)
+            foreach (string key in allKeys)
             {
-                long? productId = ParseShopifyNumericProductId( item.Key.Trim() );
+                long? productId = ParseShopifyNumericProductId( key.Trim() );
                 if (!productId.HasValue) continue;
 
-                long inventoryItemId = await GetInventoryItemIdByProductAsync( client, shop, productId.Value );
-                int current = await GetCurrentInventoryAsync( client, shop, inventoryItemId, locationId );
-                int next = Math.Max( 0, current + item.Value );
-                await SetInventoryAsync( client, shop, inventoryItemId, locationId, next );
-                result.Add( new SupplyInventoryUpdateResult
+                int delta = deltas.TryGetValue( key, out int d ) ? d : 0;
+                decimal salePrice = syncedSalePrices.TryGetValue( key, out decimal p ) ? p : 0;
+
+                if (delta != 0)
                 {
-                    ShopifyProductId = item.Key.Trim(),
-                    PreviousAvailable = current,
-                    AddedQuantity = item.Value,
-                    NewAvailable = next
-                } );
+                    long inventoryItemId = await GetInventoryItemIdByProductAsync( client, shop, productId.Value );
+                    int current = await GetCurrentInventoryAsync( client, shop, inventoryItemId, locationId );
+                    int next = Math.Max( 0, current + delta );
+                    await SetInventoryAsync( client, shop, inventoryItemId, locationId, next );
+                    result.Add( new SupplyInventoryUpdateResult
+                    {
+                        ShopifyProductId = key.Trim(),
+                        PreviousAvailable = current,
+                        AddedQuantity = delta,
+                        NewAvailable = next
+                    } );
+                }
+
+                // Update Shopify price only when sale price is explicitly set (> 0).
+                if (salePrice > 0)
+                {
+                    long variantId = await GetPrimaryVariantIdByProductAsync( client, shop, productId.Value );
+                    await SetVariantPriceAsync( client, shop, variantId, salePrice );
+                }
             }
 
             return result;
@@ -280,6 +308,27 @@ namespace backend.Services
                 throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
             }
             return variants[0].GetProperty( "inventory_item_id" ).GetInt64();
+        }
+
+        private async Task<long> GetPrimaryVariantIdByProductAsync( HttpClient client, string shop, long productId )
+        {
+            using HttpResponseMessage response = await client.GetAsync(
+                $"https://{shop}/admin/api/2024-10/products/{productId}.json"
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося атрымаць прадукт {productId} з Shopify: {body}" );
+            }
+
+            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+            JsonElement product = json.RootElement.GetProperty( "product" );
+            JsonElement variants = product.GetProperty( "variants" );
+            if (variants.GetArrayLength() == 0)
+            {
+                throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
+            }
+            return variants[0].GetProperty( "id" ).GetInt64();
         }
 
         private async Task<int> GetCurrentInventoryAsync(
@@ -329,6 +378,35 @@ namespace backend.Services
             {
                 string body = await ReadContentAsync( response );
                 throw new InvalidOperationException( $"Не ўдалося ўсталяваць inventory level: {body}" );
+            }
+        }
+
+        private async Task SetVariantPriceAsync(
+            HttpClient client,
+            string shop,
+            long variantId,
+            decimal salePrice
+        )
+        {
+            string priceString = salePrice.ToString( "0.00", CultureInfo.InvariantCulture );
+            string payload = JsonSerializer.Serialize( new
+            {
+                variant = new
+                {
+                    id = variantId,
+                    price = priceString
+                }
+            } );
+
+            using HttpContent content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
+            using HttpResponseMessage response = await client.PutAsync(
+                $"https://{shop}/admin/api/2024-10/variants/{variantId}.json",
+                content
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося абнавіць цану ў Shopify: {body}" );
             }
         }
     }
