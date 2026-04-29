@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { FiPlus } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchSupplies } from '@/lib/api/supplies';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import type { SupplyListItem } from '@/types/supply';
@@ -176,21 +177,7 @@ export default function SuppliesClient() {
   };
 
   if (loading) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 animate-pulse rounded-lg bg-gray-200/80" />
-          <div className="h-4 w-64 animate-pulse rounded-md bg-gray-100" />
-        </div>
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="divide-y divide-gray-100 p-4">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-12 animate-pulse rounded-md bg-gray-50" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner label="Загрузка паставак..." />;
   }
 
   return (
@@ -256,7 +243,12 @@ export default function SuppliesClient() {
                   className={inputClass}
                 />
               </div>
-              {supplierLoading && <p className="text-sm text-gray-500">Загрузка пастаўшчыкоў...</p>}
+              {supplierLoading && (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <span className="size-4 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                  Загрузка пастаўшчыкоў...
+                </div>
+              )}
               {supplierError && <p className="text-sm text-red-600">{supplierError}</p>}
               {!supplierLoading && !supplierError && supplierOptions.length === 0 && (
                 <p className="text-sm text-gray-500">Спіс пастаўшчыкоў пакуль пусты.</p>

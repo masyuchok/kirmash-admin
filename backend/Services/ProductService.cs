@@ -26,16 +26,87 @@ namespace backend.Services
                 throw new InvalidOperationException( "Няма Shopify-кантэксту для загрузкі прадуктаў." );
             }
 
-            Dictionary<string, HashSet<string>> suppliersByProductId = await _db.SupplyProducts
+            List<SupplyProduct> supplyProducts = await _db.SupplyProducts
                 .AsNoTracking()
                 .Include( sp => sp.Supply )
                 .ThenInclude( s => s.Supplier )
-                .GroupBy( sp => sp.ShopifyProductId )
-                .ToDictionaryAsync(
-                    g => NormalizeFromShopifyGid( g.Key ),
+                .ToListAsync();
+
+            Dictionary<string, HashSet<string>> suppliersByProductId = supplyProducts
+                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
+                .ToDictionary(
+                    g => g.Key,
                     g => g.Select( sp => sp.Supply.Supplier.Name )
-                          .Where( n => !string.IsNullOrWhiteSpace( n ) )
-                          .ToHashSet( StringComparer.OrdinalIgnoreCase )
+                        .Where( n => !string.IsNullOrWhiteSpace( n ) )
+                        .ToHashSet( StringComparer.OrdinalIgnoreCase ),
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            Dictionary<string, List<ProductSupplierPriceItem>> supplierPricesByProductId = supplyProducts
+                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .GroupBy(
+                            sp => new
+                            {
+                                SupplierId = sp.Supply.SupplierId,
+                                SupplierName = sp.Supply.Supplier.Name
+                            }
+                        )
+                        .Select( supplierGroup =>
+                            supplierGroup
+                                .OrderByDescending( sp => sp.Supply.Date )
+                                .ThenByDescending( sp => sp.Supply.Id )
+                                .Select( sp => new ProductSupplierPriceItem
+                                {
+                                    SupplierId = sp.Supply.SupplierId,
+                                    SupplierName = sp.Supply.Supplier.Name,
+                                    SupplierPrice = sp.SupplierPrice,
+                                    SalePrice = sp.SalePrice
+                                } )
+                                .First()
+                        )
+                        .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
+                        .ToList(),
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            Dictionary<string, string> lastSyncedSupplierByProductId = supplyProducts
+                .Where( sp => sp.SyncWithShopify )
+                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .OrderByDescending( sp => sp.Supply.Date )
+                        .ThenByDescending( sp => sp.Supply.Id )
+                        .Select( sp => sp.Supply.Supplier.Name )
+                        .FirstOrDefault() ?? string.Empty,
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            Dictionary<string, List<ProductUnsyncedSupplierItem>> unsyncedSuppliersByProductId = supplyProducts
+                .Where( sp => !sp.SyncWithShopify )
+                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .GroupBy(
+                            sp => new
+                            {
+                                SupplierId = sp.Supply.SupplierId,
+                                SupplierName = sp.Supply.Supplier.Name
+                            }
+                        )
+                        .Select( sg => new ProductUnsyncedSupplierItem
+                        {
+                            SupplierId = sg.Key.SupplierId,
+                            SupplierName = sg.Key.SupplierName,
+                            Quantity = sg.Sum( x => x.Quantity )
+                        } )
+                        .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
+                        .ToList(),
+                    StringComparer.OrdinalIgnoreCase
                 );
 
             Dictionary<string, int> unsyncedQuantityByProductId = await _db.SupplyProducts
@@ -47,7 +118,15 @@ namespace backend.Services
                     g => g.Sum( sp => sp.Quantity )
                 );
 
-            return await FetchShopifyProductsAsync( shop, accessToken, suppliersByProductId, unsyncedQuantityByProductId );
+            return await FetchShopifyProductsAsync(
+                shop,
+                accessToken,
+                suppliersByProductId,
+                supplierPricesByProductId,
+                lastSyncedSupplierByProductId,
+                unsyncedSuppliersByProductId,
+                unsyncedQuantityByProductId
+            );
         }
 
         private static string NormalizeFromShopifyGid( string id )
@@ -62,6 +141,9 @@ namespace backend.Services
             string shop,
             string accessToken,
             Dictionary<string, HashSet<string>> suppliersByProductId,
+            Dictionary<string, List<ProductSupplierPriceItem>> supplierPricesByProductId,
+            Dictionary<string, string> lastSyncedSupplierByProductId,
+            Dictionary<string, List<ProductUnsyncedSupplierItem>> unsyncedSuppliersByProductId,
             Dictionary<string, int> unsyncedQuantityByProductId
         )
         {
@@ -168,6 +250,9 @@ namespace backend.Services
                     List<string> suppliers = (suppliersSet ?? [])
                         .OrderBy( n => n, StringComparer.OrdinalIgnoreCase )
                         .ToList();
+                    supplierPricesByProductId.TryGetValue( productId, out List<ProductSupplierPriceItem>? supplierPrices );
+                    lastSyncedSupplierByProductId.TryGetValue( productId, out string? lastSyncedSupplierName );
+                    unsyncedSuppliersByProductId.TryGetValue( productId, out List<ProductUnsyncedSupplierItem>? unsyncedSuppliers );
                     bool hasSupplyQuantityOverride = unsyncedQuantityByProductId.TryGetValue( productId, out int overrideQuantity );
                     int effectiveQuantity = hasSupplyQuantityOverride ? overrideQuantity : quantityInStock;
 
@@ -181,7 +266,10 @@ namespace backend.Services
                         QuantityInStock = effectiveQuantity,
                         ShopifyQuantityInStock = quantityInStock,
                         HasSupplyQuantityOverride = hasSupplyQuantityOverride,
-                        Suppliers = suppliers
+                        LastSyncedSupplierName = lastSyncedSupplierName ?? string.Empty,
+                        Suppliers = suppliers,
+                        UnsyncedSuppliers = unsyncedSuppliers ?? new List<ProductUnsyncedSupplierItem>(),
+                        SupplierPrices = supplierPrices ?? new List<ProductSupplierPriceItem>()
                     } );
                 }
 
