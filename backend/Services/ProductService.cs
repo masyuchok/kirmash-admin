@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Globalization;
 using backend.Data;
 using backend.Models;
 using Microsoft.EntityFrameworkCore;
@@ -169,7 +170,23 @@ namespace backend.Services
                 throw new InvalidOperationException( "Няма колькасці для сінхранізацыі." );
             }
 
+            decimal salePriceToSync = rowsToSync
+                .OrderByDescending( r => r.Supply.Date )
+                .ThenByDescending( r => r.Supply.Id )
+                .Select( r => r.SalePrice )
+                .FirstOrDefault();
+
+            if (salePriceToSync < 0)
+            {
+                throw new InvalidOperationException( "Цана продажу не можа быць адмоўнай." );
+            }
+
             (int previous, int next) = await ApplySingleInventoryDeltaToShopifyAsync( shop, accessToken, normalizedId, delta );
+            // Update Shopify price only when sale price is explicitly set (> 0).
+            if (salePriceToSync > 0)
+            {
+                await UpdateProductPriceInShopifyAsync( shop, accessToken, normalizedId, salePriceToSync );
+            }
 
             foreach (SupplyProduct row in rowsToSync)
             {
@@ -383,6 +400,45 @@ namespace backend.Services
             return (current, next);
         }
 
+        private async Task UpdateProductPriceInShopifyAsync(
+            string shop,
+            string accessToken,
+            string shopifyProductId,
+            decimal salePrice
+        )
+        {
+            using HttpClient client = new();
+            client.DefaultRequestHeaders.Add( "X-Shopify-Access-Token", accessToken );
+
+            long? productId = ParseShopifyNumericProductId( shopifyProductId );
+            if (!productId.HasValue)
+            {
+                throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
+            }
+
+            long variantId = await GetPrimaryVariantIdByProductAsync( client, shop, productId.Value );
+            string priceString = salePrice.ToString( "0.00", CultureInfo.InvariantCulture );
+            string payload = JsonSerializer.Serialize( new
+            {
+                variant = new
+                {
+                    id = variantId,
+                    price = priceString
+                }
+            } );
+
+            using HttpContent content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
+            using HttpResponseMessage response = await client.PutAsync(
+                $"https://{shop}/admin/api/2024-10/variants/{variantId}.json",
+                content
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося абнавіць цану ў Shopify: {body}" );
+            }
+        }
+
         private async Task<long> GetDefaultLocationIdAsync( HttpClient client, string shop )
         {
             using HttpResponseMessage response = await client.GetAsync(
@@ -422,6 +478,27 @@ namespace backend.Services
                 throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
             }
             return variants[0].GetProperty( "inventory_item_id" ).GetInt64();
+        }
+
+        private async Task<long> GetPrimaryVariantIdByProductAsync( HttpClient client, string shop, long productId )
+        {
+            using HttpResponseMessage response = await client.GetAsync(
+                $"https://{shop}/admin/api/2024-10/products/{productId}.json"
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося атрымаць прадукт {productId} з Shopify: {body}" );
+            }
+
+            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+            JsonElement product = json.RootElement.GetProperty( "product" );
+            JsonElement variants = product.GetProperty( "variants" );
+            if (variants.GetArrayLength() == 0)
+            {
+                throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
+            }
+            return variants[0].GetProperty( "id" ).GetInt64();
         }
 
         private async Task<int> GetCurrentInventoryAsync(
