@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FiArrowLeft } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchSupplierById, updateSupplier } from '@/lib/api/suppliers';
 import SupplierFormFields from './SupplierFormFields';
 import {
@@ -121,9 +122,10 @@ export default function EditSupplierClient({ supplierId }: Props) {
 
   if (loading) {
     return (
-      <div className="mx-auto w-full max-w-3xl space-y-4 rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-        <p className="text-sm text-gray-500">Загрузка...</p>
-      </div>
+      <LoadingSpinner
+        label="Загрузка дадзеных пастаўшчыка..."
+        className="mx-auto w-full max-w-3xl rounded-xl border border-gray-200 bg-white py-16 shadow-sm"
+      />
     );
   }
 

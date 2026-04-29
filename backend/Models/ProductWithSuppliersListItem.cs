@@ -1,5 +1,20 @@
 namespace backend.Models
 {
+    public class ProductSupplierPriceItem
+    {
+        public int SupplierId { get; set; }
+        public string SupplierName { get; set; } = string.Empty;
+        public decimal SupplierPrice { get; set; }
+        public decimal SalePrice { get; set; }
+    }
+
+    public class ProductUnsyncedSupplierItem
+    {
+        public int SupplierId { get; set; }
+        public string SupplierName { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+    }
+
     public class ProductWithSuppliersListItem
     {
         public string ShopifyProductId { get; set; } = string.Empty;
@@ -10,6 +25,9 @@ namespace backend.Models
         public int QuantityInStock { get; set; }
         public int ShopifyQuantityInStock { get; set; }
         public bool HasSupplyQuantityOverride { get; set; }
+        public string LastSyncedSupplierName { get; set; } = string.Empty;
         public List<string> Suppliers { get; set; } = new();
+        public List<ProductUnsyncedSupplierItem> UnsyncedSuppliers { get; set; } = new();
+        public List<ProductSupplierPriceItem> SupplierPrices { get; set; } = new();
     }
 }

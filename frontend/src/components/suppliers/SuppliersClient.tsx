@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { Supplier } from '@/types/supplier';
 import { FiPlus, FiPackage, FiFileText } from 'react-icons/fi';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
@@ -105,25 +106,7 @@ const SuppliersClient = () => {
   }, []);
 
   if (loading) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-56 animate-pulse rounded-lg bg-gray-200/80" />
-          <div className="h-4 w-72 animate-pulse rounded-md bg-gray-100" />
-        </div>
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-100 p-5">
-            <div className="mb-2 h-3 w-32 animate-pulse rounded bg-gray-100" />
-            <div className="h-10 w-full max-w-xl animate-pulse rounded-lg bg-gray-100" />
-          </div>
-          <div className="space-y-0 divide-y divide-gray-100 p-4">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="h-12 animate-pulse rounded-md bg-gray-50" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner label="Загрузка пастаўшчыкоў..." />;
   }
 
   switch (mode) {

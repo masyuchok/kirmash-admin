@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import type { ProductWithSuppliers } from '@/types/product';
 
@@ -40,27 +41,20 @@ export default function ProductsClient() {
       const list: ProductTableRow[] = [];
       list.push({
         ...row,
-        supplierName: 'Shopify',
+        supplierName: row.lastSyncedSupplierName.trim() || '—',
         quantityInStock: row.shopifyQuantityInStock,
         rowSource: 'shopify',
         rowKey: `${row.shopifyProductId}::shopify`,
       });
 
-      const suppliers = row.suppliers;
-      for (const supplierName of suppliers) {
+      for (const unsynced of row.unsyncedSuppliers) {
         list.push({
           ...row,
           rowSource: 'supply',
-          rowKey: `${row.shopifyProductId}::supply::${supplierName}`,
-          supplierName,
+          rowKey: `${row.shopifyProductId}::supply::${unsynced.supplierId}`,
+          supplierName: unsynced.supplierName || '—',
+          quantityInStock: unsynced.quantity,
         });
-      }
-
-      if (suppliers.length === 0) {
-        list[0] = {
-          ...list[0],
-          supplierName: '—',
-        };
       }
 
       return list.map((item) => ({
@@ -109,9 +103,7 @@ export default function ProductsClient() {
       syncFilter === 'all'
         ? filteredByType
         : filteredByType.filter((row) =>
-            syncFilter === 'supply'
-              ? row.rowSource === 'supply' && row.hasSupplyQuantityOverride
-              : row.rowSource === 'shopify' || !row.hasSupplyQuantityOverride
+            syncFilter === 'supply' ? row.rowSource === 'supply' : row.rowSource === 'shopify'
           );
 
     return [...filteredBySyncFlag].sort((a, b) =>
@@ -290,17 +282,7 @@ export default function ProductsClient() {
   }, []);
 
   if (loading) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-6">
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="divide-y divide-gray-100 p-4">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="h-12 animate-pulse rounded-md bg-gray-50" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+    return <LoadingSpinner label="Загрузка прадуктаў..." />;
   }
 
   return (
@@ -355,8 +337,8 @@ export default function ProductsClient() {
                 className="rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
               >
                 <option value="all">Усе</option>
-                <option value="supply">З пастаўкі (без Shopify sync)</option>
-                <option value="shopify">Shopify sync</option>
+                <option value="shopify">Толькі Shopify</option>
+                <option value="supply">Толькі не сінхранізаваныя</option>
               </select>
             </label>
             <div
@@ -398,6 +380,7 @@ export default function ProductsClient() {
                       <span aria-hidden>{quantitySortDirection === 'asc' ? '↑' : '↓'}</span>
                     </button>
                   </th>
+                  <th className="whitespace-nowrap px-6 py-3.5 text-right">У Shopify</th>
                   <th className="whitespace-nowrap px-6 py-3.5">
                     <div className="inline-flex items-center gap-1">
                       <span>Пастаўшчыкі</span>
@@ -474,6 +457,9 @@ export default function ProductsClient() {
                           <span className="text-gray-700">{row.quantityInStock}</span>
                         )}
                       </div>
+                    </td>
+                    <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums text-gray-700">
+                      {row.shopifyQuantityInStock}
                     </td>
                     <td className="px-6 py-3.5 text-gray-700">
                       {row.supplierName}

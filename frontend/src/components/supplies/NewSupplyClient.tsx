@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FiPlus, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
@@ -70,11 +71,13 @@ export default function NewSupplyClient({
   const [currentDate, setCurrentDate] = useState(initialDate);
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
   const [selectedProducts, setSelectedProducts] = useState<ProductWithSuppliers[]>([]);
+  const [productCatalog, setProductCatalog] = useState<ProductWithSuppliers[]>([]);
   const [productDrafts, setProductDrafts] = useState<SupplyProductDraft[]>([]);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
 
   useEffect(() => {
     setTopbarPage({ title: supplyId ? `Пастаўка #${supplyId}` : 'Новая пастаўка' });
@@ -137,11 +140,16 @@ export default function NewSupplyClient({
   }, []);
 
   useEffect(() => {
-    if (!supplyId) return;
+    if (!supplyId) {
+      setInitialLoading(false);
+      return;
+    }
     let cancelled = false;
+    setInitialLoading(true);
     Promise.all([fetchSupplyById(Number(supplyId)), fetchProductsWithSuppliers()])
       .then(([supply, products]) => {
         if (cancelled) return;
+        setProductCatalog(products);
         setCurrentSupplierId(String(supply.supplierId || ''));
         setCurrentSupplierName(supply.supplierName || '');
         setCurrentDate(supply.date || '');
@@ -174,6 +182,9 @@ export default function NewSupplyClient({
         if (!cancelled) {
           setSaveError(err instanceof Error ? err.message : 'Не ўдалося загрузіць пастаўку');
         }
+      })
+      .finally(() => {
+        if (!cancelled) setInitialLoading(false);
       });
     return () => {
       cancelled = true;
@@ -188,6 +199,7 @@ export default function NewSupplyClient({
     fetchProductsWithSuppliers()
       .then((rows) => {
         if (cancelled) return;
+        setProductCatalog(rows);
         const selected = rows.filter((p) => selectedProductIds.includes(p.shopifyProductId));
         setSelectedProducts(selected);
       })
@@ -377,6 +389,7 @@ export default function NewSupplyClient({
     setSaveOk(null);
     try {
       const products = await fetchProductsWithSuppliers();
+      setProductCatalog(products);
       const productMap = new Map(products.map((p) => [p.shopifyProductId, p]));
 
       setProductDrafts((prev) =>
@@ -412,6 +425,17 @@ export default function NewSupplyClient({
     return match?.name ?? `ID: ${currentSupplierId}`;
   }, [currentSupplierId, currentSupplierName, suppliers]);
 
+  const productMetaMap = useMemo(
+    () => new Map(productCatalog.map((p) => [p.shopifyProductId, p])),
+    [productCatalog]
+  );
+
+  const currentSupplierIdNum = Number(currentSupplierId);
+
+  const formatMoney = (value: number): string => {
+    return Number.isFinite(value) ? value.toFixed(2) : '0.00';
+  };
+
   if (!currentDate || (!currentSupplierId && !currentSupplierName.trim())) {
     return (
       <div className="mx-auto w-full max-w-6xl rounded-xl border border-gray-200 bg-white px-6 py-8 shadow-sm">
@@ -421,6 +445,10 @@ export default function NewSupplyClient({
         </Link>
       </div>
     );
+  }
+
+  if (initialLoading) {
+    return <LoadingSpinner label="Загрузка пастаўкі..." />;
   }
 
   return (
@@ -437,16 +465,28 @@ export default function NewSupplyClient({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
           >
+            {saving && (
+              <span
+                className="size-4 animate-spin rounded-full border-2 border-white/35 border-t-white"
+                aria-hidden
+              />
+            )}
             {saving ? 'Захоўваю...' : 'Захаваць змены'}
           </button>
           <button
             type="button"
             onClick={refreshFromShopify}
             disabled={refreshing || productDrafts.length === 0}
-            className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
           >
+            {refreshing && (
+              <span
+                className="size-4 animate-spin rounded-full border-2 border-primary/30 border-t-primary"
+                aria-hidden
+              />
+            )}
             {refreshing ? 'Абнаўляю...' : 'Абнавіць з Shopify'}
           </button>
           {saveOk && <p className="text-sm text-emerald-700">{saveOk}</p>}
@@ -477,9 +517,52 @@ export default function NewSupplyClient({
                   </td>
                 </tr>
               ) : (
-                productDrafts.map((row) => (
-                  <tr key={row.productId} className="border-b border-gray-100 last:border-b-0">
-                    <td className="px-6 py-3.5 text-gray-900">{row.productName}</td>
+                productDrafts.map((row) => {
+                  const meta = productMetaMap.get(row.productId);
+                  const hasCurrentSupplierName = supplierName.trim().length > 0;
+                  const otherSupplierPrices = (meta?.supplierPrices ?? []).filter((price) => {
+                    if (Number.isFinite(currentSupplierIdNum) && currentSupplierIdNum > 0) {
+                      return price.supplierId !== currentSupplierIdNum;
+                    }
+                    if (hasCurrentSupplierName) {
+                      return price.supplierName.toLowerCase() !== supplierName.trim().toLowerCase();
+                    }
+                    return true;
+                  });
+                  const hasOtherSupplierStock = otherSupplierPrices.length > 0;
+
+                  return (
+                  <tr
+                    key={row.productId}
+                    className={`border-b border-gray-100 last:border-b-0 ${
+                      hasOtherSupplierStock ? 'bg-purple-100/80' : ''
+                    }`}
+                  >
+                    <td className="px-6 py-3.5 text-gray-900">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          {hasOtherSupplierStock && (
+                            <span className="inline-flex rounded-full bg-purple-700 px-2 py-0.5 text-[11px] font-semibold text-white">
+                              Іншы пастаўшчык
+                            </span>
+                          )}
+                          <p>{row.productName}</p>
+                        </div>
+                        {hasOtherSupplierStock && (
+                          <div className="rounded-md border border-purple-300 bg-purple-100 px-2.5 py-1.5 text-xs text-purple-950">
+                            <p className="font-medium">Ёсць у іншых пастаўшчыкоў:</p>
+                            <ul className="mt-1 space-y-0.5">
+                              {otherSupplierPrices.map((price) => (
+                                <li key={`${row.productId}:${price.supplierId}`}>
+                                  {price.supplierName}: закуп. {formatMoney(price.supplierPrice)} / продаж{' '}
+                                  {formatMoney(price.salePrice)}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-3.5">
                       <input
                         type="number"
@@ -550,7 +633,7 @@ export default function NewSupplyClient({
                       </button>
                     </td>
                   </tr>
-                ))
+                )})
               )}
             </tbody>
           </table>

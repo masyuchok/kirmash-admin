@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import type { ProductWithSuppliers } from '@/types/product';
 
@@ -223,11 +224,11 @@ export default function SupplyProductPickerClient({
         </div>
 
         {loading ? (
-          <div className="p-4">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="mb-2 h-12 animate-pulse rounded-md bg-gray-50" />
-            ))}
-          </div>
+          <LoadingSpinner
+            label="Загрузка тавараў..."
+            className="mx-4 my-4 rounded-xl border border-gray-100 bg-gray-50/50 py-12"
+            sizeClassName="size-7 border-[3px]"
+          />
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse text-left text-sm">
@@ -264,7 +265,7 @@ export default function SupplyProductPickerClient({
                         </a>
                       </div>
                     </td>
-                    <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.quantityInStock}</td>
+                    <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.shopifyQuantityInStock}</td>
                   </tr>
                 ))}
               </tbody>
