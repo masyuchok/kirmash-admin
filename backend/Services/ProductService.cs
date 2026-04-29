@@ -241,6 +241,19 @@ namespace backend.Services
                         title
                         productType
                         totalInventory
+                        variants(first: 100) {
+                          edges {
+                            node {
+                              id
+                              title
+                              inventoryQuantity
+                              selectedOptions {
+                                name
+                                value
+                              }
+                            }
+                          }
+                        }
                         featuredImage {
                           url
                         }
@@ -286,6 +299,7 @@ namespace backend.Services
                                          productTypeEl.ValueKind == JsonValueKind.String
                         ? (productTypeEl.GetString() ?? string.Empty)
                         : string.Empty;
+                    List<ProductVariantItem> variants = new();
                     string? mainImageUrl = null;
                     int quantityInStock = 0;
                     string productId = "";
@@ -301,6 +315,73 @@ namespace backend.Services
                         imageUrlEl.ValueKind == JsonValueKind.String)
                     {
                         mainImageUrl = imageUrlEl.GetString();
+                    }
+                    if (node.TryGetProperty( "variants", out JsonElement variantsEl ) &&
+                        variantsEl.ValueKind == JsonValueKind.Object &&
+                        variantsEl.TryGetProperty( "edges", out JsonElement variantEdgesEl ) &&
+                        variantEdgesEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement edgeEl in variantEdgesEl.EnumerateArray())
+                        {
+                            if (!edgeEl.TryGetProperty( "node", out JsonElement variantNode ) ||
+                                variantNode.ValueKind != JsonValueKind.Object)
+                            {
+                                continue;
+                            }
+
+                            string variantId = variantNode.TryGetProperty( "id", out JsonElement variantIdEl ) &&
+                                               variantIdEl.ValueKind == JsonValueKind.String
+                                ? NormalizeFromShopifyGid( variantIdEl.GetString() ?? string.Empty )
+                                : string.Empty;
+                            string variantName = variantNode.TryGetProperty( "title", out JsonElement variantTitleEl ) &&
+                                                 variantTitleEl.ValueKind == JsonValueKind.String
+                                ? (variantTitleEl.GetString() ?? string.Empty)
+                                : string.Empty;
+                            int variantQuantity = variantNode.TryGetProperty( "inventoryQuantity", out JsonElement variantQtyEl ) &&
+                                                  variantQtyEl.ValueKind == JsonValueKind.Number &&
+                                                  variantQtyEl.TryGetInt32( out int parsedVariantQty )
+                                ? parsedVariantQty
+                                : 0;
+                            if ((string.IsNullOrWhiteSpace( variantName ) || variantName == "Default Title") &&
+                                variantNode.TryGetProperty( "selectedOptions", out JsonElement selectedOptionsEl ) &&
+                                selectedOptionsEl.ValueKind == JsonValueKind.Array)
+                            {
+                                List<string> optionValues = new();
+                                foreach (JsonElement opt in selectedOptionsEl.EnumerateArray())
+                                {
+                                    if (opt.TryGetProperty( "value", out JsonElement valEl ) &&
+                                        valEl.ValueKind == JsonValueKind.String)
+                                    {
+                                        string val = valEl.GetString() ?? string.Empty;
+                                        if (!string.IsNullOrWhiteSpace( val ) &&
+                                            !string.Equals( val, "Default Title", StringComparison.OrdinalIgnoreCase ))
+                                        {
+                                            optionValues.Add( val );
+                                        }
+                                    }
+                                }
+                                if (optionValues.Count > 0)
+                                {
+                                    variantName = string.Join( " / ", optionValues );
+                                }
+                            }
+                            if (string.IsNullOrWhiteSpace( variantName ) ||
+                                string.Equals( variantName, "Default Title", StringComparison.OrdinalIgnoreCase ))
+                            {
+                                continue;
+                            }
+                            variants.Add( new ProductVariantItem
+                            {
+                                VariantId = variantId,
+                                VariantName = variantName,
+                                QuantityInStock = variantQuantity
+                            } );
+                        }
+                    }
+
+                    if (variants.Count > 0)
+                    {
+                        quantityInStock = variants.Sum( v => v.QuantityInStock );
                     }
 
                     if (node.TryGetProperty( "legacyResourceId", out JsonElement legacyIdEl ) &&
@@ -344,6 +425,7 @@ namespace backend.Services
                         LastSyncedSupplierName = lastSyncedSupplierName ?? string.Empty,
                         Suppliers = suppliers,
                         UnsyncedSuppliers = unsyncedSuppliers ?? new List<ProductUnsyncedSupplierItem>(),
+                        Variants = variants,
                         SupplierPrices = supplierPrices ?? new List<ProductSupplierPriceItem>()
                     } );
                 }

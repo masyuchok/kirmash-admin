@@ -11,6 +11,12 @@ export type ProductUnsyncedSupplier = {
   quantity: number;
 };
 
+export type ProductVariant = {
+  variantId: string;
+  variantName: string;
+  quantityInStock: number;
+};
+
 export type ProductWithSuppliers = {
   shopifyProductId: string;
   productName: string;
@@ -23,5 +29,6 @@ export type ProductWithSuppliers = {
   lastSyncedSupplierName: string;
   suppliers: string[];
   unsyncedSuppliers: ProductUnsyncedSupplier[];
+  variants: ProductVariant[];
   supplierPrices: ProductSupplierPrice[];
 };

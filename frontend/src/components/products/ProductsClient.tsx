@@ -13,7 +13,11 @@ type ProductTableRow = ProductWithSuppliers & {
   supplierName: string;
   rowKey: string;
   rowSource: 'shopify' | 'supply';
+  isVariantChild: boolean;
+  variantName: string;
 };
+
+const isDefaultVariantTitle = (name: string) => name.trim().toLowerCase() === 'default title';
 
 export default function ProductsClient() {
   const pageSize = 50;
@@ -35,6 +39,7 @@ export default function ProductsClient() {
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
   const [syncingRowKey, setSyncingRowKey] = useState<string | null>(null);
   const [recentSyncedQty, setRecentSyncedQty] = useState<Record<string, number>>({});
+  const [collapsedProducts, setCollapsedProducts] = useState<Record<string, boolean>>({});
   const supplierTriggerRef = useRef<HTMLButtonElement | null>(null);
   const typeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
@@ -50,6 +55,8 @@ export default function ProductsClient() {
         quantityInStock: row.shopifyQuantityInStock,
         rowSource: 'shopify',
         rowKey: `${row.shopifyProductId}::shopify`,
+        isVariantChild: false,
+        variantName: '',
       });
 
       for (const unsynced of row.unsyncedSuppliers) {
@@ -60,18 +67,40 @@ export default function ProductsClient() {
           rowKey: `${row.shopifyProductId}::supply::${unsynced.supplierId}`,
           supplierName: unsynced.supplierName || '—',
           quantityInStock: unsynced.quantity,
+          isVariantChild: false,
+          variantName: '',
         });
       }
+      const expanded: ProductTableRow[] = [];
+      for (const item of list) {
+        const baseRow: ProductTableRow = {
+          ...item,
+          ...row,
+          quantityInStock: item.quantityInStock,
+          supplierId: item.supplierId,
+          supplierName: item.supplierName,
+          rowSource: item.rowSource,
+          rowKey: item.rowKey,
+          isVariantChild: false,
+          variantName: '',
+        };
+        expanded.push(baseRow);
 
-      return list.map((item) => ({
-        ...item,
-        ...row,
-        quantityInStock: item.quantityInStock,
-        supplierId: item.supplierId,
-        supplierName: item.supplierName,
-        rowSource: item.rowSource,
-        rowKey: item.rowKey,
-      }));
+        for (const variant of row.variants) {
+          const name = variant.variantName.trim();
+          if (!name || isDefaultVariantTitle(name)) continue;
+          expanded.push({
+            ...baseRow,
+            isVariantChild: true,
+            variantName: name,
+            quantityInStock: variant.quantityInStock,
+            shopifyQuantityInStock: variant.quantityInStock,
+            rowKey: `${baseRow.rowKey}::variant::${variant.variantId || name}`,
+          });
+        }
+      }
+
+      return expanded;
     });
   }, [rows]);
 
@@ -99,7 +128,10 @@ export default function ProductsClient() {
     const filtered =
       q.length === 0
         ? filteredBySupplier
-        : filteredBySupplier.filter((row) => row.productName.toLowerCase().includes(q));
+        : filteredBySupplier.filter(
+            (row) =>
+              row.productName.toLowerCase().includes(q) || row.variantName.toLowerCase().includes(q)
+          );
 
     const filteredByType =
       selectedProductTypes.length === 0
@@ -113,12 +145,45 @@ export default function ProductsClient() {
             syncFilter === 'supply' ? row.rowSource === 'supply' : row.rowSource === 'shopify'
           );
 
-    return [...filteredBySyncFlag].sort((a, b) =>
+    const visibleByCollapse = filteredBySyncFlag.filter(
+      (row) => !row.isVariantChild || !collapsedProducts[row.shopifyProductId]
+    );
+
+    const parentRows = visibleByCollapse.filter((row) => !row.isVariantChild);
+    const childRowsByParentKey = new Map<string, ProductTableRow[]>();
+    for (const row of visibleByCollapse) {
+      if (!row.isVariantChild) continue;
+      const parentKey = row.rowKey.split('::variant::')[0];
+      const list = childRowsByParentKey.get(parentKey) ?? [];
+      list.push(row);
+      childRowsByParentKey.set(parentKey, list);
+    }
+
+    const sortedParents = [...parentRows].sort((a, b) =>
       quantitySortDirection === 'asc'
         ? a.quantityInStock - b.quantityInStock
         : b.quantityInStock - a.quantityInStock
     );
-  }, [displayRows, selectedSuppliers, searchQuery, selectedProductTypes, syncFilter, quantitySortDirection]);
+
+    const treeOrdered: ProductTableRow[] = [];
+    for (const parent of sortedParents) {
+      treeOrdered.push(parent);
+      const children = childRowsByParentKey.get(parent.rowKey);
+      if (children && children.length > 0) {
+        treeOrdered.push(...children);
+      }
+    }
+
+    return treeOrdered;
+  }, [
+    displayRows,
+    selectedSuppliers,
+    searchQuery,
+    selectedProductTypes,
+    syncFilter,
+    quantitySortDirection,
+    collapsedProducts,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
   const pagedRows = useMemo(() => {
@@ -347,6 +412,10 @@ export default function ProductsClient() {
     }
   };
 
+  const toggleCollapsed = (productId: string) => {
+    setCollapsedProducts((prev) => ({ ...prev, [productId]: !prev[productId] }));
+  };
+
   if (loading) {
     return <LoadingSpinner label="Загрузка прадуктаў..." />;
   }
@@ -476,11 +545,42 @@ export default function ProductsClient() {
                     className={`transition hover:bg-gray-50/80 ${
                       row.rowSource === 'supply' && row.hasSupplyQuantityOverride
                         ? 'bg-amber-50/70'
-                        : ''
+                        : row.isVariantChild
+                          ? 'bg-gray-50/40'
+                          : ''
                     }`}
                   >
-                    <td className="px-6 py-3.5 font-medium text-gray-900">
-                      <div className="flex items-center gap-3">
+                    <td className={`py-3.5 font-medium text-gray-900 ${row.isVariantChild ? 'pl-12 pr-6' : 'px-6'}`}>
+                      <div className={`flex items-start gap-3 ${row.isVariantChild ? 'ml-5' : ''}`}>
+                        {!row.isVariantChild &&
+                          row.variants.some((variant) => {
+                            const name = variant.variantName.trim();
+                            return name.length > 0 && !isDefaultVariantTitle(name);
+                          }) && (
+                          <button
+                            type="button"
+                            onClick={() => toggleCollapsed(row.shopifyProductId)}
+                            className="mt-0.5 inline-flex size-5 items-center justify-center rounded border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
+                            aria-label={
+                              collapsedProducts[row.shopifyProductId]
+                                ? 'Разгарнуць варыянты'
+                                : 'Згарнуць варыянты'
+                            }
+                            title={
+                              collapsedProducts[row.shopifyProductId]
+                                ? 'Разгарнуць варыянты'
+                                : 'Згарнуць варыянты'
+                            }
+                          >
+                            <span aria-hidden>{collapsedProducts[row.shopifyProductId] ? '▸' : '▾'}</span>
+                          </button>
+                        )}
+                        {row.isVariantChild && (
+                          <span className="mt-0.5 inline-flex items-center gap-1 text-gray-400" aria-hidden>
+                            <span className="h-5 w-px bg-gray-300" />
+                            <span className="w-5 border-t border-gray-300" />
+                          </span>
+                        )}
                         {row.mainImageUrl ? (
                           <a
                             href={row.mainImageUrl}
@@ -499,19 +599,21 @@ export default function ProductsClient() {
                         ) : (
                           <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
                         )}
-                        {row.productAdminUrl ? (
-                          <a
-                            href={row.productAdminUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 hover:underline"
-                          >
-                            {row.productName}
-                            <FiExternalLink className="size-3.5 text-gray-500" aria-hidden />
-                          </a>
-                        ) : (
-                          <span>{row.productName}</span>
-                        )}
+                        <div className="space-y-1">
+                          {row.productAdminUrl ? (
+                            <a
+                              href={row.productAdminUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 hover:underline"
+                            >
+                              {row.isVariantChild ? row.variantName : row.productName}
+                              <FiExternalLink className="size-3.5 text-gray-500" aria-hidden />
+                            </a>
+                          ) : (
+                            <span>{row.isVariantChild ? row.variantName : row.productName}</span>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums">

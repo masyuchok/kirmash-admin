@@ -251,7 +251,7 @@ export default function SupplyProductPickerClient({
                       />
                     </td>
                     <td className="px-6 py-3.5 font-medium text-gray-900">
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-start gap-3">
                         {row.mainImageUrl ? (
                           <a href={row.mainImageUrl} target="_blank" rel="noopener noreferrer">
                             <img src={row.mainImageUrl} alt={row.productName} className="size-8 rounded-md border border-gray-200 object-cover" />
@@ -259,10 +259,19 @@ export default function SupplyProductPickerClient({
                         ) : (
                           <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
                         )}
-                        <a href={row.productAdminUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline">
-                          {row.productName}
-                          <FiExternalLink className="size-3.5 text-gray-500" />
-                        </a>
+                        <div className="space-y-1">
+                          <a href={row.productAdminUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline">
+                            {row.productName}
+                            <FiExternalLink className="size-3.5 text-gray-500" />
+                          </a>
+                          {row.variants.length > 0 && (
+                            <div className="space-y-0.5 text-xs font-normal text-gray-500">
+                              {row.variants.map((variant) => (
+                                <p key={variant.variantId || variant.variantName}>- {variant.variantName}</p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.shopifyQuantityInStock}</td>

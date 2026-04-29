@@ -15,6 +15,13 @@ namespace backend.Models
         public int Quantity { get; set; }
     }
 
+    public class ProductVariantItem
+    {
+        public string VariantId { get; set; } = string.Empty;
+        public string VariantName { get; set; } = string.Empty;
+        public int QuantityInStock { get; set; }
+    }
+
     public class ProductWithSuppliersListItem
     {
         public string ShopifyProductId { get; set; } = string.Empty;
@@ -28,6 +35,7 @@ namespace backend.Models
         public string LastSyncedSupplierName { get; set; } = string.Empty;
         public List<string> Suppliers { get; set; } = new();
         public List<ProductUnsyncedSupplierItem> UnsyncedSuppliers { get; set; } = new();
+        public List<ProductVariantItem> Variants { get; set; } = new();
         public List<ProductSupplierPriceItem> SupplierPrices { get; set; } = new();
     }
 }

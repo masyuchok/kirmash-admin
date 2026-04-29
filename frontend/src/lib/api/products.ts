@@ -69,6 +69,17 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
           };
         })
       : [];
+    const variantsRaw = r.variants ?? r.Variants;
+    const variants = Array.isArray(variantsRaw)
+      ? variantsRaw.map((item) => {
+          const v = item as Record<string, unknown>;
+          return {
+            variantId: readString(v.variantId ?? v.VariantId),
+            variantName: readString(v.variantName ?? v.VariantName),
+            quantityInStock: readInt(v.quantityInStock ?? v.QuantityInStock),
+          };
+        })
+      : [];
 
     return {
       shopifyProductId: readString(r.shopifyProductId ?? r.ShopifyProductId),
@@ -84,6 +95,7 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
       lastSyncedSupplierName: readString(r.lastSyncedSupplierName ?? r.LastSyncedSupplierName),
       suppliers,
       unsyncedSuppliers,
+      variants,
       supplierPrices,
     };
   });
