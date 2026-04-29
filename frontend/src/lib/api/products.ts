@@ -23,10 +23,12 @@ function readNumber(v: unknown): number {
   return 0;
 }
 
-export async function fetchProductsWithSuppliers(): Promise<ProductWithSuppliers[]> {
-  const res = await fetch(`${getApiBaseUrl()}/Products`, {
+export async function fetchProductsWithSuppliers(forceFresh = false): Promise<ProductWithSuppliers[]> {
+  const suffix = forceFresh ? `?_=${Date.now()}` : '';
+  const res = await fetch(`${getApiBaseUrl()}/Products${suffix}`, {
     method: 'GET',
     credentials: apiCredentials,
+    cache: 'no-store',
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося загрузіць прадукты');
@@ -85,4 +87,30 @@ export async function fetchProductsWithSuppliers(): Promise<ProductWithSuppliers
       supplierPrices,
     };
   });
+}
+
+export async function syncUnsyncedProductRow(
+  shopifyProductId: string,
+  supplierId: number
+): Promise<{ syncedQuantity: number; previousAvailable: number; newAvailable: number }> {
+  const res = await fetch(`${getApiBaseUrl()}/Products/sync-unsynced`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({ shopifyProductId, supplierId }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося сінхранізаваць радок з Shopify');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as {
+    syncedQuantity?: number;
+    previousAvailable?: number;
+    newAvailable?: number;
+  };
+  return {
+    syncedQuantity: typeof data.syncedQuantity === 'number' ? data.syncedQuantity : 0,
+    previousAvailable: typeof data.previousAvailable === 'number' ? data.previousAvailable : 0,
+    newAvailable: typeof data.newAvailable === 'number' ? data.newAvailable : 0,
+  };
 }
