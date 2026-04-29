@@ -5,10 +5,11 @@ import { createPortal } from 'react-dom';
 import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import { fetchProductsWithSuppliers } from '@/lib/api/products';
+import { fetchProductsWithSuppliers, syncUnsyncedProductRow } from '@/lib/api/products';
 import type { ProductWithSuppliers } from '@/types/product';
 
 type ProductTableRow = ProductWithSuppliers & {
+  supplierId: number | null;
   supplierName: string;
   rowKey: string;
   rowSource: 'shopify' | 'supply';
@@ -20,6 +21,7 @@ export default function ProductsClient() {
   const [rows, setRows] = useState<ProductWithSuppliers[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProductTypes, setSelectedProductTypes] = useState<string[]>([]);
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
@@ -31,6 +33,8 @@ export default function ProductsClient() {
   const [menuMounted, setMenuMounted] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
+  const [syncingRowKey, setSyncingRowKey] = useState<string | null>(null);
+  const [recentSyncedQty, setRecentSyncedQty] = useState<Record<string, number>>({});
   const supplierTriggerRef = useRef<HTMLButtonElement | null>(null);
   const typeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
@@ -41,6 +45,7 @@ export default function ProductsClient() {
       const list: ProductTableRow[] = [];
       list.push({
         ...row,
+        supplierId: null,
         supplierName: row.lastSyncedSupplierName.trim() || '—',
         quantityInStock: row.shopifyQuantityInStock,
         rowSource: 'shopify',
@@ -50,6 +55,7 @@ export default function ProductsClient() {
       for (const unsynced of row.unsyncedSuppliers) {
         list.push({
           ...row,
+          supplierId: unsynced.supplierId,
           rowSource: 'supply',
           rowKey: `${row.shopifyProductId}::supply::${unsynced.supplierId}`,
           supplierName: unsynced.supplierName || '—',
@@ -61,6 +67,7 @@ export default function ProductsClient() {
         ...item,
         ...row,
         quantityInStock: item.quantityInStock,
+        supplierId: item.supplierId,
         supplierName: item.supplierName,
         rowSource: item.rowSource,
         rowKey: item.rowKey,
@@ -281,6 +288,65 @@ export default function ProductsClient() {
     };
   }, []);
 
+  const reloadProducts = async (expectedQtyByProductId?: Record<string, number>) => {
+    const data = await fetchProductsWithSuppliers(true);
+    if (!expectedQtyByProductId || Object.keys(expectedQtyByProductId).length === 0) {
+      setRows(data);
+      return;
+    }
+
+    setRows(
+      data.map((item) => {
+        const expected = expectedQtyByProductId[item.shopifyProductId];
+        if (typeof expected !== 'number') return item;
+        // Shopify totalInventory can lag briefly after write; keep freshest known value in UI.
+        if (item.shopifyQuantityInStock >= expected) return item;
+        return {
+          ...item,
+          shopifyQuantityInStock: expected,
+          quantityInStock: item.unsyncedSuppliers.length > 0 ? item.quantityInStock : expected,
+        };
+      })
+    );
+  };
+
+  const handleSyncRow = async (row: ProductTableRow) => {
+    if (row.rowSource !== 'supply' || !row.supplierId) return;
+    setSyncingRowKey(row.rowKey);
+    setError(null);
+    setSuccess(null);
+    try {
+      const result = await syncUnsyncedProductRow(row.shopifyProductId, row.supplierId);
+      const nextRecent = { ...recentSyncedQty, [row.shopifyProductId]: result.newAvailable };
+      setRecentSyncedQty(nextRecent);
+      setRows((prev) =>
+        prev.map((item) => {
+          if (item.shopifyProductId !== row.shopifyProductId) return item;
+
+          const remainingUnsynced = item.unsyncedSuppliers.filter((s) => s.supplierId !== row.supplierId);
+          const remainingUnsyncedQty = remainingUnsynced.reduce((sum, s) => sum + s.quantity, 0);
+
+          return {
+            ...item,
+            unsyncedSuppliers: remainingUnsynced,
+            hasSupplyQuantityOverride: remainingUnsynced.length > 0,
+            quantityInStock: remainingUnsynced.length > 0 ? remainingUnsyncedQty : result.newAvailable,
+            shopifyQuantityInStock: result.newAvailable,
+            lastSyncedSupplierName: row.supplierName || item.lastSyncedSupplierName,
+          };
+        })
+      );
+      setSuccess(
+        `Сінхранізавана: +${result.syncedQuantity}, было ${result.previousAvailable}, стала ${result.newAvailable}.`
+      );
+      await reloadProducts(nextRecent);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка сінхранізацыі');
+    } finally {
+      setSyncingRowKey(null);
+    }
+  };
+
   if (loading) {
     return <LoadingSpinner label="Загрузка прадуктаў..." />;
   }
@@ -289,6 +355,11 @@ export default function ProductsClient() {
     <div className="mx-auto w-full max-w-6xl space-y-6">
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+      )}
+      {success && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          {success}
+        </div>
       )}
 
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -395,6 +466,7 @@ export default function ProductsClient() {
                       </button>
                     </div>
                   </th>
+                  <th className="whitespace-nowrap px-6 py-3.5 text-right">Дзеянне</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
@@ -463,6 +535,23 @@ export default function ProductsClient() {
                     </td>
                     <td className="px-6 py-3.5 text-gray-700">
                       {row.supplierName}
+                    </td>
+                    <td className="whitespace-nowrap px-6 py-3.5 text-right">
+                      {row.rowSource === 'supply' && row.supplierId ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSyncRow(row)}
+                          disabled={syncingRowKey === row.rowKey}
+                          className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:opacity-50"
+                        >
+                          {syncingRowKey === row.rowKey && (
+                            <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+                          )}
+                          Сінхранізаваць з Shopify
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}

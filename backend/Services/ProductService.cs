@@ -129,6 +129,64 @@ namespace backend.Services
             );
         }
 
+        public async Task<ProductSyncResult> SyncUnsyncedSupplierRowAsync( string shopifyProductId, int supplierId )
+        {
+            if (string.IsNullOrWhiteSpace( shopifyProductId ))
+            {
+                throw new InvalidOperationException( "Не зададзены Shopify ID прадукту." );
+            }
+            if (supplierId <= 0)
+            {
+                throw new InvalidOperationException( "Не зададзены пастаўшчык." );
+            }
+
+            string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;
+            string? accessToken = _httpContextAccessor.HttpContext?.User.FindFirst( "access_token" )?.Value;
+            if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
+            {
+                throw new InvalidOperationException( "Няма Shopify-кантэксту для сінхранізацыі." );
+            }
+
+            string normalizedId = NormalizeFromShopifyGid( shopifyProductId.Trim() );
+
+            List<SupplyProduct> candidateRows = await _db.SupplyProducts
+                .Include( sp => sp.Supply )
+                .Where( sp => !sp.SyncWithShopify && sp.Supply.SupplierId == supplierId )
+                .ToListAsync();
+
+            List<SupplyProduct> rowsToSync = candidateRows
+                .Where( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) == normalizedId )
+                .ToList();
+
+            if (rowsToSync.Count == 0)
+            {
+                throw new InvalidOperationException( "Не знойдзены несінхранізаваныя радкі для гэтага прадукту і пастаўшчыка." );
+            }
+
+            int delta = rowsToSync.Sum( r => r.Quantity );
+            if (delta <= 0)
+            {
+                throw new InvalidOperationException( "Няма колькасці для сінхранізацыі." );
+            }
+
+            (int previous, int next) = await ApplySingleInventoryDeltaToShopifyAsync( shop, accessToken, normalizedId, delta );
+
+            foreach (SupplyProduct row in rowsToSync)
+            {
+                row.SyncWithShopify = true;
+            }
+            await _db.SaveChangesAsync();
+
+            return new ProductSyncResult
+            {
+                ShopifyProductId = normalizedId,
+                SupplierId = supplierId,
+                SyncedQuantity = delta,
+                PreviousAvailable = previous,
+                NewAvailable = next
+            };
+        }
+
         private static string NormalizeFromShopifyGid( string id )
         {
             const string prefix = "gid://shopify/Product/";
@@ -281,6 +339,139 @@ namespace backend.Services
             return result
                 .OrderBy( p => p.ProductName, StringComparer.OrdinalIgnoreCase )
                 .ToList();
+        }
+
+        private static long? ParseShopifyNumericProductId( string raw )
+        {
+            if (long.TryParse( raw, out long direct )) return direct;
+            const string prefix = "gid://shopify/Product/";
+            if (raw.StartsWith( prefix, StringComparison.OrdinalIgnoreCase ))
+            {
+                string part = raw[prefix.Length..];
+                return long.TryParse( part, out long gidId ) ? gidId : null;
+            }
+            return null;
+        }
+
+        private static async Task<string> ReadContentAsync( HttpResponseMessage response )
+        {
+            return await response.Content.ReadAsStringAsync();
+        }
+
+        private async Task<(int previous, int next)> ApplySingleInventoryDeltaToShopifyAsync(
+            string shop,
+            string accessToken,
+            string shopifyProductId,
+            int delta
+        )
+        {
+            using HttpClient client = new();
+            client.DefaultRequestHeaders.Add( "X-Shopify-Access-Token", accessToken );
+
+            long locationId = await GetDefaultLocationIdAsync( client, shop );
+            long? productId = ParseShopifyNumericProductId( shopifyProductId );
+            if (!productId.HasValue)
+            {
+                throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
+            }
+
+            long inventoryItemId = await GetInventoryItemIdByProductAsync( client, shop, productId.Value );
+            int current = await GetCurrentInventoryAsync( client, shop, inventoryItemId, locationId );
+            int next = Math.Max( 0, current + delta );
+            await SetInventoryAsync( client, shop, inventoryItemId, locationId, next );
+
+            return (current, next);
+        }
+
+        private async Task<long> GetDefaultLocationIdAsync( HttpClient client, string shop )
+        {
+            using HttpResponseMessage response = await client.GetAsync(
+                $"https://{shop}/admin/api/2024-10/locations.json?limit=1"
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося атрымаць лакацыю Shopify: {body}" );
+            }
+
+            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+            JsonElement locations = json.RootElement.GetProperty( "locations" );
+            if (locations.GetArrayLength() == 0)
+            {
+                throw new InvalidOperationException( "У Shopify не знойдзены склад (location)." );
+            }
+            return locations[0].GetProperty( "id" ).GetInt64();
+        }
+
+        private async Task<long> GetInventoryItemIdByProductAsync( HttpClient client, string shop, long productId )
+        {
+            using HttpResponseMessage response = await client.GetAsync(
+                $"https://{shop}/admin/api/2024-10/products/{productId}.json"
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося атрымаць прадукт {productId} з Shopify: {body}" );
+            }
+
+            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+            JsonElement product = json.RootElement.GetProperty( "product" );
+            JsonElement variants = product.GetProperty( "variants" );
+            if (variants.GetArrayLength() == 0)
+            {
+                throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
+            }
+            return variants[0].GetProperty( "inventory_item_id" ).GetInt64();
+        }
+
+        private async Task<int> GetCurrentInventoryAsync(
+            HttpClient client,
+            string shop,
+            long inventoryItemId,
+            long locationId
+        )
+        {
+            using HttpResponseMessage response = await client.GetAsync(
+                $"https://{shop}/admin/api/2024-10/inventory_levels.json?inventory_item_ids={inventoryItemId}&location_ids={locationId}"
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося атрымаць inventory level: {body}" );
+            }
+
+            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+            JsonElement levels = json.RootElement.GetProperty( "inventory_levels" );
+            if (levels.GetArrayLength() == 0) return 0;
+            JsonElement availableEl = levels[0].GetProperty( "available" );
+            return availableEl.ValueKind == JsonValueKind.Number ? availableEl.GetInt32() : 0;
+        }
+
+        private async Task SetInventoryAsync(
+            HttpClient client,
+            string shop,
+            long inventoryItemId,
+            long locationId,
+            int available
+        )
+        {
+            string payload = JsonSerializer.Serialize( new
+            {
+                location_id = locationId,
+                inventory_item_id = inventoryItemId,
+                available
+            } );
+
+            using HttpContent content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
+            using HttpResponseMessage response = await client.PostAsync(
+                $"https://{shop}/admin/api/2024-10/inventory_levels/set.json",
+                content
+            );
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await ReadContentAsync( response );
+                throw new InvalidOperationException( $"Не ўдалося ўсталяваць inventory level: {body}" );
+            }
         }
     }
 }
