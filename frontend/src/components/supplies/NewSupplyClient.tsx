@@ -548,6 +548,13 @@ export default function NewSupplyClient({
                           )}
                           <p>{row.productName}</p>
                         </div>
+                        {meta?.variants && meta.variants.length > 0 && (
+                          <div className="space-y-0.5 text-xs text-gray-600">
+                            {meta.variants.map((variant) => (
+                              <p key={variant.variantId || variant.variantName}>- {variant.variantName}</p>
+                            ))}
+                          </div>
+                        )}
                         {hasOtherSupplierStock && (
                           <div className="rounded-md border border-purple-300 bg-purple-100 px-2.5 py-1.5 text-xs text-purple-950">
                             <p className="font-medium">Ёсць у іншых пастаўшчыкоў:</p>
