@@ -1,6 +1,6 @@
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
 import type { VatReport } from '@/types/report';
-import type { VatReportDetails } from '@/types/report-details';
+import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
 
 function readInt(v: unknown): number {
   if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
@@ -131,6 +131,7 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
               ? polandRowsRaw.map((p) => {
                   const d = p as Record<string, unknown>;
                   return {
+                    id: readInt(d.id ?? d.Id),
                     orderNumber: String(d.orderNumber ?? d.OrderNumber ?? ''),
                     orderDateUtc: String(d.orderDateUtc ?? d.OrderDateUtc ?? ''),
                     vatRatePercent: readNumber(d.vatRatePercent ?? d.VatRatePercent),
@@ -160,6 +161,123 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
               : [],
           };
         })
+      : [],
+  };
+}
+
+export async function updateVatReportRow(payload: {
+  rowId: number;
+  vatRatePercent: number;
+  grossAmount: number;
+  vatAmount: number;
+  netAmount: number;
+}): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${payload.rowId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({
+      vatRatePercent: payload.vatRatePercent,
+      grossAmount: payload.grossAmount,
+      vatAmount: payload.vatAmount,
+      netAmount: payload.netAmount,
+    }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося захаваць радок справаздачы');
+    throw new Error(msg);
+  }
+}
+
+export async function fetchVatReportSourceOrders(reportId: number): Promise<VatReportSourceOrderOption[]> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/source-orders`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць спіс замоў');
+    throw new Error(msg);
+  }
+
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data.map((item) => {
+    const row = item as Record<string, unknown>;
+    return {
+      shopifyOrderId: String(row.shopifyOrderId ?? row.ShopifyOrderId ?? ''),
+      orderNumber: String(row.orderNumber ?? row.OrderNumber ?? ''),
+      orderDateUtc: String(row.orderDateUtc ?? row.OrderDateUtc ?? ''),
+      vatRatePercent: readNumber(row.vatRatePercent ?? row.VatRatePercent),
+      grossAmount: readNumber(row.grossAmount ?? row.GrossAmount),
+      vatAmount: readNumber(row.vatAmount ?? row.VatAmount),
+      netAmount: readNumber(row.netAmount ?? row.NetAmount),
+    };
+  });
+}
+
+export async function createVatReportRow(
+  reportId: number,
+  payload: {
+    orderNumber: string;
+    orderDateUtc: string;
+    vatRatePercent: number;
+    grossAmount: number;
+    vatAmount: number;
+    netAmount: number;
+  }
+): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/rows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося дадаць радок справаздачы');
+    throw new Error(msg);
+  }
+}
+
+export async function deleteVatReportRow(rowId: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${rowId}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць радок справаздачы');
+    throw new Error(msg);
+  }
+}
+
+export async function regenerateVatReport(id: number): Promise<VatReport> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${id}/regenerate`, {
+    method: 'POST',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося перегенераваць справаздачу');
+    throw new Error(msg);
+  }
+  const row = (await res.json()) as Record<string, unknown>;
+  const docsRaw = row.documents ?? row.Documents;
+  return {
+    id: readInt(row.id ?? row.Id),
+    periodYear: readInt(row.periodYear ?? row.PeriodYear),
+    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
+    type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
+    name: String(row.name ?? row.Name ?? ''),
+    document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
+    vat: readNumber(row.vat ?? row.Vat),
+    vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
+    vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
+    documents: Array.isArray(docsRaw)
+      ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
+      : [],
+    shopifyOrderIds: Array.isArray(row.shopifyOrderIds ?? row.ShopifyOrderIds)
+      ? (row.shopifyOrderIds ?? row.ShopifyOrderIds).filter(
+          (item): item is string => typeof item === 'string' && item.trim().length > 0
+        )
       : [],
   };
 }

@@ -1,4 +1,5 @@
 export type VatReportPolandDetailRow = {
+  id: number;
   orderNumber: string;
   orderDateUtc: string;
   vatRatePercent: number;
@@ -34,4 +35,14 @@ export type VatReportDetails = {
   periodMonth: number;
   vat: number;
   rows: VatReportSummaryRow[];
+};
+
+export type VatReportSourceOrderOption = {
+  shopifyOrderId: string;
+  orderNumber: string;
+  orderDateUtc: string;
+  vatRatePercent: number;
+  grossAmount: number;
+  vatAmount: number;
+  netAmount: number;
 };

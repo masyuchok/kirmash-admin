@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { FiFileText } from 'react-icons/fi';
+import { FiFileText, FiRefreshCw, FiX } from 'react-icons/fi';
 import { useRouter } from 'next/navigation';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { useTopbar } from '@/components/topbar/TopbarContext';
-import { fetchVatReports, generateVatReport } from '@/lib/api/reports';
+import { fetchVatReports, generateVatReport, regenerateVatReport } from '@/lib/api/reports';
 import type { VatReport } from '@/types/report';
 
 function formatAmount(value: number): string {
@@ -44,6 +44,8 @@ export default function DocumentsClient() {
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [regeneratingId, setRegeneratingId] = useState<number | null>(null);
+  const [pendingRegenerateReport, setPendingRegenerateReport] = useState<VatReport | null>(null);
 
   useEffect(() => {
     setTopbarPage({ title: 'Дакументы' });
@@ -92,6 +94,37 @@ export default function DocumentsClient() {
     }
   };
 
+  const alreadyExistsForPeriod = reports.some(
+    (r) => r.periodMonth === selectedMonth && r.periodYear === selectedYear && r.type === 'poland'
+  );
+
+  const handleRegenerate = async (report: VatReport) => {
+    setRegeneratingId(report.id);
+    setError(null);
+    try {
+      const updated = await regenerateVatReport(report.id);
+      setReports((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка перегенерацыі справаздачы');
+    } finally {
+      setRegeneratingId(null);
+      setPendingRegenerateReport(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingRegenerateReport) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (regeneratingId !== null) return;
+      setPendingRegenerateReport(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [pendingRegenerateReport, regeneratingId]);
+
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -102,10 +135,10 @@ export default function DocumentsClient() {
           <button
             type="button"
             onClick={() => setModalOpen(true)}
-            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-800 transition hover:bg-gray-50"
+            className="group inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary hover:shadow-md"
           >
-            <FiFileText className="size-4 text-primary" aria-hidden />
-            Справаздача
+            <FiFileText className="size-4 text-primary transition group-hover:text-primary" aria-hidden />
+            Справаздачы
           </button>
         </div>
       </div>
@@ -121,14 +154,16 @@ export default function DocumentsClient() {
                   onClick={() => setGenerateModalOpen(true)}
                   className="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition hover:bg-primary/10"
                 >
-                  Згенераваць новы
+                  Згенераваць новую
                 </button>
                 <button
                   type="button"
                   onClick={() => setModalOpen(false)}
-                  className="rounded-md px-2 py-1 text-sm text-gray-500 transition hover:bg-gray-100 hover:text-gray-700"
+                  className="inline-flex size-8 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-700"
+                  aria-label="Закрыць"
+                  title="Закрыць"
                 >
-                  Закрыць
+                  <FiX className="size-4" aria-hidden />
                 </button>
               </div>
             </div>
@@ -148,16 +183,17 @@ export default function DocumentsClient() {
                   <thead>
                     <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
                       <th className="px-3 py-2.5">Месяц-год</th>
-                      <th className="px-3 py-2.5 text-right">Ват</th>
-                      <th className="px-3 py-2.5 text-right">Ват в зачет</th>
-                      <th className="px-3 py-2.5 text-right">Ваты к оплате</th>
+                      <th className="px-3 py-2.5 text-right">VAT</th>
+                      <th className="px-3 py-2.5 text-right">VAT да ўліку</th>
+                      <th className="px-3 py-2.5 text-right">VAT да аплаты</th>
+                      <th className="px-3 py-2.5 text-right">Дзеянне</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {reports.map((item) => (
                       <tr
                         key={item.id}
-                        className="cursor-pointer bg-white transition hover:bg-gray-50"
+                        className="cursor-pointer bg-white transition hover:bg-primary/10"
                         onClick={() => router.push(`/documents/reports/${item.id}`)}
                       >
                         <td className="px-3 py-3 font-medium text-gray-900">
@@ -171,6 +207,26 @@ export default function DocumentsClient() {
                         </td>
                         <td className="px-3 py-3 text-right tabular-nums font-semibold text-gray-900">
                           {formatAmount(item.vatToPay)}
+                        </td>
+                        <td className="px-3 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPendingRegenerateReport(item);
+                            }}
+                            disabled={regeneratingId === item.id}
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+                            aria-label="Перегенераваць справаздачу"
+                            title="Перегенераваць справаздачу"
+                          >
+                            {regeneratingId === item.id && (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
+                            )}
+                            {regeneratingId !== item.id && (
+                              <FiRefreshCw className="size-4" aria-hidden />
+                            )}
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -231,13 +287,60 @@ export default function DocumentsClient() {
               <button
                 type="button"
                 onClick={handleGenerate}
-                disabled={generating}
+                disabled={generating || alreadyExistsForPeriod}
                 className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary px-3 py-2 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
               >
                 {generating && (
                   <span className="size-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                 )}
                 Згенераваць
+              </button>
+            </div>
+            {alreadyExistsForPeriod && (
+              <p className="px-5 pb-4 text-xs text-amber-700">
+                Справаздача за гэты месяц ужо існуе. Выкарыстайце кнопку «Перегенераваць».
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {pendingRegenerateReport && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => {
+            if (regeneratingId !== null) return;
+            setPendingRegenerateReport(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-base font-semibold text-gray-900">Пацвердзіце перегенерацыю</div>
+            <p className="mt-2 text-sm text-gray-600">
+              Перагенераваць справаздачу за {formatPeriod(pendingRegenerateReport.periodMonth, pendingRegenerateReport.periodYear)}?
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingRegenerateReport(null)}
+                disabled={regeneratingId !== null}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-60"
+              >
+                Адмена
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRegenerate(pendingRegenerateReport)}
+                disabled={regeneratingId !== null}
+                className="inline-flex min-w-24 items-center justify-center rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
+              >
+                {regeneratingId !== null ? (
+                  <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-white" />
+                ) : (
+                  'Перагенераваць'
+                )}
               </button>
             </div>
           </div>

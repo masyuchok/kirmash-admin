@@ -45,6 +45,13 @@ namespace backend.Services
         {
             ValidatePeriod( periodYear, periodMonth );
             string normalizedType = NormalizeReportType( reportType );
+            bool exists = await _db.VatReports.AnyAsync(
+                r => r.PeriodYear == periodYear && r.PeriodMonth == periodMonth && r.Type == normalizedType
+            );
+            if (exists)
+            {
+                throw new InvalidOperationException( "Справаздача за гэты месяц ужо існуе. Выкарыстайце перегенерацыю." );
+            }
 
             List<VatReportRow> rows = normalizedType switch
             {
@@ -71,6 +78,57 @@ namespace backend.Services
             };
 
             _db.VatReports.Add( report );
+            await _db.SaveChangesAsync();
+
+            return new VatReportListItem
+            {
+                Id = report.Id,
+                PeriodYear = report.PeriodYear,
+                PeriodMonth = report.PeriodMonth,
+                Type = report.Type,
+                Name = report.Name,
+                Document = report.Document,
+                Vat = report.Vat,
+                VatCredit = report.VatCredit,
+                VatToPay = report.VatToPay,
+                Documents = report.Documents.ToList(),
+                ShopifyOrderIds = report.ShopifyOrderIds.ToList()
+            };
+        }
+
+        public async Task<VatReportListItem> RegenerateAsync( int id )
+        {
+            VatReport? report = await _db.VatReports
+                .Include( r => r.Rows )
+                .ThenInclude( r => r.Items )
+                .FirstOrDefaultAsync( r => r.Id == id );
+            if (report is null)
+            {
+                throw new InvalidOperationException( "Справаздача не знойдзена." );
+            }
+
+            List<VatReportRow> rows = report.Type switch
+            {
+                VatReportType.Poland => await BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth ),
+                VatReportType.Foreign => new List<VatReportRow>(),
+                _ => throw new InvalidOperationException( "Невядомы тып справаздачы." )
+            };
+
+            if (report.Rows.Count > 0)
+            {
+                _db.VatReportRows.RemoveRange( report.Rows );
+            }
+
+            decimal vatTotal = rows.Sum( r => r.VatAmount );
+            report.Vat = Round2( vatTotal );
+            report.VatCredit = 0m;
+            report.VatToPay = Round2( vatTotal );
+            report.ShopifyOrderIds = rows
+                .Select( r => r.ShopifyOrderId )
+                .Distinct( StringComparer.OrdinalIgnoreCase )
+                .ToArray();
+            report.Rows = rows;
+
             await _db.SaveChangesAsync();
 
             return new VatReportListItem
@@ -119,6 +177,7 @@ namespace backend.Services
                             .ThenBy( x => x.VatRatePercent )
                             .Select( x => new VatReportDetailsPolandRow
                             {
+                                Id = x.Id,
                                 OrderNumber = x.OrderNumber,
                                 OrderDateUtc = x.OrderDateUtc,
                                 VatRatePercent = x.VatRatePercent,
@@ -158,6 +217,7 @@ namespace backend.Services
                             .OrderBy( x => x.VatRatePercent )
                             .Select( x => new VatReportDetailsPolandRow
                             {
+                                Id = x.Id,
                                 OrderNumber = x.OrderNumber,
                                 OrderDateUtc = x.OrderDateUtc,
                                 VatRatePercent = x.VatRatePercent,
@@ -193,6 +253,163 @@ namespace backend.Services
                 Vat = report.Vat,
                 Rows = rows
             };
+        }
+
+        public async Task UpdateRowAsync(
+            int rowId,
+            decimal vatRatePercent,
+            decimal grossAmount,
+            decimal vatAmount,
+            decimal netAmount
+        )
+        {
+            if (vatRatePercent != 5m && vatRatePercent != 23m)
+            {
+                throw new InvalidOperationException( "Стаўка VAT павінна быць 5 або 23." );
+            }
+            if (grossAmount < 0m || vatAmount < 0m || netAmount < 0m)
+            {
+                throw new InvalidOperationException( "Сумы не могуць быць адмоўнымі." );
+            }
+
+            VatReportRow? row = await _db.VatReportRows
+                .Include( r => r.VatReport )
+                .FirstOrDefaultAsync( r => r.Id == rowId );
+            if (row is null)
+            {
+                throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+            }
+
+            row.VatRatePercent = Round2( vatRatePercent );
+            row.GrossAmount = Round2( grossAmount );
+            row.VatAmount = Round2( vatAmount );
+            row.NetAmount = Round2( netAmount );
+
+            int reportId = row.VatReportId;
+            decimal totalVat = await _db.VatReportRows
+                .Where( x => x.VatReportId == reportId )
+                .Select( x => x.Id == rowId ? row.VatAmount : x.VatAmount )
+                .SumAsync();
+
+            VatReport report = row.VatReport;
+            report.Vat = Round2( totalVat );
+            report.VatToPay = report.Vat;
+
+            await _db.SaveChangesAsync();
+        }
+
+        public async Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId )
+        {
+            VatReport? report = await _db.VatReports
+                .AsNoTracking()
+                .FirstOrDefaultAsync( r => r.Id == reportId );
+            if (report is null)
+            {
+                throw new InvalidOperationException( "Справаздача не знойдзена." );
+            }
+            if (!string.Equals( report.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+            {
+                return new List<VatReportSourceOrderOption>();
+            }
+
+            return (await BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth ))
+                .OrderByDescending( x => x.OrderDateUtc )
+                .ThenBy( x => x.OrderNumber )
+                .ThenBy( x => x.VatRatePercent )
+                .Select( x => new VatReportSourceOrderOption
+                {
+                    ShopifyOrderId = x.ShopifyOrderId,
+                    OrderNumber = x.OrderNumber,
+                    OrderDateUtc = x.OrderDateUtc,
+                    VatRatePercent = x.VatRatePercent,
+                    GrossAmount = x.GrossAmount,
+                    VatAmount = x.VatAmount,
+                    NetAmount = x.NetAmount
+                } )
+                .ToList();
+        }
+
+        public async Task AddRowAsync( int reportId, VatReportRowCreateRequest request )
+        {
+            if (string.IsNullOrWhiteSpace( request.OrderNumber ))
+            {
+                throw new InvalidOperationException( "Нумар замовы абавязковы." );
+            }
+            if (request.OrderDateUtc == default)
+            {
+                throw new InvalidOperationException( "Дата замовы абавязковая." );
+            }
+            if (request.VatRatePercent != 5m && request.VatRatePercent != 23m)
+            {
+                throw new InvalidOperationException( "Стаўка VAT павінна быць 5 або 23." );
+            }
+            if (request.GrossAmount < 0m || request.VatAmount < 0m || request.NetAmount < 0m)
+            {
+                throw new InvalidOperationException( "Сумы не могуць быць адмоўнымі." );
+            }
+
+            VatReport? report = await _db.VatReports.FirstOrDefaultAsync( r => r.Id == reportId );
+            if (report is null)
+            {
+                throw new InvalidOperationException( "Справаздача не знойдзена." );
+            }
+
+            VatReportRow row = new()
+            {
+                VatReportId = report.Id,
+                ShopifyOrderId = string.Empty,
+                OrderNumber = request.OrderNumber.Trim(),
+                OrderDateUtc = DateTime.SpecifyKind( request.OrderDateUtc, DateTimeKind.Utc ),
+                VatRatePercent = Round2( request.VatRatePercent ),
+                GrossAmount = Round2( request.GrossAmount ),
+                VatAmount = Round2( request.VatAmount ),
+                NetAmount = Round2( request.NetAmount ),
+                ShippingGrossAmount = 0m,
+                ShippingNetAmount = 0m,
+                Items = new List<VatReportRowItem>()
+            };
+
+            _db.VatReportRows.Add( row );
+            await _db.SaveChangesAsync();
+
+            await RecalculateReportTotalsAsync( report.Id );
+        }
+
+        public async Task DeleteRowAsync( int rowId )
+        {
+            VatReportRow? row = await _db.VatReportRows
+                .Include( r => r.VatReport )
+                .FirstOrDefaultAsync( r => r.Id == rowId );
+            if (row is null)
+            {
+                throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+            }
+
+            int reportId = row.VatReportId;
+            _db.VatReportRows.Remove( row );
+            await _db.SaveChangesAsync();
+
+            await RecalculateReportTotalsAsync( reportId );
+        }
+
+        private async Task RecalculateReportTotalsAsync( int reportId )
+        {
+            decimal totalVat = await _db.VatReportRows
+                .Where( x => x.VatReportId == reportId )
+                .SumAsync( x => x.VatAmount );
+            string[] orderIds = await _db.VatReportRows
+                .Where( x => x.VatReportId == reportId && !string.IsNullOrWhiteSpace( x.ShopifyOrderId ) )
+                .Select( x => x.ShopifyOrderId )
+                .Distinct()
+                .ToArrayAsync();
+
+            VatReport? report = await _db.VatReports.FirstOrDefaultAsync( r => r.Id == reportId );
+            if (report is null) return;
+
+            report.Vat = Round2( totalVat );
+            report.VatToPay = report.Vat;
+            report.ShopifyOrderIds = orderIds;
+            await _db.SaveChangesAsync();
         }
 
         private async Task<List<VatReportRow>> BuildPolandRowsAsync( int year, int month )
