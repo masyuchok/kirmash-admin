@@ -157,6 +157,153 @@ namespace backend.Migrations
                     b.ToTable("SupplyProducts");
                 });
 
+            modelBuilder.Entity("backend.Models.VatReport", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Document")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.PrimitiveCollection<string[]>("Documents")
+                        .IsRequired()
+                        .HasColumnType("text[]");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("PeriodMonth")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PeriodYear")
+                        .HasColumnType("integer");
+
+                    b.PrimitiveCollection<string[]>("ShopifyOrderIds")
+                        .IsRequired()
+                        .HasColumnType("text[]");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<decimal>("Vat")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<decimal>("VatCredit")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<decimal>("VatToPay")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("VatReports");
+                });
+
+            modelBuilder.Entity("backend.Models.VatReportRow", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal>("GrossAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<decimal>("NetAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<DateTime>("OrderDateUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("OrderNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("ShippingGrossAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<decimal>("ShippingNetAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<string>("ShopifyOrderId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("VatAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<decimal>("VatRatePercent")
+                        .HasColumnType("numeric(5,2)");
+
+                    b.Property<int>("VatReportId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("VatReportId");
+
+                    b.ToTable("VatReportRows");
+                });
+
+            modelBuilder.Entity("backend.Models.VatReportRowItem", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal>("AssignedVatRatePercent")
+                        .HasColumnType("numeric(5,2)");
+
+                    b.Property<string>("AssignmentReason")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<decimal>("GrossAmount")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<string>("ProductTitle")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("ProductType")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("UnitPrice")
+                        .HasColumnType("numeric(12,2)");
+
+                    b.Property<int>("VatReportRowId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("VatReportRowId");
+
+                    b.ToTable("VatReportRowItems");
+                });
+
             modelBuilder.Entity("backend.Models.Product", b =>
                 {
                     b.HasOne("backend.Models.Supplier", null)
@@ -186,6 +333,28 @@ namespace backend.Migrations
                     b.Navigation("Supply");
                 });
 
+            modelBuilder.Entity("backend.Models.VatReportRow", b =>
+                {
+                    b.HasOne("backend.Models.VatReport", "VatReport")
+                        .WithMany("Rows")
+                        .HasForeignKey("VatReportId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("VatReport");
+                });
+
+            modelBuilder.Entity("backend.Models.VatReportRowItem", b =>
+                {
+                    b.HasOne("backend.Models.VatReportRow", "VatReportRow")
+                        .WithMany("Items")
+                        .HasForeignKey("VatReportRowId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("VatReportRow");
+                });
+
             modelBuilder.Entity("backend.Models.Supplier", b =>
                 {
                     b.Navigation("Products");
@@ -196,6 +365,16 @@ namespace backend.Migrations
             modelBuilder.Entity("backend.Models.Supply", b =>
                 {
                     b.Navigation("SupplyProducts");
+                });
+
+            modelBuilder.Entity("backend.Models.VatReport", b =>
+                {
+                    b.Navigation("Rows");
+                });
+
+            modelBuilder.Entity("backend.Models.VatReportRow", b =>
+                {
+                    b.Navigation("Items");
                 });
 #pragma warning restore 612, 618
         }
