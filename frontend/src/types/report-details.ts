@@ -25,7 +25,12 @@ export type VatReportSummaryRow = {
   type: 'poland' | 'foreign';
   name: string;
   shopifyOrderId: string;
+  orderDateUtc?: string | null;
+  deliveryName?: string;
+  deliveryAddress?: string;
+  grossAmount?: number;
   vat: number;
+  netAmount?: number;
   polandRows: VatReportPolandDetailRow[];
 };
 

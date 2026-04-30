@@ -6,5 +6,6 @@ namespace backend.Models
         public decimal GrossAmount { get; set; }
         public decimal VatAmount { get; set; }
         public decimal NetAmount { get; set; }
+        public decimal? ShippingGrossAmount { get; set; }
     }
 }

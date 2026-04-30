@@ -63,13 +63,14 @@ export async function fetchVatReports(): Promise<VatReport[]> {
 
 export async function generateVatReport(
   periodYear: number,
-  periodMonth: number
+  periodMonth: number,
+  type: 'poland' | 'foreign' = 'poland'
 ): Promise<VatReport> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: apiCredentials,
-    body: JSON.stringify({ periodYear, periodMonth, type: 'poland' }),
+    body: JSON.stringify({ periodYear, periodMonth, type }),
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося згенераваць справаздачу');
@@ -126,7 +127,14 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
               | 'foreign',
             name: String(r.name ?? r.Name ?? ''),
             shopifyOrderId: String(r.shopifyOrderId ?? r.ShopifyOrderId ?? ''),
+            orderDateUtc: (r.orderDateUtc ?? r.OrderDateUtc)
+              ? String(r.orderDateUtc ?? r.OrderDateUtc)
+              : null,
+            deliveryName: String(r.deliveryName ?? r.DeliveryName ?? ''),
+            deliveryAddress: String(r.deliveryAddress ?? r.DeliveryAddress ?? ''),
+            grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
             vat: readNumber(r.vat ?? r.Vat),
+            netAmount: readNumber(r.netAmount ?? r.NetAmount),
             polandRows: Array.isArray(polandRowsRaw)
               ? polandRowsRaw.map((p) => {
                   const d = p as Record<string, unknown>;
@@ -171,6 +179,7 @@ export async function updateVatReportRow(payload: {
   grossAmount: number;
   vatAmount: number;
   netAmount: number;
+  shippingGrossAmount?: number;
 }): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${payload.rowId}`, {
     method: 'PATCH',
@@ -181,6 +190,9 @@ export async function updateVatReportRow(payload: {
       grossAmount: payload.grossAmount,
       vatAmount: payload.vatAmount,
       netAmount: payload.netAmount,
+      ...(typeof payload.shippingGrossAmount === 'number'
+        ? { shippingGrossAmount: payload.shippingGrossAmount }
+        : {}),
     }),
   });
   if (!res.ok) {

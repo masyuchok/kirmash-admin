@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FiFileText, FiRefreshCw, FiX } from 'react-icons/fi';
 import { useRouter } from 'next/navigation';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
@@ -84,9 +84,36 @@ export default function DocumentsClient() {
     setGenerating(true);
     setGenerateError(null);
     try {
-      const created = await generateVatReport(selectedYear, selectedMonth);
-      setReports((prev) => [created, ...prev]);
-      setGenerateModalOpen(false);
+      const results = await Promise.allSettled([
+        generateVatReport(selectedYear, selectedMonth, 'poland'),
+        generateVatReport(selectedYear, selectedMonth, 'foreign'),
+      ]);
+
+      const created = results
+        .filter((r): r is PromiseFulfilledResult<VatReport> => r.status === 'fulfilled')
+        .map((r) => r.value);
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+      if (created.length > 0) {
+        setReports((prev) => {
+          const byId = new Map<number, VatReport>(prev.map((item) => [item.id, item]));
+          created.forEach((item) => byId.set(item.id, item));
+          return Array.from(byId.values()).sort((a, b) => {
+            if (a.periodYear !== b.periodYear) return b.periodYear - a.periodYear;
+            if (a.periodMonth !== b.periodMonth) return b.periodMonth - a.periodMonth;
+            if (a.type !== b.type) return a.type.localeCompare(b.type);
+            return b.id - a.id;
+          });
+        });
+        setGenerateModalOpen(false);
+      } else if (rejected.length > 0) {
+        const message = rejected
+          .map((item) =>
+            item.reason instanceof Error ? item.reason.message : 'Памылка генерацыі справаздачы'
+          )
+          .join('\n');
+        setGenerateError(message);
+      }
     } catch (err: unknown) {
       setGenerateError(err instanceof Error ? err.message : 'Памылка генерацыі справаздачы');
     } finally {
@@ -94,16 +121,85 @@ export default function DocumentsClient() {
     }
   };
 
-  const alreadyExistsForPeriod = reports.some(
+  const alreadyExistsPoland = reports.some(
     (r) => r.periodMonth === selectedMonth && r.periodYear === selectedYear && r.type === 'poland'
   );
+  const alreadyExistsForeign = reports.some(
+    (r) => r.periodMonth === selectedMonth && r.periodYear === selectedYear && r.type === 'foreign'
+  );
+  const alreadyExistsForPeriod = alreadyExistsPoland && alreadyExistsForeign;
+
+  const groupedReports = useMemo(() => {
+    const byPeriod = new Map<
+      string,
+      {
+        periodMonth: number;
+        periodYear: number;
+        vat: number;
+        vatCredit: number;
+        vatToPay: number;
+        reports: VatReport[];
+      }
+    >();
+    reports.forEach((report) => {
+      const key = `${report.periodYear}-${report.periodMonth}`;
+      const current = byPeriod.get(key);
+      if (!current) {
+        byPeriod.set(key, {
+          periodMonth: report.periodMonth,
+          periodYear: report.periodYear,
+          vat: report.vat,
+          vatCredit: report.vatCredit,
+          vatToPay: report.vatToPay,
+          reports: [report],
+        });
+        return;
+      }
+      current.vat += report.vat;
+      current.vatCredit += report.vatCredit;
+      current.vatToPay += report.vatToPay;
+      current.reports.push(report);
+    });
+
+    return Array.from(byPeriod.entries())
+      .map(([key, value]) => ({
+        key,
+        ...value,
+        reports: value.reports.sort((a, b) => {
+          if (a.type === b.type) return b.id - a.id;
+          return a.type === 'poland' ? -1 : 1;
+        }),
+      }))
+      .sort((a, b) => {
+        if (a.periodYear !== b.periodYear) return b.periodYear - a.periodYear;
+        return b.periodMonth - a.periodMonth;
+      });
+  }, [reports]);
 
   const handleRegenerate = async (report: VatReport) => {
     setRegeneratingId(report.id);
     setError(null);
     try {
-      const updated = await regenerateVatReport(report.id);
-      setReports((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      const samePeriodReports = reports.filter(
+        (item) => item.periodYear === report.periodYear && item.periodMonth === report.periodMonth
+      );
+      const targets = samePeriodReports.length > 0 ? samePeriodReports : [report];
+      const results = await Promise.allSettled(targets.map((item) => regenerateVatReport(item.id)));
+      const updatedItems = results
+        .filter((r): r is PromiseFulfilledResult<VatReport> => r.status === 'fulfilled')
+        .map((r) => r.value);
+      if (updatedItems.length > 0) {
+        setReports((prev) =>
+          prev.map((item) => updatedItems.find((updated) => updated.id === item.id) ?? item)
+        );
+      }
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (rejected.length > 0 && updatedItems.length === 0) {
+        const message = rejected
+          .map((r) => (r.reason instanceof Error ? r.reason.message : 'Памылка перегенерацыі справаздачы'))
+          .join('\n');
+        setError(message);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Памылка перегенерацыі справаздачы');
     } finally {
@@ -190,46 +286,49 @@ export default function DocumentsClient() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {reports.map((item) => (
-                      <tr
-                        key={item.id}
-                        className="cursor-pointer bg-white transition hover:bg-primary/10"
-                        onClick={() => router.push(`/documents/reports/${item.id}`)}
-                      >
-                        <td className="px-3 py-3 font-medium text-gray-900">
-                          {formatPeriod(item.periodMonth, item.periodYear)}
-                        </td>
-                        <td className="px-3 py-3 text-right tabular-nums text-gray-700">
-                          {formatAmount(item.vat)}
-                        </td>
-                        <td className="px-3 py-3 text-right tabular-nums text-gray-700">
-                          {formatAmount(item.vatCredit)}
-                        </td>
-                        <td className="px-3 py-3 text-right tabular-nums font-semibold text-gray-900">
-                          {formatAmount(item.vatToPay)}
-                        </td>
-                        <td className="px-3 py-3 text-right">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setPendingRegenerateReport(item);
-                            }}
-                            disabled={regeneratingId === item.id}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
-                            aria-label="Перегенераваць справаздачу"
-                            title="Перегенераваць справаздачу"
-                          >
-                            {regeneratingId === item.id && (
-                              <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
-                            )}
-                            {regeneratingId !== item.id && (
-                              <FiRefreshCw className="size-4" aria-hidden />
-                            )}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {groupedReports.map((group) => {
+                      const primaryReport =
+                        group.reports.find((r) => r.type === 'poland') ?? group.reports[0];
+                      return (
+                        <tr
+                          key={group.key}
+                          className="cursor-pointer bg-white transition hover:bg-primary/10"
+                          onClick={() => router.push(`/documents/reports/${primaryReport.id}`)}
+                        >
+                          <td className="px-3 py-3 font-medium text-gray-900">
+                            {formatPeriod(group.periodMonth, group.periodYear)}
+                          </td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-700">
+                            {formatAmount(group.vat)}
+                          </td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-700">
+                            {formatAmount(group.vatCredit)}
+                          </td>
+                          <td className="px-3 py-3 text-right tabular-nums font-semibold text-gray-900">
+                            {formatAmount(group.vatToPay)}
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingRegenerateReport(primaryReport);
+                              }}
+                              disabled={regeneratingId === primaryReport.id}
+                              className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+                              aria-label="Перегенераваць справаздачу"
+                              title="Перегенераваць справаздачу"
+                            >
+                              {regeneratingId === primaryReport.id ? (
+                                <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
+                              ) : (
+                                <FiRefreshCw className="size-4" aria-hidden />
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -298,7 +397,7 @@ export default function DocumentsClient() {
             </div>
             {alreadyExistsForPeriod && (
               <p className="px-5 pb-4 text-xs text-amber-700">
-                Справаздача за гэты месяц ужо існуе. Выкарыстайце кнопку «Перегенераваць».
+                Справаздачы за гэты месяц ужо існуюць (Польшча і Замежжа). Выкарыстайце кнопку «Перегенераваць».
               </p>
             )}
           </div>
