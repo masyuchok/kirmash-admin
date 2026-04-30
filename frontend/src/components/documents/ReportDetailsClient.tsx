@@ -7,6 +7,7 @@ import {
   createVatReportRow,
   deleteVatReportRow,
   fetchVatReportDetails,
+  fetchVatReports,
   fetchVatReportSourceOrders,
   regenerateVatReport,
   updateVatReportRow,
@@ -69,6 +70,7 @@ function recalcVatAndNet(grossAmount: number, vatRatePercent: number): { vatAmou
 export default function ReportDetailsClient({ reportId }: { reportId: number }) {
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [data, setData] = useState<VatReportDetails | null>(null);
+  const [foreignOrderRows, setForeignOrderRows] = useState<VatReportDetails['rows']>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
@@ -86,6 +88,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [addingRow, setAddingRow] = useState(false);
   const [addRowError, setAddRowError] = useState<string | null>(null);
   const [orderSearch, setOrderSearch] = useState('');
+  const [foreignOrderSearch, setForeignOrderSearch] = useState('');
   const [vatFilterOpen, setVatFilterOpen] = useState(false);
   const [vatFilter5, setVatFilter5] = useState(true);
   const [vatFilter23, setVatFilter23] = useState(true);
@@ -107,9 +110,66 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         grossAmount: number;
         vatAmount: number;
         netAmount: number;
+        shippingGrossAmount?: number;
+        vatManualOverride?: boolean;
       }
     >
   >({});
+
+  const loadCombinedDetails = async (
+    baseReportId: number
+  ): Promise<{
+    details: VatReportDetails;
+    foreignRows: VatReportDetails['rows'];
+  }> => {
+    const res = await fetchVatReportDetails(baseReportId);
+    const siblingType = res.rows.some((r) => r.type === 'poland') ? 'foreign' : 'poland';
+    const baseType = res.rows.some((r) => r.type === 'poland') ? 'poland' : 'foreign';
+    try {
+      const allReports = await fetchVatReports();
+      const sibling = allReports.find(
+        (r) => r.periodYear === res.periodYear && r.periodMonth === res.periodMonth && r.type === siblingType
+      );
+      if (!sibling) {
+        return {
+          details: res,
+          foreignRows: res.rows.filter((r) => r.type === 'foreign'),
+        };
+      }
+      const siblingDetails = await fetchVatReportDetails(sibling.id);
+      const polandDetails = baseType === 'poland' ? res : siblingDetails;
+      const foreignDetails = baseType === 'foreign' ? res : siblingDetails;
+      const primaryRows = polandDetails.rows.filter((r) => r.type === 'poland');
+      const foreignRows = foreignDetails.rows.filter((r) => r.type === 'foreign');
+      const foreignSummaryVat = foreignRows.reduce((sum, row) => sum + row.vat, 0);
+      const foreignSummaryNet = foreignRows.reduce((sum, row) => sum + (row.netAmount ?? 0), 0);
+      const foreignSummaryGross = foreignRows.reduce((sum, row) => sum + (row.grossAmount ?? 0), 0);
+      return {
+        foreignRows,
+        details: {
+          ...polandDetails,
+          vat: round2(polandDetails.vat + foreignDetails.vat),
+          rows: [
+            ...primaryRows,
+            {
+              type: 'foreign',
+              name: 'Замежжа',
+              shopifyOrderId: 'foreign-summary',
+              vat: round2(foreignSummaryVat),
+              netAmount: round2(foreignSummaryNet),
+              grossAmount: round2(foreignSummaryGross),
+              polandRows: [],
+            },
+          ],
+        },
+      };
+    } catch {
+      return {
+        details: res,
+        foreignRows: res.rows.filter((r) => r.type === 'foreign'),
+      };
+    }
+  };
 
   useEffect(() => {
     const monthYearTitle = data ? formatMonthYearBe(data.periodMonth, data.periodYear) : 'Справаздача';
@@ -125,9 +185,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchVatReportDetails(reportId)
-      .then((res) => {
-        if (!cancelled) setData(res);
+    loadCombinedDetails(reportId)
+      .then(({ details, foreignRows }) => {
+        if (cancelled) return;
+        setForeignOrderRows(foreignRows);
+        setData(details);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Памылка загрузкі справаздачы');
@@ -143,6 +205,12 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const expandedRow = useMemo(
     () => data?.rows.find((row) => row.shopifyOrderId === expandedOrderId) ?? null,
     [data, expandedOrderId]
+  );
+  const isForeignReportOnly = useMemo(
+    () =>
+      (data?.rows.length ?? 0) > 0 &&
+      (data?.rows.every((row) => row.type === 'foreign') ?? false),
+    [data]
   );
 
   const displayTotalVat = useMemo(() => {
@@ -181,13 +249,37 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
 
   const isVatFilterCustomized = !(vatFilter5 && vatFilter23);
 
+  const visibleForeignRows = useMemo(() => {
+    const search = foreignOrderSearch.trim().toLowerCase();
+    return [...foreignOrderRows]
+      .filter((row) => (search ? row.name.toLowerCase().includes(search) : true))
+      .sort((a, b) => {
+        const aNum = normalizeOrderNumber(a.name);
+        const bNum = normalizeOrderNumber(b.name);
+        if (aNum !== bNum) return aNum - bNum;
+        return a.name.localeCompare(b.name, 'ru');
+      });
+  }, [foreignOrderRows, foreignOrderSearch]);
+
   const handleRegenerate = async (rowKey: string) => {
     setRegeneratingRowKey(rowKey);
     setError(null);
     try {
-      const updated = await regenerateVatReport(reportId);
-      const refreshed = await fetchVatReportDetails(updated.id);
-      setData(refreshed);
+      const targetType = rowKey.startsWith('foreign-') ? 'foreign' : 'poland';
+      let targetReportId = reportId;
+      if (data) {
+        const allReports = await fetchVatReports();
+        const match = allReports.find(
+          (r) => r.periodYear === data.periodYear && r.periodMonth === data.periodMonth && r.type === targetType
+        );
+        if (match) {
+          targetReportId = match.id;
+        }
+      }
+      const updated = await regenerateVatReport(targetReportId);
+      const { details, foreignRows } = await loadCombinedDetails(updated.id);
+      setForeignOrderRows(foreignRows);
+      setData(details);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Памылка перегенерацыі справаздачы');
     } finally {
@@ -213,6 +305,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       grossAmount: number;
       vatAmount: number;
       netAmount: number;
+      shippingGrossAmount?: number;
     }
   ) => {
     setEditedRows((prev) => ({
@@ -223,6 +316,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         grossAmount: row.grossAmount,
         vatAmount: row.vatAmount,
         netAmount: row.netAmount,
+        shippingGrossAmount: row.shippingGrossAmount,
+        vatManualOverride: false,
       },
     }));
     setEditingRowKey(rowKey);
@@ -286,8 +381,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     setAddingRow(true);
     try {
       await createVatReportRow(reportId, payload);
-      const refreshed = await fetchVatReportDetails(reportId);
-      setData(refreshed);
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
       setAddModalOpen(false);
       resetNewRow();
     } catch (err: unknown) {
@@ -402,6 +498,112 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     window.setTimeout(printFromIframe, 250);
   };
 
+  const handleExportForeignOrderToPdf = (row: VatReportDetails['rows'][number]) => {
+    const itemRows = row.polandRows.flatMap((group) =>
+      group.items.map((item) => {
+        const rate = item.assignedVatRatePercent / 100;
+        const vatAmount = rate > 0 ? round2((item.grossAmount * rate) / (1 + rate)) : 0;
+        const netAmount = round2(item.grossAmount - vatAmount);
+        return {
+          title: item.productTitle,
+          quantity: item.quantity,
+          netAmount,
+          vatRatePercent: item.assignedVatRatePercent,
+          vatAmount,
+          grossAmount: item.grossAmount,
+        };
+      })
+    );
+    const shippingRows = row.polandRows
+      .filter((group) => group.shippingGrossAmount > 0)
+      .map((group) => ({
+        vatRatePercent: group.vatRatePercent,
+        netAmount: group.shippingNetAmount,
+        vatAmount: round2(group.shippingGrossAmount - group.shippingNetAmount),
+        grossAmount: group.shippingGrossAmount,
+      }));
+    const itemsRowsHtml = itemRows
+      .map(
+        (item) => `<tr>
+          <td>${item.title}</td>
+          <td style="text-align:right;">${item.quantity}</td>
+          <td style="text-align:right;">${formatAmount(item.netAmount)}</td>
+          <td style="text-align:right;">${formatAmount(item.vatRatePercent)}%</td>
+          <td style="text-align:right;">${formatAmount(item.vatAmount)}</td>
+          <td style="text-align:right;">${formatAmount(item.grossAmount)}</td>
+        </tr>`
+      )
+      .join('');
+    const shippingHtml = shippingRows
+      .map(
+        (s) => `<tr>
+          <td>Дастаўка (${formatAmount(s.vatRatePercent)}%)</td>
+          <td style="text-align:right;">1</td>
+          <td style="text-align:right;">${formatAmount(s.netAmount)}</td>
+          <td style="text-align:right;">${formatAmount(s.vatRatePercent)}%</td>
+          <td style="text-align:right;">${formatAmount(s.vatAmount)}</td>
+          <td style="text-align:right;">${formatAmount(s.grossAmount)}</td>
+        </tr>`
+      )
+      .join('');
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Замежжа</title><style>
+      @page { size: A4 portrait; margin: 12mm; }
+      body { font-family: Arial, sans-serif; color:#111827; }
+      .head { margin-bottom: 12px; }
+      .name { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+      table { width:100%; border-collapse: collapse; font-size: 12px; }
+      th,td{ border:1px solid #d1d5db; padding:6px 8px; vertical-align: top; }
+      th{ background:#f9fafb; text-align:left; }
+    </style></head><body>
+      <div class="head">
+        <div class="name">Фактура</div>
+        <div>Нумар замовы: ${row.name}</div>
+        <div>Дата: ${row.orderDateUtc ? formatDate(row.orderDateUtc) : '—'}</div>
+        <div>Атрымальнік: ${row.deliveryName || '—'}</div>
+        <div>Адрас: ${row.deliveryAddress || '—'}</div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Назва</th><th>Кольк.</th><th>Сума нета</th><th>Стаўка VAT</th><th>VAT</th><th>Сума брута</th></tr>
+        </thead>
+        <tbody>${itemsRowsHtml}${shippingHtml}</tbody>
+        <tfoot>
+          <tr>
+            <td colspan="2" style="font-weight:700;">Усяго</td>
+            <td style="text-align:right;font-weight:700;">${formatAmount(row.netAmount ?? 0)}</td>
+            <td></td>
+            <td style="text-align:right;font-weight:700;">${formatAmount(row.vat)}</td>
+            <td style="text-align:right;font-weight:700;">${formatAmount(row.grossAmount ?? 0)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </body></html>`;
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument ?? iframe.contentWindow?.document;
+    if (!doc) {
+      iframe.remove();
+      return;
+    }
+    doc.open();
+    doc.write(html);
+    doc.close();
+    let printed = false;
+    const printFromIframe = () => {
+      if (printed) return;
+      printed = true;
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      window.setTimeout(() => iframe.remove(), 500);
+    };
+    iframe.onload = printFromIframe;
+    window.setTimeout(printFromIframe, 250);
+  };
+
   const confirmDeleteRow = async () => {
     if (!pendingDeleteRow) return;
     const { rowId, rowKey } = pendingDeleteRow;
@@ -409,8 +611,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     setError(null);
     try {
       await deleteVatReportRow(rowId);
-      const refreshed = await fetchVatReportDetails(reportId);
-      setData(refreshed);
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
       if (editingRowKey === rowKey) setEditingRowKey(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Памылка выдалення радка справаздачы');
@@ -482,52 +685,147 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
           <table className="min-w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                <th className="px-4 py-2.5">Тып</th>
-                <th className="px-4 py-2.5">Назва</th>
-                <th className="px-4 py-2.5 text-right">VAT</th>
-                <th className="px-4 py-2.5 text-right">Дзеянне</th>
+                {isForeignReportOnly ? (
+                  <>
+                    <th className="px-4 py-2.5">Нумар замовы</th>
+                    <th className="px-4 py-2.5">Дата</th>
+                    <th className="px-4 py-2.5">Дастаўка</th>
+                    <th className="px-4 py-2.5 text-right">Сума нета</th>
+                    <th className="px-4 py-2.5 text-right">VAT</th>
+                    <th className="px-4 py-2.5 text-right">Сума брута</th>
+                    <th className="px-4 py-2.5 text-right">PDF</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="px-4 py-2.5">Тып</th>
+                    <th className="px-4 py-2.5">Назва</th>
+                    <th className="px-4 py-2.5 text-right">VAT</th>
+                    <th className="px-4 py-2.5 text-right">Дзеянне</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {data.rows.map((row) => (
-                <tr
-                  key={`${row.type}-${row.shopifyOrderId}`}
-                  className={`transition ${row.type === 'poland' ? 'cursor-pointer hover:bg-primary/10' : ''}`}
-                  onClick={() => {
-                    if (row.type !== 'poland') return;
-                    setExpandedOrderId((prev) => (prev === row.shopifyOrderId ? null : row.shopifyOrderId));
-                  }}
-                >
-                  <td className="px-4 py-3">{row.type === 'poland' ? 'Польшча' : 'Не Польшча'}</td>
-                  <td className="px-4 py-3">{row.type === 'poland' ? 'Польшча' : row.name}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setPendingRegenerateRowKey(`${row.type}-${row.shopifyOrderId}`);
-                      }}
-                      disabled={regeneratingRowKey === `${row.type}-${row.shopifyOrderId}`}
-                      className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
-                      aria-label="Перегенераваць справаздачу"
-                      title="Перегенераваць справаздачу"
-                    >
-                      {regeneratingRowKey === `${row.type}-${row.shopifyOrderId}` ? (
-                        <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
-                      ) : (
-                        <FiRefreshCw className="size-4" aria-hidden />
-                      )}
-                    </button>
-                  </td>
-                </tr>
+                <Fragment key={`${row.type}-${row.shopifyOrderId}`}>
+                  <tr
+                    className={`transition ${row.type === 'poland' || row.type === 'foreign' ? 'cursor-pointer hover:bg-primary/10' : ''}`}
+                    onClick={() => {
+                      if (row.type === 'poland' || row.type === 'foreign') {
+                        setExpandedOrderId((prev) => (prev === row.shopifyOrderId ? null : row.shopifyOrderId));
+                      }
+                    }}
+                  >
+                    {row.type === 'foreign' && row.shopifyOrderId !== 'foreign-summary' ? (
+                      <>
+                        <td className="px-4 py-3">{row.name}</td>
+                        <td className="px-4 py-3">{row.orderDateUtc ? formatDate(row.orderDateUtc) : '—'}</td>
+                        <td className="px-4 py-3">
+                          <div>{row.deliveryName || '—'}</div>
+                          <div className="text-xs text-gray-500">{row.deliveryAddress || '—'}</div>
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.netAmount ?? 0)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.grossAmount ?? 0)}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleExportForeignOrderToPdf(row);
+                            }}
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90"
+                            aria-label="Экспарт у PDF"
+                            title="Экспарт у PDF"
+                          >
+                            <FiPrinter className="size-4" aria-hidden />
+                          </button>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                  <td className="px-4 py-3">{row.type === 'poland' ? 'Польшча' : 'Замежжа'}</td>
+                  <td className="px-4 py-3">{row.type === 'poland' ? 'Польшча' : 'Замежжа'}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPendingRegenerateRowKey(`${row.type}-${row.shopifyOrderId}`);
+                            }}
+                            disabled={regeneratingRowKey === `${row.type}-${row.shopifyOrderId}`}
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+                            aria-label="Перегенераваць справаздачу"
+                            title="Перегенераваць справаздачу"
+                          >
+                            {regeneratingRowKey === `${row.type}-${row.shopifyOrderId}` ? (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
+                            ) : (
+                              <FiRefreshCw className="size-4" aria-hidden />
+                            )}
+                          </button>
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                    {row.type === 'foreign' && row.shopifyOrderId !== 'foreign-summary' && expandedOrderId === row.shopifyOrderId && (
+                    <tr className="bg-gray-50/50">
+                      <td className="px-4 py-3" colSpan={7}>
+                        <table className="min-w-full border-collapse text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-gray-200 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                              <th className="px-2 py-1.5">Назва</th>
+                              <th className="px-2 py-1.5 text-right">Колькасць</th>
+                              <th className="px-2 py-1.5 text-right">Сума нета</th>
+                              <th className="px-2 py-1.5 text-right">Стаўка VAT</th>
+                              <th className="px-2 py-1.5 text-right">Сума VAT</th>
+                              <th className="px-2 py-1.5 text-right">Сума брута</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {row.polandRows.flatMap((group) =>
+                              group.items.map((item, idx) => {
+                                const rate = item.assignedVatRatePercent / 100;
+                                const vatAmount = rate > 0 ? round2((item.grossAmount * rate) / (1 + rate)) : 0;
+                                const netAmount = round2(item.grossAmount - vatAmount);
+                                return (
+                                  <tr key={`${group.id}-${idx}`}>
+                                    <td className="px-2 py-1.5">{item.productTitle}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.assignedVatRatePercent)}%</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(vatAmount)}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.grossAmount)}</td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                            {row.polandRows
+                              .filter((group) => group.shippingGrossAmount > 0)
+                              .map((group) => (
+                                <tr key={`shipping-${group.id}`} className="bg-white">
+                                  <td className="px-2 py-1.5 font-medium">Дастаўка ({formatAmount(group.vatRatePercent)}%)</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">1</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingNetAmount)}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.vatRatePercent)}%</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount - group.shippingNetAmount)}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount)}</td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
         </div>
       </div>
 
-      {expandedRow && (
+      {!isForeignReportOnly && expandedRow && expandedRow.type === 'poland' && (
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
             <h3 className="text-sm font-semibold text-gray-900">Дэталі па Польшчы</h3>
@@ -798,9 +1096,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                       grossAmount: edited.grossAmount,
                                       vatAmount: edited.vatAmount,
                                       netAmount: edited.netAmount,
+                                      shippingGrossAmount: edited.shippingGrossAmount,
                                     });
-                                    const refreshed = await fetchVatReportDetails(reportId);
-                                    setData(refreshed);
+                                    const { details, foreignRows } = await loadCombinedDetails(reportId);
+                                    setForeignOrderRows(foreignRows);
+                                    setData(details);
                                   } catch (err: unknown) {
                                     setError(
                                       err instanceof Error ? err.message : 'Памылка захавання радка справаздачы'
@@ -863,6 +1163,365 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   </Fragment>
                 ))}
                 {visiblePolandRows.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-500">
+                      Няма радкоў па выбраных фільтрах.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {foreignOrderRows.length > 0 && (
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-end justify-between gap-3 border-b border-gray-100 px-6 py-4">
+            <h3 className="text-sm font-semibold text-gray-900">Дэталі па Замежжы</h3>
+            <label className="w-full max-w-[11.5rem] space-y-1">
+              <span className="text-xs font-medium uppercase tracking-wide text-gray-500">Пошук</span>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={foreignOrderSearch}
+                  onChange={(e) => setForeignOrderSearch(e.currentTarget.value)}
+                  placeholder="Нумар замовы"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                />
+                <button
+                  type="button"
+                  onClick={() => setForeignOrderSearch('')}
+                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  aria-label="Скінуць пошук"
+                  title="Скінуць пошук"
+                >
+                  <FiX className="size-4" aria-hidden />
+                </button>
+              </div>
+            </label>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  <th className="px-4 py-2.5">Нумар замовы</th>
+                  <th className="px-4 py-2.5">Дата</th>
+                  <th className="px-4 py-2.5">Дастаўка</th>
+                  <th className="px-4 py-2.5 text-right">Сума нета</th>
+                  <th className="px-4 py-2.5 text-right">VAT</th>
+                  <th className="px-4 py-2.5 text-right">Сума брута</th>
+                  <th className="px-4 py-2.5 text-right">PDF</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {visibleForeignRows.map((row) => (
+                  <Fragment key={`foreign-${row.shopifyOrderId}`}>
+                    <tr
+                      className="cursor-pointer transition hover:bg-primary/10"
+                      onClick={() =>
+                        setExpandedOrderId((prev) =>
+                          prev === row.shopifyOrderId ? null : row.shopifyOrderId
+                        )
+                      }
+                    >
+                      <td className="px-4 py-3">{row.name}</td>
+                      <td className="px-4 py-3">{row.orderDateUtc ? formatDate(row.orderDateUtc) : '—'}</td>
+                      <td className="px-4 py-3">
+                        <div>{row.deliveryName || '—'}</div>
+                        <div className="text-xs text-gray-500">{row.deliveryAddress || '—'}</div>
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.netAmount ?? 0)}</td>
+                      <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
+                      <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.grossAmount ?? 0)}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleExportForeignOrderToPdf(row);
+                          }}
+                          className="inline-flex size-8 items-center justify-center rounded-full border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90"
+                          aria-label="Экспарт у PDF"
+                          title="Экспарт у PDF"
+                        >
+                          <FiPrinter className="size-4" aria-hidden />
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedOrderId === row.shopifyOrderId && (
+                      <tr className="bg-gray-50/50">
+                        <td className="px-4 py-3" colSpan={7}>
+                          <div className="mb-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                            <table className="min-w-full border-collapse text-left text-xs">
+                              <thead>
+                                <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                                  <th className="px-2 py-1.5 text-right">Стаўка VAT</th>
+                                  <th className="px-2 py-1.5 text-right">Дастаўка (брута)</th>
+                                  <th className="px-2 py-1.5 text-right">Сума брута</th>
+                                  <th className="px-2 py-1.5 text-right">VAT</th>
+                                  <th className="px-2 py-1.5 text-right">Сума нета</th>
+                                  <th className="px-2 py-1.5 text-right">Дзеянне</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                {row.polandRows.map((group) => {
+                                  const rowKey = String(group.id);
+                                  const isEditing = editingRowKey === rowKey;
+                                  const edited = editedRows[rowKey];
+                                  const goodsGross = round2(group.grossAmount - group.shippingGrossAmount);
+                                  const grossAmount = isEditing ? edited?.grossAmount ?? group.grossAmount : group.grossAmount;
+                                  const vatAmount = isEditing ? edited?.vatAmount ?? group.vatAmount : group.vatAmount;
+                                  const netAmount = isEditing ? edited?.netAmount ?? group.netAmount : group.netAmount;
+                                  const shippingGrossAmount = isEditing
+                                    ? edited?.shippingGrossAmount ?? group.shippingGrossAmount
+                                    : group.shippingGrossAmount;
+
+                                  return (
+                                    <tr key={`foreign-group-${group.id}`}>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">
+                                        {formatAmount(group.vatRatePercent)}%
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">
+                                        {isEditing ? (
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={shippingGrossAmount}
+                                            onChange={(e) => {
+                                              const value = Math.max(0, Number(e.currentTarget.value) || 0);
+                                              setEditedRows((prev) => {
+                                                const base = prev[rowKey] ?? {
+                                                  orderDateUtc: toDateInputValue(group.orderDateUtc),
+                                                  vatRatePercent: group.vatRatePercent,
+                                                  grossAmount: group.grossAmount,
+                                                  vatAmount: group.vatAmount,
+                                                  netAmount: group.netAmount,
+                                                  shippingGrossAmount: group.shippingGrossAmount,
+                                                  vatManualOverride: false,
+                                                };
+                                                const nextGross = round2(goodsGross + value);
+                                                const autoVat = recalcVatAndNet(nextGross, base.vatRatePercent).vatAmount;
+                                                const nextVat = base.vatManualOverride ? base.vatAmount : autoVat;
+                                                return {
+                                                  ...prev,
+                                                  [rowKey]: {
+                                                    ...base,
+                                                    shippingGrossAmount: value,
+                                                    grossAmount: nextGross,
+                                                    vatAmount: nextVat,
+                                                    netAmount: round2(nextGross - nextVat),
+                                                  },
+                                                };
+                                              });
+                                            }}
+                                            className="w-28 rounded-md border border-gray-200 px-2 py-1 text-right text-xs"
+                                          />
+                                        ) : (
+                                          formatAmount(group.shippingGrossAmount)
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(grossAmount)}</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">
+                                        {isEditing ? (
+                                          <div className="inline-flex items-center justify-end gap-2">
+                                            <label className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+                                              <input
+                                                type="checkbox"
+                                                checked={edited?.vatManualOverride ?? false}
+                                                onChange={(e) => {
+                                                  const checked = e.currentTarget.checked;
+                                                  setEditedRows((prev) => {
+                                                    const base = prev[rowKey] ?? {
+                                                      orderDateUtc: toDateInputValue(group.orderDateUtc),
+                                                      vatRatePercent: group.vatRatePercent,
+                                                      grossAmount: group.grossAmount,
+                                                      vatAmount: group.vatAmount,
+                                                      netAmount: group.netAmount,
+                                                      shippingGrossAmount: group.shippingGrossAmount,
+                                                      vatManualOverride: false,
+                                                    };
+                                                    const autoVat = recalcVatAndNet(
+                                                      base.grossAmount,
+                                                      base.vatRatePercent
+                                                    ).vatAmount;
+                                                    const nextVat = checked ? base.vatAmount : autoVat;
+                                                    return {
+                                                      ...prev,
+                                                      [rowKey]: {
+                                                        ...base,
+                                                        vatManualOverride: checked,
+                                                        vatAmount: nextVat,
+                                                        netAmount: round2(base.grossAmount - nextVat),
+                                                      },
+                                                    };
+                                                  });
+                                                }}
+                                                className="size-3.5 rounded border-gray-300 accent-primary"
+                                              />
+                                              ручн.
+                                            </label>
+                                            <input
+                                              type="number"
+                                              step="0.01"
+                                              value={vatAmount}
+                                              onChange={(e) => {
+                                                const value = Math.max(0, Number(e.currentTarget.value) || 0);
+                                                setEditedRows((prev) => {
+                                                  const base = prev[rowKey] ?? {
+                                                    orderDateUtc: toDateInputValue(group.orderDateUtc),
+                                                    vatRatePercent: group.vatRatePercent,
+                                                    grossAmount: group.grossAmount,
+                                                    vatAmount: group.vatAmount,
+                                                    netAmount: group.netAmount,
+                                                    shippingGrossAmount: group.shippingGrossAmount,
+                                                    vatManualOverride: false,
+                                                  };
+                                                  return {
+                                                    ...prev,
+                                                    [rowKey]: {
+                                                      ...base,
+                                                      vatManualOverride: true,
+                                                      vatAmount: value,
+                                                      netAmount: round2(base.grossAmount - value),
+                                                    },
+                                                  };
+                                                });
+                                              }}
+                                              className="w-24 rounded-md border border-gray-200 px-2 py-1 text-right text-xs"
+                                            />
+                                          </div>
+                                        ) : (
+                                          formatAmount(vatAmount)
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
+                                      <td className="px-2 py-1.5 text-right">
+                                        <div className="inline-flex items-center gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={async () => {
+                                              if (isEditing) {
+                                                const changed = editedRows[rowKey];
+                                                if (!changed) {
+                                                  setEditingRowKey(null);
+                                                  return;
+                                                }
+                                                try {
+                                                  await updateVatReportRow({
+                                                    rowId: group.id,
+                                                    vatRatePercent: changed.vatRatePercent,
+                                                    grossAmount: changed.grossAmount,
+                                                    vatAmount: changed.vatAmount,
+                                                    netAmount: changed.netAmount,
+                                                    shippingGrossAmount:
+                                                      changed.shippingGrossAmount ?? group.shippingGrossAmount,
+                                                  });
+                                                  const { details, foreignRows } = await loadCombinedDetails(reportId);
+                                                  setForeignOrderRows(foreignRows);
+                                                  setData(details);
+                                                } catch (err: unknown) {
+                                                  setError(
+                                                    err instanceof Error
+                                                      ? err.message
+                                                      : 'Памылка захавання радка справаздачы'
+                                                  );
+                                                  return;
+                                                }
+                                                setEditingRowKey(null);
+                                              } else {
+                                                startEditRow(rowKey, {
+                                                  orderDateUtc: group.orderDateUtc,
+                                                  vatRatePercent: group.vatRatePercent,
+                                                  grossAmount: group.grossAmount,
+                                                  vatAmount: group.vatAmount,
+                                                  netAmount: group.netAmount,
+                                                  shippingGrossAmount: group.shippingGrossAmount,
+                                                  vatManualOverride: false,
+                                                });
+                                              }
+                                            }}
+                                            className={`inline-flex size-7 items-center justify-center rounded-full border text-gray-700 shadow-sm transition ${
+                                              isEditing
+                                                ? 'border-primary bg-primary text-white hover:bg-primary/90'
+                                                : 'border-gray-200 bg-white hover:border-primary/40 hover:bg-primary/15 hover:text-primary'
+                                            }`}
+                                            aria-label={isEditing ? 'Завяршыць рэдагаванне радка' : 'Рэдагаваць радок'}
+                                            title={isEditing ? 'Завяршыць рэдагаванне радка' : 'Рэдагаваць радок'}
+                                          >
+                                            <FiEdit2 className="size-3.5" aria-hidden />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setPendingDeleteRow({ rowId: group.id, rowKey })}
+                                            disabled={deletingRowKey === rowKey}
+                                            className="inline-flex size-7 items-center justify-center rounded-full border border-red-200 bg-white text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-60"
+                                            aria-label="Выдаліць радок"
+                                            title="Выдаліць радок"
+                                          >
+                                            {deletingRowKey === rowKey ? (
+                                              <span className="size-3 animate-spin rounded-full border-2 border-red-300 border-t-red-600" />
+                                            ) : (
+                                              <FiTrash2 className="size-3.5" aria-hidden />
+                                            )}
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                          <table className="min-w-full border-collapse text-left text-xs">
+                            <thead>
+                              <tr className="border-b border-gray-200 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                                <th className="px-2 py-1.5">Назва</th>
+                                <th className="px-2 py-1.5 text-right">Колькасць</th>
+                                <th className="px-2 py-1.5 text-right">Сума нета</th>
+                                <th className="px-2 py-1.5 text-right">Стаўка VAT</th>
+                                <th className="px-2 py-1.5 text-right">Сума VAT</th>
+                                <th className="px-2 py-1.5 text-right">Сума брута</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {row.polandRows.flatMap((group) =>
+                                group.items.map((item, idx) => {
+                                  const rate = item.assignedVatRatePercent / 100;
+                                  const vatAmount = rate > 0 ? round2((item.grossAmount * rate) / (1 + rate)) : 0;
+                                  const netAmount = round2(item.grossAmount - vatAmount);
+                                  return (
+                                    <tr key={`${group.id}-${idx}`}>
+                                      <td className="px-2 py-1.5">{item.productTitle}</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.assignedVatRatePercent)}%</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(vatAmount)}</td>
+                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.grossAmount)}</td>
+                                    </tr>
+                                  );
+                                })
+                              )}
+                              {row.polandRows
+                                .filter((group) => group.shippingGrossAmount > 0)
+                                .map((group) => (
+                                  <tr key={`shipping-${group.id}`} className="bg-white">
+                                    <td className="px-2 py-1.5 font-medium">Дастаўка ({formatAmount(group.vatRatePercent)}%)</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">1</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingNetAmount)}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.vatRatePercent)}%</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount - group.shippingNetAmount)}</td>
+                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount)}</td>
+                                  </tr>
+                                ))}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+                {visibleForeignRows.length === 0 && (
                   <tr>
                     <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-500">
                       Няма радкоў па выбраных фільтрах.

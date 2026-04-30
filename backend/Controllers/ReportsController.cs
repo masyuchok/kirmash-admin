@@ -117,7 +117,8 @@ namespace backend.Controllers
                     request.VatRatePercent,
                     request.GrossAmount,
                     request.VatAmount,
-                    request.NetAmount
+                    request.NetAmount,
+                    request.ShippingGrossAmount
                 );
                 return Ok();
             }

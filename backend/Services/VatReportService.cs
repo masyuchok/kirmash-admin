@@ -56,7 +56,7 @@ namespace backend.Services
             List<VatReportRow> rows = normalizedType switch
             {
                 VatReportType.Poland => await BuildPolandRowsAsync( periodYear, periodMonth ),
-                VatReportType.Foreign => new List<VatReportRow>(),
+                VatReportType.Foreign => await BuildForeignRowsAsync( periodYear, periodMonth ),
                 _ => throw new InvalidOperationException( "Невядомы тып справаздачы." )
             };
 
@@ -110,7 +110,7 @@ namespace backend.Services
             List<VatReportRow> rows = report.Type switch
             {
                 VatReportType.Poland => await BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth ),
-                VatReportType.Foreign => new List<VatReportRow>(),
+                VatReportType.Foreign => await BuildForeignRowsAsync( report.PeriodYear, report.PeriodMonth ),
                 _ => throw new InvalidOperationException( "Невядомы тып справаздачы." )
             };
 
@@ -205,41 +205,57 @@ namespace backend.Services
             }
             else
             {
+                Dictionary<string, ForeignDeliveryInfo> deliveryByOrderId = await FetchForeignDeliveryInfoAsync(
+                    report.Rows
+                        .Select( r => r.ShopifyOrderId )
+                        .Where( idValue => !string.IsNullOrWhiteSpace( idValue ) )
+                        .Distinct()
+                        .ToList()
+                );
                 rows = report.Rows
                     .GroupBy( r => r.ShopifyOrderId )
-                    .Select( g => new VatReportDetailsSummaryRow
+                    .Select( g =>
                     {
-                        Type = report.Type,
-                        Name = g.First().OrderNumber ?? g.Key,
-                        ShopifyOrderId = g.Key,
-                        Vat = Round2( g.Sum( x => x.VatAmount ) ),
-                        PolandRows = g
-                            .OrderBy( x => x.VatRatePercent )
-                            .Select( x => new VatReportDetailsPolandRow
-                            {
-                                Id = x.Id,
-                                OrderNumber = x.OrderNumber,
-                                OrderDateUtc = x.OrderDateUtc,
-                                VatRatePercent = x.VatRatePercent,
-                                GrossAmount = x.GrossAmount,
-                                VatAmount = x.VatAmount,
-                                NetAmount = x.NetAmount,
-                                ShippingGrossAmount = x.ShippingGrossAmount,
-                                ShippingNetAmount = x.ShippingNetAmount,
-                                Items = x.Items
-                                    .Select( i => new VatReportDetailsPolandItem
-                                    {
-                                        ProductTitle = i.ProductTitle,
-                                        ProductType = i.ProductType,
-                                        Quantity = i.Quantity,
-                                        UnitPrice = i.UnitPrice,
-                                        GrossAmount = i.GrossAmount,
-                                        AssignedVatRatePercent = i.AssignedVatRatePercent,
-                                        AssignmentReason = i.AssignmentReason
-                                    } )
-                                    .ToList()
-                            } )
-                            .ToList()
+                        deliveryByOrderId.TryGetValue( g.Key, out ForeignDeliveryInfo? info );
+                        return new VatReportDetailsSummaryRow
+                        {
+                            Type = report.Type,
+                            Name = g.First().OrderNumber ?? g.Key,
+                            ShopifyOrderId = g.Key,
+                            OrderDateUtc = g.Min( x => x.OrderDateUtc ),
+                            DeliveryName = info?.Name ?? string.Empty,
+                            DeliveryAddress = info?.Address ?? string.Empty,
+                            GrossAmount = Round2( g.Sum( x => x.GrossAmount ) ),
+                            Vat = Round2( g.Sum( x => x.VatAmount ) ),
+                            NetAmount = Round2( g.Sum( x => x.NetAmount ) ),
+                            PolandRows = g
+                                .OrderBy( x => x.VatRatePercent )
+                                .Select( x => new VatReportDetailsPolandRow
+                                {
+                                    Id = x.Id,
+                                    OrderNumber = x.OrderNumber,
+                                    OrderDateUtc = x.OrderDateUtc,
+                                    VatRatePercent = x.VatRatePercent,
+                                    GrossAmount = x.GrossAmount,
+                                    VatAmount = x.VatAmount,
+                                    NetAmount = x.NetAmount,
+                                    ShippingGrossAmount = x.ShippingGrossAmount,
+                                    ShippingNetAmount = x.ShippingNetAmount,
+                                    Items = x.Items
+                                        .Select( i => new VatReportDetailsPolandItem
+                                        {
+                                            ProductTitle = i.ProductTitle,
+                                            ProductType = i.ProductType,
+                                            Quantity = i.Quantity,
+                                            UnitPrice = i.UnitPrice,
+                                            GrossAmount = i.GrossAmount,
+                                            AssignedVatRatePercent = i.AssignedVatRatePercent,
+                                            AssignmentReason = i.AssignmentReason
+                                        } )
+                                        .ToList()
+                                } )
+                                .ToList()
+                        };
                     } )
                     .OrderByDescending( x => x.Vat )
                     .ToList();
@@ -260,12 +276,13 @@ namespace backend.Services
             decimal vatRatePercent,
             decimal grossAmount,
             decimal vatAmount,
-            decimal netAmount
+            decimal netAmount,
+            decimal? shippingGrossAmount = null
         )
         {
-            if (vatRatePercent != 5m && vatRatePercent != 23m)
+            if (vatRatePercent != 0m && vatRatePercent != 5m && vatRatePercent != 23m)
             {
-                throw new InvalidOperationException( "Стаўка VAT павінна быць 5 або 23." );
+                throw new InvalidOperationException( "Стаўка VAT павінна быць 0, 5 або 23." );
             }
             if (grossAmount < 0m || vatAmount < 0m || netAmount < 0m)
             {
@@ -284,6 +301,17 @@ namespace backend.Services
             row.GrossAmount = Round2( grossAmount );
             row.VatAmount = Round2( vatAmount );
             row.NetAmount = Round2( netAmount );
+            if (shippingGrossAmount.HasValue)
+            {
+                if (shippingGrossAmount.Value < 0m)
+                {
+                    throw new InvalidOperationException( "Сума дастаўкі не можа быць адмоўнай." );
+                }
+
+                row.ShippingGrossAmount = Round2( shippingGrossAmount.Value );
+                decimal rate = row.VatRatePercent / 100m;
+                row.ShippingNetAmount = Round2( row.ShippingGrossAmount / (1m + rate) );
+            }
 
             int reportId = row.VatReportId;
             decimal totalVat = await _db.VatReportRows
@@ -505,6 +533,63 @@ namespace backend.Services
             return rows;
         }
 
+        private async Task<List<VatReportRow>> BuildForeignRowsAsync( int year, int month )
+        {
+            List<ShopifyOrderDto> orders = await FetchOrdersForForeignAsync( year, month );
+            List<VatReportRow> rows = new();
+            foreach (ShopifyOrderDto order in orders)
+            {
+                decimal shippingGross = Round2( order.ShippingGross );
+                bool isEuDestination = IsEuCountryCode( order.CountryCode );
+                Dictionary<decimal, decimal> grossByRate = new();
+                Dictionary<decimal, List<ShopifyClassifiedItemDto>> itemsByRate = new();
+
+                foreach (ShopifyLineItemDto item in order.Items)
+                {
+                    decimal lineGross = Round2( item.LineTotalGross );
+                    if (lineGross <= 0m) continue;
+                    (decimal classifiedRate, string classifiedReason) = ClassifyVatRate( item.ProductType, item.Title );
+                    decimal assignedRate = !isEuDestination ? 0m : classifiedRate;
+                    string reason = !isEuDestination ? "non-eu-destination" : classifiedReason;
+                    if (!grossByRate.ContainsKey( assignedRate )) grossByRate[assignedRate] = 0m;
+                    if (!itemsByRate.ContainsKey( assignedRate )) itemsByRate[assignedRate] = new List<ShopifyClassifiedItemDto>();
+                    grossByRate[assignedRate] += lineGross;
+                    itemsByRate[assignedRate].Add( new ShopifyClassifiedItemDto
+                    {
+                        ProductTitle = item.Title,
+                        ProductType = item.ProductType,
+                        Quantity = item.Quantity,
+                        UnitPrice = item.UnitPrice,
+                        GrossAmount = lineGross,
+                        AssignedVatRatePercent = assignedRate,
+                        AssignmentReason = reason
+                    } );
+                }
+
+                decimal totalGross = grossByRate.Values.Sum();
+                if (totalGross <= 0m) continue;
+                foreach ((decimal rate, decimal goodsGross) in grossByRate.OrderBy( x => x.Key ))
+                {
+                    decimal shippingForRate = totalGross > 0m ? Round2( shippingGross * (goodsGross / totalGross) ) : 0m;
+                    rows.Add( BuildRow( order, rate, goodsGross, shippingForRate, itemsByRate[rate] ) );
+                }
+
+                if (grossByRate.Count > 1 && shippingGross > 0m)
+                {
+                    decimal assigned = rows.Where( r => r.ShopifyOrderId == order.OrderId ).Sum( r => r.ShippingGrossAmount );
+                    decimal diff = Round2( shippingGross - assigned );
+                    if (diff != 0m)
+                    {
+                        VatReportRow target = rows.Last( r => r.ShopifyOrderId == order.OrderId );
+                        target.ShippingGrossAmount = Round2( target.ShippingGrossAmount + diff );
+                        RecalculateAmounts( target );
+                    }
+                }
+            }
+
+            return rows;
+        }
+
         private static VatReportRow BuildRow(
             ShopifyOrderDto order,
             decimal vatRatePercent,
@@ -563,11 +648,10 @@ namespace backend.Services
                 throw new InvalidOperationException( "Няма Shopify-кантэксту для генерацыі справаздачы." );
             }
 
-            DateTime from = new( year, month, 1, 0, 0, 0, DateTimeKind.Utc );
-            DateTime to = from.AddMonths( 1 );
+            (DateTime from, DateTime to) = GetPolandMonthBoundsUtc( year, month );
             // Include Polish delivery and pickup orders (pickup often has no shipping_address).
             // Use explicit UTC timestamps and additionally validate period in code.
-            string queryFilter = $"created_at:>={from:yyyy-MM-ddTHH:mm:ssZ} created_at:<{to:yyyy-MM-ddTHH:mm:ssZ}";
+            string queryFilter = $"status:any created_at:>={from:yyyy-MM-ddTHH:mm:ssZ} created_at:<{to:yyyy-MM-ddTHH:mm:ssZ}";
             TimeZoneInfo polandTz = GetPolandTimeZone();
 
             List<ShopifyOrderDto> result = new();
@@ -768,10 +852,18 @@ namespace backend.Services
                                 productType = variantProductTypeEl.GetString() ?? string.Empty;
                             }
                             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
-                            if (unitPrice <= 0m) continue;
                             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
                             decimal discountedTotal = ReadMoney( itemNode, "discountedTotalSet" );
                             decimal lineTotalGross = originalTotal > 0m ? originalTotal : unitPrice * quantity;
+                            if (lineTotalGross <= 0m && discountedTotal > 0m)
+                            {
+                                lineTotalGross = discountedTotal;
+                            }
+                            if (lineTotalGross <= 0m) continue;
+                            if (unitPrice <= 0m)
+                            {
+                                unitPrice = quantity > 0 ? Round2( lineTotalGross / quantity ) : 0m;
+                            }
                             decimal allocatedDiscountTotal = 0m;
                             if (itemNode.TryGetProperty( "discountAllocations", out JsonElement discountAllocationsEl ) &&
                                 discountAllocationsEl.ValueKind == JsonValueKind.Array)
@@ -834,6 +926,271 @@ namespace backend.Services
             return result;
         }
 
+        private async Task<List<ShopifyOrderDto>> FetchOrdersForForeignAsync( int year, int month )
+        {
+            string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;
+            string? accessToken = _httpContextAccessor.HttpContext?.User.FindFirst( "access_token" )?.Value;
+            if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
+            {
+                throw new InvalidOperationException( "Няма Shopify-кантэксту для генерацыі справаздачы." );
+            }
+
+            // For foreign reports fetch all statuses and filter month in code.
+            // This avoids Shopify created_at query edge cases around timezone boundaries.
+            string queryFilter = "status:any";
+            List<ShopifyOrderDto> result = new();
+            string? afterCursor = null;
+            bool hasNextPage;
+            using HttpClient client = new();
+            TimeZoneInfo polandTz = GetPolandTimeZone();
+            do
+            {
+                const string query = """
+                query OrdersPage($query: String!, $after: String) {
+                  orders(first: 100, after: $after, sortKey: CREATED_AT, query: $query) {
+                    edges {
+                      cursor
+                      node {
+                        id
+                        name
+                        createdAt
+                        shippingAddress { countryCodeV2 }
+                        billingAddress { countryCodeV2 }
+                        shippingLines(first: 20) {
+                          nodes {
+                            title
+                            originalPriceSet { shopMoney { amount } }
+                          }
+                        }
+                        lineItems(first: 250) {
+                          nodes {
+                            quantity
+                            title
+                            originalUnitPriceSet { shopMoney { amount } }
+                            originalTotalSet { shopMoney { amount } }
+                            discountedTotalSet { shopMoney { amount } }
+                            discountAllocations {
+                              allocatedAmountSet { shopMoney { amount } }
+                            }
+                            product { productType }
+                            variant { product { productType } }
+                          }
+                        }
+                      }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+                """;
+                string payload = JsonSerializer.Serialize( new { query, variables = new { query = queryFilter, after = afterCursor } } );
+                using HttpRequestMessage request = new( HttpMethod.Post, $"https://{shop}/admin/api/2024-10/graphql.json" );
+                request.Headers.Add( "X-Shopify-Access-Token", accessToken );
+                request.Content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
+                using HttpResponseMessage response = await client.SendAsync( request );
+                if (!response.IsSuccessStatusCode)
+                {
+                    string body = await response.Content.ReadAsStringAsync();
+                    throw new InvalidOperationException( $"Не ўдалося атрымаць заказы Shopify: {body}" );
+                }
+
+                using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+                JsonElement orders = json.RootElement.GetProperty( "data" ).GetProperty( "orders" );
+                foreach (JsonElement edge in orders.GetProperty( "edges" ).EnumerateArray())
+                {
+                    JsonElement node = edge.GetProperty( "node" );
+                    string shippingCountryCode = node.TryGetProperty( "shippingAddress", out JsonElement shippingAddressEl ) &&
+                                                 shippingAddressEl.ValueKind == JsonValueKind.Object &&
+                                                 shippingAddressEl.TryGetProperty( "countryCodeV2", out JsonElement countryCodeEl ) &&
+                                                 countryCodeEl.ValueKind == JsonValueKind.String
+                        ? (countryCodeEl.GetString() ?? string.Empty)
+                        : string.Empty;
+                    string billingCountryCode = node.TryGetProperty( "billingAddress", out JsonElement billingAddressEl ) &&
+                                                billingAddressEl.ValueKind == JsonValueKind.Object &&
+                                                billingAddressEl.TryGetProperty( "countryCodeV2", out JsonElement billingCountryCodeEl ) &&
+                                                billingCountryCodeEl.ValueKind == JsonValueKind.String
+                        ? (billingCountryCodeEl.GetString() ?? string.Empty)
+                        : string.Empty;
+                    bool hasPickupShippingLine = false;
+                    bool hasZeroShippingLineWithTitle = false;
+                    if (node.TryGetProperty( "shippingLines", out JsonElement checkShippingLinesEl ) &&
+                        checkShippingLinesEl.ValueKind == JsonValueKind.Object &&
+                        checkShippingLinesEl.TryGetProperty( "nodes", out JsonElement checkShippingNodesEl ) &&
+                        checkShippingNodesEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement shippingNode in checkShippingNodesEl.EnumerateArray())
+                        {
+                            if (shippingNode.TryGetProperty( "title", out JsonElement shippingTitleEl ) &&
+                                shippingTitleEl.ValueKind == JsonValueKind.String)
+                            {
+                                string shippingTitle = (shippingTitleEl.GetString() ?? string.Empty).ToLowerInvariant();
+                                decimal shippingLineAmount = ReadMoney( shippingNode, "originalPriceSet" );
+                                if (!string.IsNullOrWhiteSpace( shippingTitle ) && shippingLineAmount == 0m)
+                                {
+                                    hasZeroShippingLineWithTitle = true;
+                                }
+                                if (shippingTitle.Contains( "pickup" ) ||
+                                    shippingTitle.Contains( "pick up" ) ||
+                                    shippingTitle.Contains( "odbiór" ) ||
+                                    shippingTitle.Contains( "odbior" ) ||
+                                    shippingTitle.Contains( "самовывоз" ))
+                                {
+                                    hasPickupShippingLine = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    string countryCode = string.IsNullOrWhiteSpace( shippingCountryCode ) ? billingCountryCode : shippingCountryCode;
+                    if (hasPickupShippingLine || (string.IsNullOrWhiteSpace( shippingCountryCode ) && hasZeroShippingLineWithTitle))
+                    {
+                        // Local pickup should be treated as Poland flow, not foreign.
+                        continue;
+                    }
+                    if (string.Equals( countryCode, "PL", StringComparison.OrdinalIgnoreCase )) continue;
+
+                    string orderId = node.TryGetProperty( "id", out JsonElement idEl ) && idEl.ValueKind == JsonValueKind.String
+                        ? NormalizeFromShopifyGid( idEl.GetString() ?? string.Empty, "gid://shopify/Order/" )
+                        : string.Empty;
+                    if (string.IsNullOrWhiteSpace( orderId )) continue;
+                    string orderNumber = node.TryGetProperty( "name", out JsonElement nameEl ) && nameEl.ValueKind == JsonValueKind.String
+                        ? (nameEl.GetString() ?? orderId)
+                        : orderId;
+                    DateTimeOffset parsedCreatedAtOffset = DateTimeOffset.MinValue;
+                    bool parsedCreated = node.TryGetProperty( "createdAt", out JsonElement createdAtEl ) &&
+                                         createdAtEl.ValueKind == JsonValueKind.String &&
+                                         DateTimeOffset.TryParse(
+                                             createdAtEl.GetString(),
+                                             CultureInfo.InvariantCulture,
+                                             DateTimeStyles.None,
+                                             out parsedCreatedAtOffset
+                                         );
+                    DateTimeOffset createdAtOffset = parsedCreated
+                        ? parsedCreatedAtOffset
+                        : DateTimeOffset.UtcNow;
+                    DateTime createdAt = createdAtOffset.UtcDateTime;
+                    DateTime createdAtPoland = TimeZoneInfo.ConvertTimeFromUtc( createdAt, polandTz );
+                    bool inRequestedMonthByPoland = createdAtPoland.Year == year && createdAtPoland.Month == month;
+                    bool inRequestedMonthByUtc = createdAt.Year == year && createdAt.Month == month;
+                    bool inRequestedMonthByOrderLocal =
+                        createdAtOffset.Year == year && createdAtOffset.Month == month;
+                    if (!inRequestedMonthByPoland && !inRequestedMonthByUtc && !inRequestedMonthByOrderLocal) continue;
+
+                    decimal shippingGross = 0m;
+                    if (node.TryGetProperty( "shippingLines", out JsonElement shippingLinesEl ) &&
+                        shippingLinesEl.ValueKind == JsonValueKind.Object &&
+                        shippingLinesEl.TryGetProperty( "nodes", out JsonElement shippingNodesEl ) &&
+                        shippingNodesEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement shippingNode in shippingNodesEl.EnumerateArray())
+                        {
+                            shippingGross += ReadMoney( shippingNode, "originalPriceSet" );
+                        }
+                    }
+
+                    List<ShopifyLineItemDto> items = new();
+                    if (node.TryGetProperty( "lineItems", out JsonElement lineItemsEl ) &&
+                        lineItemsEl.ValueKind == JsonValueKind.Object &&
+                        lineItemsEl.TryGetProperty( "nodes", out JsonElement itemNodesEl ) &&
+                        itemNodesEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement itemNode in itemNodesEl.EnumerateArray())
+                        {
+                            int quantity = itemNode.TryGetProperty( "quantity", out JsonElement qtyEl ) &&
+                                           qtyEl.ValueKind == JsonValueKind.Number &&
+                                           qtyEl.TryGetInt32( out int parsedQty )
+                                ? parsedQty
+                                : 0;
+                            if (quantity <= 0) continue;
+                            string title = itemNode.TryGetProperty( "title", out JsonElement titleEl ) &&
+                                           titleEl.ValueKind == JsonValueKind.String
+                                ? (titleEl.GetString() ?? string.Empty)
+                                : string.Empty;
+                            string productType = string.Empty;
+                            if (itemNode.TryGetProperty( "product", out JsonElement lineProductEl ) &&
+                                lineProductEl.ValueKind == JsonValueKind.Object &&
+                                lineProductEl.TryGetProperty( "productType", out JsonElement lineProductTypeEl ) &&
+                                lineProductTypeEl.ValueKind == JsonValueKind.String)
+                            {
+                                productType = lineProductTypeEl.GetString() ?? string.Empty;
+                            }
+                            if (string.IsNullOrWhiteSpace( productType ) &&
+                                itemNode.TryGetProperty( "variant", out JsonElement variantEl ) &&
+                                variantEl.ValueKind == JsonValueKind.Object &&
+                                variantEl.TryGetProperty( "product", out JsonElement variantProductEl ) &&
+                                variantProductEl.ValueKind == JsonValueKind.Object &&
+                                variantProductEl.TryGetProperty( "productType", out JsonElement variantProductTypeEl ) &&
+                                variantProductTypeEl.ValueKind == JsonValueKind.String)
+                            {
+                                productType = variantProductTypeEl.GetString() ?? string.Empty;
+                            }
+                            decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
+                            decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
+                            decimal discountedTotal = ReadMoney( itemNode, "discountedTotalSet" );
+                            decimal lineTotalGross = originalTotal > 0m ? originalTotal : unitPrice * quantity;
+                            if (lineTotalGross <= 0m && discountedTotal > 0m)
+                            {
+                                lineTotalGross = discountedTotal;
+                            }
+                            if (lineTotalGross <= 0m) continue;
+                            if (unitPrice <= 0m)
+                            {
+                                unitPrice = quantity > 0 ? Round2( lineTotalGross / quantity ) : 0m;
+                            }
+                            decimal allocatedDiscountTotal = 0m;
+                            if (itemNode.TryGetProperty( "discountAllocations", out JsonElement discountAllocationsEl ) &&
+                                discountAllocationsEl.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (JsonElement allocationEl in discountAllocationsEl.EnumerateArray())
+                                {
+                                    if (allocationEl.TryGetProperty( "allocatedAmountSet", out JsonElement amountSetEl ) &&
+                                        amountSetEl.ValueKind == JsonValueKind.Object &&
+                                        amountSetEl.TryGetProperty( "shopMoney", out JsonElement shopMoneyEl ) &&
+                                        shopMoneyEl.ValueKind == JsonValueKind.Object &&
+                                        shopMoneyEl.TryGetProperty( "amount", out JsonElement amountEl ) &&
+                                        amountEl.ValueKind == JsonValueKind.String &&
+                                        decimal.TryParse(
+                                            amountEl.GetString(),
+                                            NumberStyles.Number,
+                                            CultureInfo.InvariantCulture,
+                                            out decimal parsedAllocation))
+                                    {
+                                        allocatedDiscountTotal += parsedAllocation;
+                                    }
+                                }
+                            }
+                            if (allocatedDiscountTotal > 0m) lineTotalGross = Math.Max( 0m, lineTotalGross - allocatedDiscountTotal );
+                            else if (discountedTotal > 0m && discountedTotal < lineTotalGross) lineTotalGross = discountedTotal;
+
+                            items.Add( new ShopifyLineItemDto
+                            {
+                                Quantity = quantity,
+                                UnitPrice = unitPrice,
+                                LineTotalGross = Round2( lineTotalGross ),
+                                ProductType = productType,
+                                Title = title
+                            } );
+                        }
+                    }
+                    if (items.Count == 0) continue;
+                    result.Add( new ShopifyOrderDto
+                    {
+                        OrderId = orderId,
+                        OrderNumber = orderNumber,
+                        CreatedAtUtc = createdAt,
+                        ShippingGross = Round2( shippingGross ),
+                        Items = items,
+                        CountryCode = countryCode
+                    } );
+                }
+
+                JsonElement pageInfo = orders.GetProperty( "pageInfo" );
+                hasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean();
+                afterCursor = pageInfo.GetProperty( "endCursor" ).GetString();
+            } while (hasNextPage && !string.IsNullOrWhiteSpace( afterCursor ));
+
+            return result;
+        }
+
         private static TimeZoneInfo GetPolandTimeZone()
         {
             try
@@ -845,6 +1202,16 @@ namespace backend.Services
                 // Windows fallback
                 return TimeZoneInfo.FindSystemTimeZoneById( "Central European Standard Time" );
             }
+        }
+
+        private static (DateTime fromUtc, DateTime toUtc) GetPolandMonthBoundsUtc( int year, int month )
+        {
+            TimeZoneInfo polandTz = GetPolandTimeZone();
+            DateTime localFrom = new( year, month, 1, 0, 0, 0, DateTimeKind.Unspecified );
+            DateTime localTo = localFrom.AddMonths( 1 );
+            DateTime fromUtc = TimeZoneInfo.ConvertTimeToUtc( localFrom, polandTz );
+            DateTime toUtc = TimeZoneInfo.ConvertTimeToUtc( localTo, polandTz );
+            return (fromUtc, toUtc);
         }
 
         private static decimal ReadMoney( JsonElement node, string setProperty )
@@ -864,6 +1231,92 @@ namespace backend.Services
                 CultureInfo.InvariantCulture,
                 out decimal value
             ) ? value : 0m;
+        }
+
+        private async Task<Dictionary<string, ForeignDeliveryInfo>> FetchForeignDeliveryInfoAsync( List<string> orderIds )
+        {
+            Dictionary<string, ForeignDeliveryInfo> result = new( StringComparer.OrdinalIgnoreCase );
+            if (orderIds.Count == 0) return result;
+            string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;
+            string? accessToken = _httpContextAccessor.HttpContext?.User.FindFirst( "access_token" )?.Value;
+            if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken )) return result;
+            using HttpClient client = new();
+            const int batchSize = 50;
+            for (int i = 0; i < orderIds.Count; i += batchSize)
+            {
+                List<string> batch = orderIds.Skip( i ).Take( batchSize ).ToList();
+                string[] gids = batch.Select( id => $"gid://shopify/Order/{id}" ).ToArray();
+                const string query = """
+                query OrderNodes($ids:[ID!]!) {
+                  nodes(ids:$ids) {
+                    ... on Order {
+                      id
+                      shippingAddress { firstName lastName address1 address2 city zip country countryCodeV2 }
+                      billingAddress { firstName lastName address1 address2 city zip country countryCodeV2 }
+                    }
+                  }
+                }
+                """;
+                string payload = JsonSerializer.Serialize( new { query, variables = new { ids = gids } } );
+                using HttpRequestMessage request = new( HttpMethod.Post, $"https://{shop}/admin/api/2024-10/graphql.json" );
+                request.Headers.Add( "X-Shopify-Access-Token", accessToken );
+                request.Content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
+                using HttpResponseMessage response = await client.SendAsync( request );
+                if (!response.IsSuccessStatusCode) continue;
+                using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+                if (!json.RootElement.TryGetProperty( "data", out JsonElement dataEl ) ||
+                    !dataEl.TryGetProperty( "nodes", out JsonElement nodesEl ) ||
+                    nodesEl.ValueKind != JsonValueKind.Array) continue;
+                foreach (JsonElement node in nodesEl.EnumerateArray())
+                {
+                    if (node.ValueKind != JsonValueKind.Object) continue;
+                    if (!node.TryGetProperty( "id", out JsonElement idEl ) || idEl.ValueKind != JsonValueKind.String) continue;
+                    string orderId = NormalizeFromShopifyGid( idEl.GetString() ?? string.Empty, "gid://shopify/Order/" );
+                    if (string.IsNullOrWhiteSpace( orderId )) continue;
+                    JsonElement addr = node.TryGetProperty( "shippingAddress", out JsonElement shippingEl ) && shippingEl.ValueKind == JsonValueKind.Object
+                        ? shippingEl
+                        : node.TryGetProperty( "billingAddress", out JsonElement billingEl ) && billingEl.ValueKind == JsonValueKind.Object
+                            ? billingEl
+                            : default;
+                    string firstName = ReadString( addr, "firstName" );
+                    string lastName = ReadString( addr, "lastName" );
+                    string name = $"{firstName} {lastName}".Trim();
+                    string address = string.Join( ", ", new[]
+                    {
+                        ReadString( addr, "address1" ),
+                        ReadString( addr, "address2" ),
+                        ReadString( addr, "city" ),
+                        ReadString( addr, "zip" ),
+                        ReadString( addr, "country" )
+                    }.Where( x => !string.IsNullOrWhiteSpace( x ) ));
+                    result[orderId] = new ForeignDeliveryInfo
+                    {
+                        Name = name,
+                        Address = address
+                    };
+                }
+            }
+
+            return result;
+        }
+
+        private static string ReadString( JsonElement node, string prop )
+        {
+            if (node.ValueKind != JsonValueKind.Object) return string.Empty;
+            return node.TryGetProperty( prop, out JsonElement valueEl ) && valueEl.ValueKind == JsonValueKind.String
+                ? (valueEl.GetString() ?? string.Empty)
+                : string.Empty;
+        }
+
+        private static bool IsEuCountryCode( string? countryCode )
+        {
+            if (string.IsNullOrWhiteSpace( countryCode )) return false;
+            return countryCode.Trim().ToUpperInvariant() switch
+            {
+                "AT" or "BE" or "BG" or "HR" or "CY" or "CZ" or "DK" or "EE" or "FI" or "FR" or "DE" or "GR" or "HU" or "IE" or
+                "IT" or "LV" or "LT" or "LU" or "MT" or "NL" or "PL" or "PT" or "RO" or "SK" or "SI" or "ES" or "SE" => true,
+                _ => false
+            };
         }
 
         private static bool IsBookProduct( string productType, string title )
@@ -941,6 +1394,7 @@ namespace backend.Services
             public DateTime CreatedAtUtc { get; set; }
             public decimal CurrentTotalGross { get; set; }
             public decimal ShippingGross { get; set; }
+            public string CountryCode { get; set; } = string.Empty;
             public List<ShopifyLineItemDto> Items { get; set; } = new();
         }
 
@@ -962,6 +1416,12 @@ namespace backend.Services
             public decimal GrossAmount { get; set; }
             public decimal AssignedVatRatePercent { get; set; }
             public string AssignmentReason { get; set; } = string.Empty;
+        }
+
+        private sealed class ForeignDeliveryInfo
+        {
+            public string Name { get; set; } = string.Empty;
+            public string Address { get; set; } = string.Empty;
         }
     }
 }

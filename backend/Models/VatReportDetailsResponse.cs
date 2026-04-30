@@ -14,7 +14,12 @@ namespace backend.Models
         public string Type { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
         public string ShopifyOrderId { get; set; } = string.Empty;
+        public DateTime? OrderDateUtc { get; set; }
+        public string DeliveryName { get; set; } = string.Empty;
+        public string DeliveryAddress { get; set; } = string.Empty;
+        public decimal GrossAmount { get; set; }
         public decimal Vat { get; set; }
+        public decimal NetAmount { get; set; }
         public List<VatReportDetailsPolandRow> PolandRows { get; set; } = new();
     }
 
