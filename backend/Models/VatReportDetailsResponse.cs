@@ -20,6 +20,7 @@ namespace backend.Models
 
     public class VatReportDetailsPolandRow
     {
+        public int Id { get; set; }
         public string OrderNumber { get; set; } = string.Empty;
         public DateTime OrderDateUtc { get; set; }
         public decimal VatRatePercent { get; set; }
