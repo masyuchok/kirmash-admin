@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { Supplier } from '@/types/supplier';
-import { FiPlus, FiPackage, FiFileText } from 'react-icons/fi';
+import { FiPlus, FiPackage } from 'react-icons/fi';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
@@ -14,7 +14,6 @@ enum ViewMode {
   Default = 'default',
   AddSupplier = 'addSupplier',
   Inventory = 'inventory',
-  Documents = 'documents',
 }
 
 const SuppliersClient = () => {
@@ -47,10 +46,6 @@ const SuppliersClient = () => {
         setTopbarPage({ title: 'Інвентарызацыя' });
         setTopbarButtons([]);
         return clear;
-      case ViewMode.Documents:
-        setTopbarPage({ title: 'Дакументы' });
-        setTopbarButtons([]);
-        return clear;
       default:
         setTopbarPage({
           title: 'Пастаўшчыкі',
@@ -69,12 +64,6 @@ const SuppliersClient = () => {
             label: 'Інвентарызацыя',
             icon: <FiPackage />,
             onClick: () => setMode(ViewMode.Inventory),
-            variant: 'secondary',
-          },
-          {
-            label: 'Дакументы',
-            icon: <FiFileText />,
-            onClick: () => setMode(ViewMode.Documents),
             variant: 'secondary',
           },
         ]);
@@ -121,12 +110,6 @@ const SuppliersClient = () => {
       return (
         <div className="mx-auto max-w-6xl rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
           <p className="text-sm text-gray-500">📦 Тут будзе інвентарызацыя</p>
-        </div>
-      );
-    case ViewMode.Documents:
-      return (
-        <div className="mx-auto max-w-6xl rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-          <p className="text-sm text-gray-500">📁 Тут будуць дакументы</p>
         </div>
       );
     default: {
