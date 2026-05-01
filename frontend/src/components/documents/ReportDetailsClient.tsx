@@ -1677,7 +1677,6 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                                   vatAmount: group.vatAmount,
                                                   netAmount: group.netAmount,
                                                   shippingGrossAmount: group.shippingGrossAmount,
-                                                  vatManualOverride: false,
                                                 });
                                               }
                                             }}

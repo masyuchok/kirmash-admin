@@ -20,6 +20,11 @@ function readNumber(v: unknown): number {
   return 0;
 }
 
+function readStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
 export async function fetchVatReports(): Promise<VatReport[]> {
   const res = await fetch(`${getApiBaseUrl()}/Reports`, {
     method: 'GET',
@@ -52,11 +57,7 @@ export async function fetchVatReports(): Promise<VatReport[]> {
       documents: Array.isArray(docsRaw)
         ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
         : [],
-      shopifyOrderIds: Array.isArray(row.shopifyOrderIds ?? row.ShopifyOrderIds)
-        ? (row.shopifyOrderIds ?? row.ShopifyOrderIds).filter(
-            (id): id is string => typeof id === 'string' && id.trim().length > 0
-          )
-        : [],
+      shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
     };
   });
 }
@@ -92,11 +93,7 @@ export async function generateVatReport(
     documents: Array.isArray(docsRaw)
       ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
       : [],
-    shopifyOrderIds: Array.isArray(row.shopifyOrderIds ?? row.ShopifyOrderIds)
-      ? (row.shopifyOrderIds ?? row.ShopifyOrderIds).filter(
-          (id): id is string => typeof id === 'string' && id.trim().length > 0
-        )
-      : [],
+    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
   };
 }
 
@@ -140,6 +137,7 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
             polandRows: Array.isArray(polandRowsRaw)
               ? polandRowsRaw.map((p) => {
                   const d = p as Record<string, unknown>;
+                  const detailItemsRaw = d.items ?? d.Items;
                   return {
                     id: readInt(d.id ?? d.Id),
                     orderNumber: String(d.orderNumber ?? d.OrderNumber ?? ''),
@@ -151,8 +149,8 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
                     shippingGrossAmount: readNumber(d.shippingGrossAmount ?? d.ShippingGrossAmount),
                     shippingNetAmount: readNumber(d.shippingNetAmount ?? d.ShippingNetAmount),
                     invoiceFileName: String(d.invoiceFileName ?? d.InvoiceFileName ?? ''),
-                    items: Array.isArray(d.items ?? d.Items)
-                      ? (d.items ?? d.Items).map((it) => {
+                    items: Array.isArray(detailItemsRaw)
+                      ? detailItemsRaw.map((it) => {
                           const i = it as Record<string, unknown>;
                           return {
                             productTitle: String(i.productTitle ?? i.ProductTitle ?? ''),
@@ -289,11 +287,7 @@ export async function regenerateVatReport(id: number): Promise<VatReport> {
     documents: Array.isArray(docsRaw)
       ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
       : [],
-    shopifyOrderIds: Array.isArray(row.shopifyOrderIds ?? row.ShopifyOrderIds)
-      ? (row.shopifyOrderIds ?? row.ShopifyOrderIds).filter(
-          (item): item is string => typeof item === 'string' && item.trim().length > 0
-        )
-      : [],
+    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
   };
 }
 
