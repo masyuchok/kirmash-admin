@@ -84,8 +84,22 @@ const SuppliersClient = () => {
       credentials: apiCredentials,
     })
       .then((res) => res.json())
-      .then((data) => {
-        setSuppliers(data);
+      .then((data: unknown) => {
+        const rows = Array.isArray(data)
+          ? data.map((row) => {
+              const r = row as Record<string, unknown>;
+              return {
+                id: Number(r.id ?? r.Id ?? 0),
+                name: String(r.name ?? r.Name ?? ''),
+                telegram: String(r.telegram ?? r.Telegram ?? r.tgContact ?? r.TGContact ?? ''),
+                website: String(r.website ?? r.Website ?? ''),
+                country: String(r.country ?? r.Country ?? ''),
+                city: String(r.city ?? r.City ?? ''),
+                isVatPayer: Boolean(r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false),
+              } satisfies Supplier;
+            })
+          : [];
+        setSuppliers(rows);
         setLoading(false);
       })
       .catch((err) => {
