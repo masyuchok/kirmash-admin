@@ -23,6 +23,7 @@ type Props = {
 type SupplierOption = {
   id: number;
   name: string;
+  isVatPayer: boolean;
 };
 
 type SupplyProductDraft = {
@@ -69,6 +70,8 @@ export default function NewSupplyClient({
   const normalizeVatRateOption = (value: number): number => {
     return VAT_RATE_OPTIONS.includes(value as (typeof VAT_RATE_OPTIONS)[number]) ? value : 23;
   };
+
+  const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
   const router = useRouter();
   const { setTopbarButtons, setTopbarPage } = useTopbar();
@@ -132,8 +135,11 @@ export default function NewSupplyClient({
             const r = row as Record<string, unknown>;
             const id = typeof r.id === 'number' ? r.id : Number(r.id);
             const name = typeof r.name === 'string' ? r.name : '';
+            const isVatPayer = Boolean(
+              r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false
+            );
             if (!Number.isFinite(id) || !name.trim()) return null;
-            return { id, name };
+            return { id, name, isVatPayer };
           })
           .filter((row): row is SupplierOption => row !== null);
         setSuppliers(rows);
@@ -252,6 +258,29 @@ export default function NewSupplyClient({
     field: 'quantity' | 'supplierPrice' | 'vatRatePercent' | 'marginPercent' | 'salePrice',
     value: string
   ) => {
+    const recalcByMargin = (
+      supplierNetPrice: number,
+      marginPct: number
+    ): { saleGross: number; vatAmount: number; netSale: number } => {
+      const netSale = round2(supplierNetPrice * (1 + marginPct / 100));
+      // Business rule: when margin is set, gross = net * 1.23.
+      const saleGross = round2(netSale * 1.23);
+      const vatGrossPart = round2((saleGross * 23) / 123);
+      const vatToPay = vatGrossPart;
+      return { saleGross, vatAmount: vatToPay, netSale };
+    };
+
+    const recalcByGross = (
+      supplierNetPrice: number,
+      saleGross: number
+    ): { marginPct: number; vatAmount: number; netSale: number } => {
+      const vatGrossPart = round2((saleGross * 23) / 123);
+      const vatToPay = vatGrossPart;
+      const netSale = round2(saleGross - vatToPay);
+      const marginPct = supplierNetPrice > 0 ? round2(((netSale - supplierNetPrice) / supplierNetPrice) * 100) : 0;
+      return { marginPct, vatAmount: vatToPay, netSale };
+    };
+
     setProductDrafts((prev) =>
       prev.map((row) => {
         if (row.productId !== productId) return row;
@@ -261,44 +290,37 @@ export default function NewSupplyClient({
         const vatRatePercent = parseDecimal(next.vatRatePercent);
         const marginPercent = parseDecimal(next.marginPercent);
         const salePrice = parseDecimal(next.salePrice);
-        const vatRate = vatRatePercent !== null ? vatRatePercent / 100 : 0;
+        const vatRate = vatRatePercent ?? 23;
 
-        // If user edits margin, auto-calc sale price.
+        // If user edits margin, auto-calc sale price (gross) from net margin logic.
         if (field === 'marginPercent' && supplierPrice !== null && marginPercent !== null) {
-          const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-          next.salePrice = formatDecimal(calculatedSale);
+          const calculated = recalcByMargin(supplierPrice, marginPercent);
+          next.salePrice = formatDecimal(calculated.saleGross);
         }
 
-        // If user edits sale price, auto-calc margin percent.
+        // If user edits sale price (gross), auto-calc margin from net sale.
         if (field === 'salePrice' && supplierPrice !== null && supplierPrice > 0 && salePrice !== null) {
-          const netWithVatBase = supplierPrice * (1 + vatRate);
-          if (netWithVatBase > 0) {
-            const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-            next.marginPercent = formatDecimal(calculatedMargin);
-          }
+          const calculated = recalcByGross(supplierPrice, salePrice);
+          next.marginPercent = formatDecimal(calculated.marginPct);
         }
 
-        // If supplier price changes, keep fields in sync based on what's available.
+        // If supplier net price changes, keep sale/margin synced.
         if (field === 'supplierPrice' && supplierPrice !== null && supplierPrice > 0) {
           if (marginPercent !== null) {
-            const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-            next.salePrice = formatDecimal(calculatedSale);
+            const calculated = recalcByMargin(supplierPrice, marginPercent);
+            next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const netWithVatBase = supplierPrice * (1 + vatRate);
-            const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-            next.marginPercent = formatDecimal(calculatedMargin);
+            const calculated = recalcByGross(supplierPrice, salePrice);
+            next.marginPercent = formatDecimal(calculated.marginPct);
           }
         }
         if (field === 'vatRatePercent' && supplierPrice !== null && supplierPrice > 0) {
           if (marginPercent !== null) {
-            const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-            next.salePrice = formatDecimal(calculatedSale);
+            const calculated = recalcByMargin(supplierPrice, marginPercent);
+            next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const netWithVatBase = supplierPrice * (1 + vatRate);
-            if (netWithVatBase > 0) {
-              const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-              next.marginPercent = formatDecimal(calculatedMargin);
-            }
+            const calculated = recalcByGross(supplierPrice, salePrice);
+            next.marginPercent = formatDecimal(calculated.marginPct);
           }
         }
 
