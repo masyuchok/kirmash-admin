@@ -13,8 +13,12 @@ obj/
 # .NET
 *.db
 *.log
+**/appsettings.Development.json
+**/appsettings.Production.json
 
 # Node.js
 node_modules/
 .next/
 .env
+/backend/Migrations/20251018173256_UpdateSupplierFields.cs
+/backend/Migrations
