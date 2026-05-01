@@ -1,0 +1,48 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "${BIND_IP}:${BACKEND_PORT}:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+      - Jwt__Secret=${JWT_SECRET}
+      - Shopify__ApiKey=${SHOPIFY_API_KEY}
+      - Shopify__ApiSecret=${SHOPIFY_API_SECRET}
+      - BaseUrl=${API_URL}
+      - ClientUrl=${APP_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${BIND_IP}:${FRONTEND_PORT}:3000"
+    environment:
+      - AUTH_COOKIE_NAME=${AUTH_COOKIE_NAME}
+      - NEXT_PUBLIC_API_URL=${API_URL}
+      - NEXT_PUBLIC_SHOP_DOMAIN=${SHOP_DOMAIN}
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
