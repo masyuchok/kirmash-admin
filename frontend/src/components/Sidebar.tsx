@@ -7,6 +7,7 @@ import {
   FiBarChart2,
   FiFileText,
   FiPackage,
+  FiSettings,
   FiShoppingBag,
   FiTruck,
   FiTrendingUp,
@@ -19,6 +20,7 @@ const nav = [
   { href: '/products', label: 'Прадукты', icon: FiShoppingBag },
   { href: '/sales', label: 'Продажы', icon: FiTrendingUp },
   { href: '/documents', label: 'Дакументы', icon: FiFileText },
+  { href: '/settings', label: 'Налады', icon: FiSettings },
 ] as const;
 
 function navItemActive(href: string, pathname: string | null): boolean {

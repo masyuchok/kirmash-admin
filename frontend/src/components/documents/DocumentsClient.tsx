@@ -8,6 +8,13 @@ import { useTopbar } from '@/components/topbar/TopbarContext';
 import { fetchVatReports, generateVatReport, regenerateVatReport } from '@/lib/api/reports';
 import type { VatReport } from '@/types/report';
 
+type DocumentsTabId = 'reports' | 'other';
+
+const documentsTabs: { id: DocumentsTabId; label: string }[] = [
+  { id: 'reports', label: 'Справаздачы' },
+  { id: 'other', label: 'Іншыя дакументы' },
+];
+
 function formatAmount(value: number): string {
   return value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -34,7 +41,6 @@ function formatPeriod(month: number, year: number): string {
 export default function DocumentsClient() {
   const router = useRouter();
   const { setTopbarButtons, setTopbarPage } = useTopbar();
-  const [modalOpen, setModalOpen] = useState(false);
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [reports, setReports] = useState<VatReport[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46,6 +52,7 @@ export default function DocumentsClient() {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [regeneratingId, setRegeneratingId] = useState<number | null>(null);
   const [pendingRegenerateReport, setPendingRegenerateReport] = useState<VatReport | null>(null);
+  const [activeTab, setActiveTab] = useState<DocumentsTabId>('reports');
 
   useEffect(() => {
     setTopbarPage({ title: 'Дакументы' });
@@ -57,7 +64,7 @@ export default function DocumentsClient() {
   }, [setTopbarButtons, setTopbarPage]);
 
   useEffect(() => {
-    if (!modalOpen) return;
+    if (activeTab !== 'reports') return;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -78,7 +85,7 @@ export default function DocumentsClient() {
     return () => {
       cancelled = true;
     };
-  }, [modalOpen]);
+  }, [activeTab]);
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -222,48 +229,43 @@ export default function DocumentsClient() {
   }, [pendingRegenerateReport, regeneratingId]);
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6">
-      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="border-b border-gray-100 px-6 py-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Дакументы</h2>
-        </div>
-        <div className="p-6">
-          <button
-            type="button"
-            onClick={() => setModalOpen(true)}
-            className="group inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary hover:shadow-md"
-          >
-            <FiFileText className="size-4 text-primary transition group-hover:text-primary" aria-hidden />
-            Справаздачы
-          </button>
+    <div className="mx-auto w-full max-w-6xl space-y-4">
+      <div className="rounded-xl border border-gray-200 bg-white p-2 shadow-sm">
+        <div className="flex flex-wrap gap-2">
+          {documentsTabs.map((tab) => {
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  isActive
+                    ? 'bg-primary text-white shadow-sm'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-gray-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        {activeTab === 'reports' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold text-gray-900">Згенераваныя справаздачы</h3>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setGenerateModalOpen(true)}
-                  className="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition hover:bg-primary/10"
-                >
-                  Згенераваць новую
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="inline-flex size-8 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-700"
-                  aria-label="Закрыць"
-                  title="Закрыць"
-                >
-                  <FiX className="size-4" aria-hidden />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setGenerateModalOpen(true)}
+                className="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-sm font-medium text-primary transition hover:bg-primary/10"
+              >
+                Згенераваць новую
+              </button>
             </div>
-            <div className="overflow-x-auto px-5 py-4">
+            <div className="overflow-x-auto">
               {loading ? (
                 <div className="py-8">
                   <LoadingSpinner label="Загрузка справаздач..." />
@@ -334,10 +336,15 @@ export default function DocumentsClient() {
               )}
             </div>
           </div>
-        </div>
-      )}
+        )}
+        {activeTab === 'other' && (
+          <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-sm text-gray-600">
+            Раздзел у распрацоўцы.
+          </div>
+        )}
+      </div>
 
-      {modalOpen && generateModalOpen && (
+      {generateModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white shadow-xl">
             <div className="border-b border-gray-100 px-5 py-4">

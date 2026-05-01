@@ -32,6 +32,7 @@ type SupplyProductDraft = {
   syncWithShopify: boolean;
   quantity: string;
   supplierPrice: string;
+  vatRatePercent: string;
   marginPercent: string;
   salePrice: string;
 };
@@ -43,6 +44,7 @@ export default function NewSupplyClient({
   supplyId,
   selectedProductIds = [],
 }: Props) {
+  const VAT_RATE_OPTIONS = [5, 23] as const;
   const VAT_BOOK = 0.05;
   const VAT_DEFAULT = 0.23;
 
@@ -58,10 +60,14 @@ export default function NewSupplyClient({
     return value.toFixed(2);
   };
 
-  const resolveVatRate = (productType: string): number => {
+  const resolveDefaultVatRatePercent = (productType: string): number => {
     const t = productType.trim().toLowerCase();
-    if (t.includes('кніг') || t.includes('книга') || t.includes('book')) return VAT_BOOK;
-    return VAT_DEFAULT;
+    if (t.includes('кніг') || t.includes('книга') || t.includes('book')) return VAT_BOOK * 100;
+    return VAT_DEFAULT * 100;
+  };
+
+  const normalizeVatRateOption = (value: number): number => {
+    return VAT_RATE_OPTIONS.includes(value as (typeof VAT_RATE_OPTIONS)[number]) ? value : 23;
   };
 
   const router = useRouter();
@@ -164,6 +170,7 @@ export default function NewSupplyClient({
             syncWithShopify: p.syncWithShopify,
             quantity: p.quantity > 0 ? String(p.quantity) : '',
             supplierPrice: p.supplierPrice > 0 ? String(p.supplierPrice) : '',
+            vatRatePercent: String(normalizeVatRateOption(p.vatRatePercent > 0 ? p.vatRatePercent : 23)),
             marginPercent: p.marginPercent > 0 ? String(p.marginPercent) : '',
             salePrice: p.salePrice > 0 ? String(p.salePrice) : '',
           };
@@ -225,6 +232,7 @@ export default function NewSupplyClient({
           syncWithShopify: true,
           quantity: '',
           supplierPrice: '',
+          vatRatePercent: String(resolveDefaultVatRatePercent(product.productType)),
           marginPercent: '',
           salePrice: '',
         });
@@ -235,7 +243,7 @@ export default function NewSupplyClient({
 
   const updateDraftField = (
     productId: string,
-    field: 'quantity' | 'supplierPrice' | 'marginPercent' | 'salePrice',
+    field: 'quantity' | 'supplierPrice' | 'vatRatePercent' | 'marginPercent' | 'salePrice',
     value: string
   ) => {
     setProductDrafts((prev) =>
@@ -244,9 +252,10 @@ export default function NewSupplyClient({
 
         const next: SupplyProductDraft = { ...row, [field]: value };
         const supplierPrice = parseDecimal(next.supplierPrice);
+        const vatRatePercent = parseDecimal(next.vatRatePercent);
         const marginPercent = parseDecimal(next.marginPercent);
         const salePrice = parseDecimal(next.salePrice);
-        const vatRate = resolveVatRate(next.productType);
+        const vatRate = vatRatePercent !== null ? vatRatePercent / 100 : 0;
 
         // If user edits margin, auto-calc sale price.
         if (field === 'marginPercent' && supplierPrice !== null && marginPercent !== null) {
@@ -272,6 +281,18 @@ export default function NewSupplyClient({
             const netWithVatBase = supplierPrice * (1 + vatRate);
             const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
             next.marginPercent = formatDecimal(calculatedMargin);
+          }
+        }
+        if (field === 'vatRatePercent' && supplierPrice !== null && supplierPrice > 0) {
+          if (marginPercent !== null) {
+            const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
+            next.salePrice = formatDecimal(calculatedSale);
+          } else if (salePrice !== null) {
+            const netWithVatBase = supplierPrice * (1 + vatRate);
+            if (netWithVatBase > 0) {
+              const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
+              next.marginPercent = formatDecimal(calculatedMargin);
+            }
           }
         }
 
@@ -312,6 +333,7 @@ export default function NewSupplyClient({
       const quantity = Number(row.quantity);
       const supplierPrice = Number(row.supplierPrice);
       const marginPercent = Number(row.marginPercent);
+      const vatRatePercent = Number(row.vatRatePercent);
       const salePrice = Number(row.salePrice);
       if (!Number.isFinite(quantity) || quantity <= 0) {
         setSaveError(`Праверце колькасць для "${row.productName}" (павінна быць > 0).`);
@@ -323,6 +345,10 @@ export default function NewSupplyClient({
       }
       if (!Number.isFinite(marginPercent) || marginPercent < 0) {
         setSaveError(`Праверце "Наш %" для "${row.productName}".`);
+        return;
+      }
+      if (!Number.isFinite(vatRatePercent) || !VAT_RATE_OPTIONS.includes(vatRatePercent as 5 | 23)) {
+        setSaveError(`Праверце "VAT %" для "${row.productName}" (5% або 23%).`);
         return;
       }
       if (!Number.isFinite(salePrice) || salePrice < 0) {
@@ -339,6 +365,7 @@ export default function NewSupplyClient({
         shopifyProductId: row.productId,
         quantity: Number(row.quantity || 0),
         supplierPrice: Number(row.supplierPrice || 0),
+        vatRatePercent: Number(row.vatRatePercent || 0),
         marginPercent: Number(row.marginPercent || 0),
         salePrice: Number(row.salePrice || 0),
         syncWithShopify: row.syncWithShopify,
@@ -502,6 +529,7 @@ export default function NewSupplyClient({
                 <th className="whitespace-nowrap px-6 py-3.5">Назва</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Колькасць</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Цана пастаўшчыка</th>
+                <th className="whitespace-nowrap px-4 py-3.5">VAT %</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Наш %</th>
                 <th className="whitespace-nowrap px-6 py-3.5">Цана продажу</th>
                 <th className="whitespace-nowrap px-4 py-3.5 text-center">Shopify</th>
@@ -511,7 +539,7 @@ export default function NewSupplyClient({
             <tbody className="bg-white">
               {productDrafts.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-6 py-16 text-center">
+                  <td colSpan={8} className="px-6 py-16 text-center">
                     <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
                     <p className="mt-1 text-sm text-gray-500">Націсніце "Дадаць тавар", каб выбраць прадукты.</p>
                   </td>
@@ -592,6 +620,18 @@ export default function NewSupplyClient({
                       />
                     </td>
                     <td className="px-4 py-3.5">
+                      <select
+                        value={row.vatRatePercent}
+                        onChange={(e) =>
+                          updateDraftField(row.productId, 'vatRatePercent', e.currentTarget.value)
+                        }
+                        className="w-24 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                      >
+                        <option value="5">5%</option>
+                        <option value="23">23%</option>
+                      </select>
+                    </td>
+                    <td className="px-4 py-3.5">
                       <div className="space-y-1">
                         <input
                           type="number"
@@ -602,9 +642,6 @@ export default function NewSupplyClient({
                           }
                           className="w-24 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
                         />
-                        <p className="text-xs text-gray-500">
-                          НДС: {resolveVatRate(row.productType) === VAT_BOOK ? '5%' : '23%'}
-                        </p>
                       </div>
                     </td>
                     <td className="px-6 py-3.5">

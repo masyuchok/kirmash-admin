@@ -8,6 +8,7 @@ export type VatReportPolandDetailRow = {
   netAmount: number;
   shippingGrossAmount: number;
   shippingNetAmount: number;
+  invoiceFileName: string;
   items: VatReportPolandDetailItem[];
 };
 
@@ -28,6 +29,8 @@ export type VatReportSummaryRow = {
   orderDateUtc?: string | null;
   deliveryName?: string;
   deliveryAddress?: string;
+  shippingAddress?: string;
+  billingAddress?: string;
   grossAmount?: number;
   vat: number;
   netAmount?: number;

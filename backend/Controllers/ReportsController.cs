@@ -167,5 +167,50 @@ namespace backend.Controllers
                 return StatusCode( 500, new { error = "Памылка выдалення радка справаздачы", details = ex.Message } );
             }
         }
+
+        [HttpPost( "rows/{rowId:int}/invoice" )]
+        [RequestSizeLimit( 10 * 1024 * 1024 )]
+        public async Task<IActionResult> UploadInvoice( int rowId, [FromForm] VatReportInvoiceUploadRequest request )
+        {
+            try
+            {
+                IFormFile? file = request.File;
+                if (file is null || file.Length == 0)
+                {
+                    return BadRequest( new { error = "Файл не абраны." } );
+                }
+                string contentType = string.IsNullOrWhiteSpace( file.ContentType ) ? "application/octet-stream" : file.ContentType;
+                await using MemoryStream ms = new();
+                await file.CopyToAsync( ms );
+                await _service.UploadRowInvoiceAsync( rowId, file.FileName, contentType, ms.ToArray() );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка загрузкі фактуры", details = ex.Message } );
+            }
+        }
+
+        [HttpGet( "rows/{rowId:int}/invoice" )]
+        public async Task<IActionResult> DownloadInvoice( int rowId )
+        {
+            try
+            {
+                (string fileName, string contentType, byte[] data) = await _service.GetRowInvoiceAsync( rowId );
+                return File( data, contentType, fileName );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка загрузкі фактуры", details = ex.Message } );
+            }
+        }
     }
 }

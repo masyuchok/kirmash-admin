@@ -186,6 +186,7 @@ namespace backend.Services
                                 NetAmount = x.NetAmount,
                                 ShippingGrossAmount = x.ShippingGrossAmount,
                                 ShippingNetAmount = x.ShippingNetAmount,
+                                InvoiceFileName = x.InvoiceFileName,
                                 Items = x.Items
                                     .Select( i => new VatReportDetailsPolandItem
                                     {
@@ -224,7 +225,9 @@ namespace backend.Services
                             ShopifyOrderId = g.Key,
                             OrderDateUtc = g.Min( x => x.OrderDateUtc ),
                             DeliveryName = info?.Name ?? string.Empty,
-                            DeliveryAddress = info?.Address ?? string.Empty,
+                            DeliveryAddress = info?.ShippingAddress ?? info?.BillingAddress ?? string.Empty,
+                            ShippingAddress = info?.ShippingAddress ?? string.Empty,
+                            BillingAddress = info?.BillingAddress ?? string.Empty,
                             GrossAmount = Round2( g.Sum( x => x.GrossAmount ) ),
                             Vat = Round2( g.Sum( x => x.VatAmount ) ),
                             NetAmount = Round2( g.Sum( x => x.NetAmount ) ),
@@ -241,6 +244,7 @@ namespace backend.Services
                                     NetAmount = x.NetAmount,
                                     ShippingGrossAmount = x.ShippingGrossAmount,
                                     ShippingNetAmount = x.ShippingNetAmount,
+                                    InvoiceFileName = x.InvoiceFileName,
                                     Items = x.Items
                                         .Select( i => new VatReportDetailsPolandItem
                                         {
@@ -420,6 +424,47 @@ namespace backend.Services
             await RecalculateReportTotalsAsync( reportId );
         }
 
+        public async Task UploadRowInvoiceAsync( int rowId, string fileName, string contentType, byte[] data )
+        {
+            VatReportRow? row = await _db.VatReportRows.FirstOrDefaultAsync( r => r.Id == rowId );
+            if (row is null)
+            {
+                throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+            }
+            if (data.Length == 0)
+            {
+                throw new InvalidOperationException( "Файл пусты." );
+            }
+            if (data.Length > 10 * 1024 * 1024)
+            {
+                throw new InvalidOperationException( "Файл занадта вялікі. Максімум 10 MB." );
+            }
+
+            row.InvoiceFileName = fileName;
+            row.InvoiceContentType = contentType;
+            row.InvoiceData = data;
+            await _db.SaveChangesAsync();
+        }
+
+        public async Task<(string FileName, string ContentType, byte[] Data)> GetRowInvoiceAsync( int rowId )
+        {
+            VatReportRow? row = await _db.VatReportRows.FirstOrDefaultAsync( r => r.Id == rowId );
+            if (row is null)
+            {
+                throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+            }
+            if (row.InvoiceData is null || row.InvoiceData.Length == 0)
+            {
+                throw new InvalidOperationException( "Фактура для гэтага радка не загружана." );
+            }
+
+            return (
+                string.IsNullOrWhiteSpace( row.InvoiceFileName ) ? $"invoice-{row.Id}.pdf" : row.InvoiceFileName,
+                string.IsNullOrWhiteSpace( row.InvoiceContentType ) ? "application/pdf" : row.InvoiceContentType,
+                row.InvoiceData
+            );
+        }
+
         private async Task RecalculateReportTotalsAsync( int reportId )
         {
             decimal totalVat = await _db.VatReportRows
@@ -443,6 +488,7 @@ namespace backend.Services
         private async Task<List<VatReportRow>> BuildPolandRowsAsync( int year, int month )
         {
             List<ShopifyOrderDto> orders = await FetchOrdersForPolandAsync( year, month );
+            Dictionary<string, decimal> supplyVatRates = await GetSupplyVatRatesAsync();
             List<VatReportRow> rows = new();
 
             foreach (ShopifyOrderDto order in orders)
@@ -457,7 +503,10 @@ namespace backend.Services
                 {
                     decimal lineGross = Round2( item.LineTotalGross );
                     if (lineGross <= 0) continue;
-                    (decimal assignedRate, string reason) = ClassifyVatRate( item.ProductType, item.Title );
+                    (decimal assignedRate, string reason) = ResolveVatRateForReportItem(
+                        item.ShopifyProductId,
+                        supplyVatRates
+                    );
                     ShopifyClassifiedItemDto classified = new()
                     {
                         ProductTitle = item.Title,
@@ -536,6 +585,7 @@ namespace backend.Services
         private async Task<List<VatReportRow>> BuildForeignRowsAsync( int year, int month )
         {
             List<ShopifyOrderDto> orders = await FetchOrdersForForeignAsync( year, month );
+            Dictionary<string, decimal> supplyVatRates = await GetSupplyVatRatesAsync();
             List<VatReportRow> rows = new();
             foreach (ShopifyOrderDto order in orders)
             {
@@ -548,7 +598,10 @@ namespace backend.Services
                 {
                     decimal lineGross = Round2( item.LineTotalGross );
                     if (lineGross <= 0m) continue;
-                    (decimal classifiedRate, string classifiedReason) = ClassifyVatRate( item.ProductType, item.Title );
+                    (decimal classifiedRate, string classifiedReason) = ResolveVatRateForReportItem(
+                        item.ShopifyProductId,
+                        supplyVatRates
+                    );
                     decimal assignedRate = !isEuDestination ? 0m : classifiedRate;
                     string reason = !isEuDestination ? "non-eu-destination" : classifiedReason;
                     if (!grossByRate.ContainsKey( assignedRate )) grossByRate[assignedRate] = 0m;
@@ -694,10 +747,14 @@ namespace backend.Services
                               }
                             }
                             product {
+                              id
                               productType
                             }
                             variant {
-                              product { productType }
+                              product {
+                                id
+                                productType
+                              }
                             }
                           }
                         }
@@ -833,23 +890,46 @@ namespace backend.Services
                                            titleEl.ValueKind == JsonValueKind.String
                                 ? (titleEl.GetString() ?? string.Empty)
                                 : string.Empty;
+                            string productId = string.Empty;
                             string productType = string.Empty;
                             if (itemNode.TryGetProperty( "product", out JsonElement lineProductEl ) &&
-                                lineProductEl.ValueKind == JsonValueKind.Object &&
-                                lineProductEl.TryGetProperty( "productType", out JsonElement lineProductTypeEl ) &&
-                                lineProductTypeEl.ValueKind == JsonValueKind.String)
+                                lineProductEl.ValueKind == JsonValueKind.Object)
                             {
-                                productType = lineProductTypeEl.GetString() ?? string.Empty;
+                                if (lineProductEl.TryGetProperty( "id", out JsonElement lineProductIdEl ) &&
+                                    lineProductIdEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productId = NormalizeFromShopifyGid(
+                                        lineProductIdEl.GetString() ?? string.Empty,
+                                        "gid://shopify/Product/"
+                                    );
+                                }
+                                if (lineProductEl.TryGetProperty( "productType", out JsonElement lineProductTypeEl ) &&
+                                    lineProductTypeEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productType = lineProductTypeEl.GetString() ?? string.Empty;
+                                }
                             }
-                            if (string.IsNullOrWhiteSpace( productType ) &&
+                            if ((string.IsNullOrWhiteSpace( productType ) || string.IsNullOrWhiteSpace( productId )) &&
                                 itemNode.TryGetProperty( "variant", out JsonElement variantEl ) &&
                                 variantEl.ValueKind == JsonValueKind.Object &&
                                 variantEl.TryGetProperty( "product", out JsonElement variantProductEl ) &&
-                                variantProductEl.ValueKind == JsonValueKind.Object &&
-                                variantProductEl.TryGetProperty( "productType", out JsonElement variantProductTypeEl ) &&
-                                variantProductTypeEl.ValueKind == JsonValueKind.String)
+                                variantProductEl.ValueKind == JsonValueKind.Object)
                             {
-                                productType = variantProductTypeEl.GetString() ?? string.Empty;
+                                if (string.IsNullOrWhiteSpace( productId ) &&
+                                    variantProductEl.TryGetProperty( "id", out JsonElement variantProductIdEl ) &&
+                                    variantProductIdEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productId = NormalizeFromShopifyGid(
+                                        variantProductIdEl.GetString() ?? string.Empty,
+                                        "gid://shopify/Product/"
+                                    );
+                                }
+                                if (string.IsNullOrWhiteSpace( productType ) &&
+                                    variantProductEl.TryGetProperty( "productType", out JsonElement variantProductTypeEl ) &&
+                                    variantProductTypeEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productType = variantProductTypeEl.GetString() ?? string.Empty;
+                                }
                             }
                             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
                             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
@@ -896,6 +976,7 @@ namespace backend.Services
                             }
                             items.Add( new ShopifyLineItemDto
                             {
+                                ShopifyProductId = productId,
                                 Quantity = quantity,
                                 UnitPrice = unitPrice,
                                 LineTotalGross = Round2( lineTotalGross ),
@@ -972,8 +1053,16 @@ namespace backend.Services
                             discountAllocations {
                               allocatedAmountSet { shopMoney { amount } }
                             }
-                            product { productType }
-                            variant { product { productType } }
+                            product {
+                              id
+                              productType
+                            }
+                            variant {
+                              product {
+                                id
+                                productType
+                              }
+                            }
                           }
                         }
                       }
@@ -1105,23 +1194,46 @@ namespace backend.Services
                                            titleEl.ValueKind == JsonValueKind.String
                                 ? (titleEl.GetString() ?? string.Empty)
                                 : string.Empty;
+                            string productId = string.Empty;
                             string productType = string.Empty;
                             if (itemNode.TryGetProperty( "product", out JsonElement lineProductEl ) &&
-                                lineProductEl.ValueKind == JsonValueKind.Object &&
-                                lineProductEl.TryGetProperty( "productType", out JsonElement lineProductTypeEl ) &&
-                                lineProductTypeEl.ValueKind == JsonValueKind.String)
+                                lineProductEl.ValueKind == JsonValueKind.Object)
                             {
-                                productType = lineProductTypeEl.GetString() ?? string.Empty;
+                                if (lineProductEl.TryGetProperty( "id", out JsonElement lineProductIdEl ) &&
+                                    lineProductIdEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productId = NormalizeFromShopifyGid(
+                                        lineProductIdEl.GetString() ?? string.Empty,
+                                        "gid://shopify/Product/"
+                                    );
+                                }
+                                if (lineProductEl.TryGetProperty( "productType", out JsonElement lineProductTypeEl ) &&
+                                    lineProductTypeEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productType = lineProductTypeEl.GetString() ?? string.Empty;
+                                }
                             }
-                            if (string.IsNullOrWhiteSpace( productType ) &&
+                            if ((string.IsNullOrWhiteSpace( productType ) || string.IsNullOrWhiteSpace( productId )) &&
                                 itemNode.TryGetProperty( "variant", out JsonElement variantEl ) &&
                                 variantEl.ValueKind == JsonValueKind.Object &&
                                 variantEl.TryGetProperty( "product", out JsonElement variantProductEl ) &&
-                                variantProductEl.ValueKind == JsonValueKind.Object &&
-                                variantProductEl.TryGetProperty( "productType", out JsonElement variantProductTypeEl ) &&
-                                variantProductTypeEl.ValueKind == JsonValueKind.String)
+                                variantProductEl.ValueKind == JsonValueKind.Object)
                             {
-                                productType = variantProductTypeEl.GetString() ?? string.Empty;
+                                if (string.IsNullOrWhiteSpace( productId ) &&
+                                    variantProductEl.TryGetProperty( "id", out JsonElement variantProductIdEl ) &&
+                                    variantProductIdEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productId = NormalizeFromShopifyGid(
+                                        variantProductIdEl.GetString() ?? string.Empty,
+                                        "gid://shopify/Product/"
+                                    );
+                                }
+                                if (string.IsNullOrWhiteSpace( productType ) &&
+                                    variantProductEl.TryGetProperty( "productType", out JsonElement variantProductTypeEl ) &&
+                                    variantProductTypeEl.ValueKind == JsonValueKind.String)
+                                {
+                                    productType = variantProductTypeEl.GetString() ?? string.Empty;
+                                }
                             }
                             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
                             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
@@ -1163,6 +1275,7 @@ namespace backend.Services
 
                             items.Add( new ShopifyLineItemDto
                             {
+                                ShopifyProductId = productId,
                                 Quantity = quantity,
                                 UnitPrice = unitPrice,
                                 LineTotalGross = Round2( lineTotalGross ),
@@ -1273,31 +1386,41 @@ namespace backend.Services
                     if (!node.TryGetProperty( "id", out JsonElement idEl ) || idEl.ValueKind != JsonValueKind.String) continue;
                     string orderId = NormalizeFromShopifyGid( idEl.GetString() ?? string.Empty, "gid://shopify/Order/" );
                     if (string.IsNullOrWhiteSpace( orderId )) continue;
-                    JsonElement addr = node.TryGetProperty( "shippingAddress", out JsonElement shippingEl ) && shippingEl.ValueKind == JsonValueKind.Object
+                    JsonElement shippingAddr = node.TryGetProperty( "shippingAddress", out JsonElement shippingEl ) && shippingEl.ValueKind == JsonValueKind.Object
                         ? shippingEl
-                        : node.TryGetProperty( "billingAddress", out JsonElement billingEl ) && billingEl.ValueKind == JsonValueKind.Object
-                            ? billingEl
-                            : default;
+                        : default;
+                    JsonElement billingAddr = node.TryGetProperty( "billingAddress", out JsonElement billingEl ) && billingEl.ValueKind == JsonValueKind.Object
+                        ? billingEl
+                        : default;
+                    JsonElement addr = shippingAddr.ValueKind == JsonValueKind.Object ? shippingAddr : billingAddr;
                     string firstName = ReadString( addr, "firstName" );
                     string lastName = ReadString( addr, "lastName" );
                     string name = $"{firstName} {lastName}".Trim();
-                    string address = string.Join( ", ", new[]
-                    {
-                        ReadString( addr, "address1" ),
-                        ReadString( addr, "address2" ),
-                        ReadString( addr, "city" ),
-                        ReadString( addr, "zip" ),
-                        ReadString( addr, "country" )
-                    }.Where( x => !string.IsNullOrWhiteSpace( x ) ));
+                    string shippingAddress = FormatAddress( shippingAddr );
+                    string billingAddress = FormatAddress( billingAddr );
                     result[orderId] = new ForeignDeliveryInfo
                     {
                         Name = name,
-                        Address = address
+                        ShippingAddress = shippingAddress,
+                        BillingAddress = billingAddress
                     };
                 }
             }
 
             return result;
+        }
+
+        private static string FormatAddress( JsonElement addr )
+        {
+            if (addr.ValueKind != JsonValueKind.Object) return string.Empty;
+            return string.Join( ", ", new[]
+            {
+                ReadString( addr, "address1" ),
+                ReadString( addr, "address2" ),
+                ReadString( addr, "city" ),
+                ReadString( addr, "zip" ),
+                ReadString( addr, "country" )
+            }.Where( x => !string.IsNullOrWhiteSpace( x ) ));
         }
 
         private static string ReadString( JsonElement node, string prop )
@@ -1345,6 +1468,53 @@ namespace backend.Services
                 return (5m, "book-rule");
             }
             return (23m, "default-non-book");
+        }
+
+        private static (decimal rate, string reason) ResolveVatRateForReportItem(
+            string shopifyProductId,
+            IReadOnlyDictionary<string, decimal> supplyVatRates
+        )
+        {
+            string normalizedId = NormalizeFromShopifyGid( shopifyProductId, "gid://shopify/Product/" ).Trim();
+            if (!string.IsNullOrWhiteSpace( normalizedId ) &&
+                supplyVatRates.TryGetValue( normalizedId, out decimal configuredRate ))
+            {
+                return (configuredRate, "supply-vat-rate");
+            }
+
+            return (23m, "default-supply-rate");
+        }
+
+        private async Task<Dictionary<string, decimal>> GetSupplyVatRatesAsync()
+        {
+            var rows = await _db.SupplyProducts
+                .AsNoTracking()
+                .Where( p => !string.IsNullOrWhiteSpace( p.ShopifyProductId ) )
+                .Select( p => new
+                {
+                    ProductId = p.ShopifyProductId,
+                    VatRate = p.VatRatePercent,
+                    Date = p.Supply.Date,
+                    p.SupplyId,
+                    RowId = p.Id
+                } )
+                .ToListAsync();
+
+            return rows
+                .GroupBy(
+                    x => NormalizeFromShopifyGid( x.ProductId, "gid://shopify/Product/" ).Trim(),
+                    StringComparer.OrdinalIgnoreCase
+                )
+                .Where( g => !string.IsNullOrWhiteSpace( g.Key ) )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .OrderByDescending( x => x.Date )
+                        .ThenByDescending( x => x.SupplyId )
+                        .ThenByDescending( x => x.RowId )
+                        .First().VatRate,
+                    StringComparer.OrdinalIgnoreCase
+                );
         }
 
         private static string NormalizeFromShopifyGid( string id, string prefix )
@@ -1400,6 +1570,7 @@ namespace backend.Services
 
         private sealed class ShopifyLineItemDto
         {
+            public string ShopifyProductId { get; set; } = string.Empty;
             public int Quantity { get; set; }
             public decimal UnitPrice { get; set; }
             public decimal LineTotalGross { get; set; }
@@ -1421,7 +1592,8 @@ namespace backend.Services
         private sealed class ForeignDeliveryInfo
         {
             public string Name { get; set; } = string.Empty;
-            public string Address { get; set; } = string.Empty;
+            public string ShippingAddress { get; set; } = string.Empty;
+            public string BillingAddress { get; set; } = string.Empty;
         }
     }
 }
