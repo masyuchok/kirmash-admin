@@ -13,6 +13,8 @@ obj/
 # .NET
 *.db
 *.log
+**/appsettings.Development.json
+**/appsettings.Production.json
 
 # Node.js
 node_modules/
