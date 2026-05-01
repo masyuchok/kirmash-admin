@@ -81,6 +81,7 @@ export default function NewSupplyClient({
   const [productDrafts, setProductDrafts] = useState<SupplyProductDraft[]>([]);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [addingProductsLoading, setAddingProductsLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
@@ -200,9 +201,11 @@ export default function NewSupplyClient({
 
   useEffect(() => {
     if (selectedProductIds.length === 0) {
+      setAddingProductsLoading(false);
       return;
     }
     let cancelled = false;
+    setAddingProductsLoading(true);
     fetchProductsWithSuppliers()
       .then((rows) => {
         if (cancelled) return;
@@ -212,6 +215,9 @@ export default function NewSupplyClient({
       })
       .catch(() => {
         if (!cancelled) setSelectedProducts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAddingProductsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -537,7 +543,13 @@ export default function NewSupplyClient({
               </tr>
             </thead>
             <tbody className="bg-white">
-              {productDrafts.length === 0 ? (
+              {addingProductsLoading ? (
+                <tr>
+                  <td colSpan={8} className="px-6 py-16 text-center">
+                    <LoadingSpinner label="Дадаю выбраныя тавары..." />
+                  </td>
+                </tr>
+              ) : productDrafts.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-6 py-16 text-center">
                     <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
