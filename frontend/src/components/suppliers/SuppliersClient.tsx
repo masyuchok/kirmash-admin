@@ -91,7 +91,9 @@ const SuppliersClient = () => {
               return {
                 id: Number(r.id ?? r.Id ?? 0),
                 name: String(r.name ?? r.Name ?? ''),
-                telegram: String(r.telegram ?? r.Telegram ?? r.tgContact ?? r.TGContact ?? ''),
+                telegram: String(
+                  r.telegram ?? r.Telegram ?? r.tgContact ?? r.tGContact ?? r.TGContact ?? ''
+                ),
                 website: String(r.website ?? r.Website ?? ''),
                 country: String(r.country ?? r.Country ?? ''),
                 city: String(r.city ?? r.City ?? ''),
