@@ -132,6 +132,8 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
               : null,
             deliveryName: String(r.deliveryName ?? r.DeliveryName ?? ''),
             deliveryAddress: String(r.deliveryAddress ?? r.DeliveryAddress ?? ''),
+            shippingAddress: String(r.shippingAddress ?? r.ShippingAddress ?? ''),
+            billingAddress: String(r.billingAddress ?? r.BillingAddress ?? ''),
             grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
             vat: readNumber(r.vat ?? r.Vat),
             netAmount: readNumber(r.netAmount ?? r.NetAmount),
@@ -148,6 +150,7 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
                     netAmount: readNumber(d.netAmount ?? d.NetAmount),
                     shippingGrossAmount: readNumber(d.shippingGrossAmount ?? d.ShippingGrossAmount),
                     shippingNetAmount: readNumber(d.shippingNetAmount ?? d.ShippingNetAmount),
+                    invoiceFileName: String(d.invoiceFileName ?? d.InvoiceFileName ?? ''),
                     items: Array.isArray(d.items ?? d.Items)
                       ? (d.items ?? d.Items).map((it) => {
                           const i = it as Record<string, unknown>;
@@ -292,4 +295,34 @@ export async function regenerateVatReport(id: number): Promise<VatReport> {
         )
       : [],
   };
+}
+
+export async function uploadVatReportRowInvoice(rowId: number, file: File): Promise<void> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${rowId}/invoice`, {
+    method: 'POST',
+    credentials: apiCredentials,
+    body: formData,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць фактуру');
+    throw new Error(msg);
+  }
+}
+
+export async function downloadVatReportRowInvoice(rowId: number): Promise<{ blob: Blob; fileName: string }> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${rowId}/invoice`, {
+    method: 'GET',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося атрымаць фактуру');
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const contentDisposition = res.headers.get('content-disposition') ?? '';
+  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(contentDisposition);
+  const fileName = match ? decodeURIComponent(match[1]) : `invoice-${rowId}.pdf`;
+  return { blob, fileName };
 }

@@ -14,6 +14,9 @@ namespace backend.Models
         public decimal NetAmount { get; set; }
         public decimal ShippingGrossAmount { get; set; }
         public decimal ShippingNetAmount { get; set; }
+        public string InvoiceFileName { get; set; } = string.Empty;
+        public string InvoiceContentType { get; set; } = string.Empty;
+        public byte[]? InvoiceData { get; set; }
         public List<VatReportRowItem> Items { get; set; } = new();
     }
 }

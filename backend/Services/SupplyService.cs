@@ -56,6 +56,7 @@ namespace backend.Services
                             ShopifyProductId = p.ShopifyProductId,
                             Quantity = p.Quantity,
                             SupplierPrice = p.SupplierPrice,
+                            VatRatePercent = p.VatRatePercent,
                             MarginPercent = p.MarginPercent,
                             SalePrice = p.SalePrice,
                             SyncWithShopify = p.SyncWithShopify
@@ -91,6 +92,10 @@ namespace backend.Services
                 if (item.SupplierPrice < 0 || item.MarginPercent < 0 || item.SalePrice < 0)
                 {
                     throw new InvalidOperationException( "Цэны і працэнт не могуць быць адмоўнымі." );
+                }
+                if (item.VatRatePercent != 5m && item.VatRatePercent != 23m)
+                {
+                    throw new InvalidOperationException( "Працэнт VAT можа быць толькі 5 або 23." );
                 }
             }
 
@@ -185,6 +190,7 @@ namespace backend.Services
                     ShopifyProductId = item.ShopifyProductId.Trim(),
                     Quantity = item.Quantity,
                     SupplierPrice = item.SupplierPrice,
+                    VatRatePercent = item.VatRatePercent,
                     MarginPercent = item.MarginPercent,
                     SalePrice = item.SalePrice,
                     SyncWithShopify = item.SyncWithShopify

@@ -115,6 +115,7 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
           shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
           quantity: readInt(r.quantity ?? r.Quantity),
           supplierPrice: readNumber(r.supplierPrice ?? r.SupplierPrice),
+          vatRatePercent: readNumber(r.vatRatePercent ?? r.VatRatePercent ?? 23),
           marginPercent: readNumber(r.marginPercent ?? r.MarginPercent),
           salePrice: readNumber(r.salePrice ?? r.SalePrice),
           syncWithShopify: Boolean(r.syncWithShopify ?? r.SyncWithShopify ?? true),

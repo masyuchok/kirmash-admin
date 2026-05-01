@@ -22,6 +22,52 @@ namespace backend.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("backend.Models.InvoiceSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("CompanyName")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<string>("Nip")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Website")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("InvoiceSettings");
+                });
+
             modelBuilder.Entity("backend.Models.Product", b =>
                 {
                     b.Property<int>("Id")
@@ -149,6 +195,11 @@ namespace backend.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(true);
 
+                    b.Property<decimal>("VatRatePercent")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("numeric(7,2)")
+                        .HasDefaultValue(23m);
+
                     b.HasKey("Id");
 
                     b.HasIndex("SupplyId", "ShopifyProductId")
@@ -220,6 +271,19 @@ namespace backend.Migrations
 
                     b.Property<decimal>("GrossAmount")
                         .HasColumnType("numeric(12,2)");
+
+                    b.Property<string>("InvoiceContentType")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<byte[]>("InvoiceData")
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("InvoiceFileName")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
 
                     b.Property<decimal>("NetAmount")
                         .HasColumnType("numeric(12,2)");

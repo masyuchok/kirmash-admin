@@ -4,6 +4,7 @@ export type SupplyProductSavePayload = {
   shopifyProductId: string;
   quantity: number;
   supplierPrice: number;
+  vatRatePercent: number;
   marginPercent: number;
   salePrice: number;
   syncWithShopify: boolean;

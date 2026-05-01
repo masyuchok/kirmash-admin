@@ -13,6 +13,7 @@ export type SupplyDetailsProduct = {
   shopifyProductId: string;
   quantity: number;
   supplierPrice: number;
+  vatRatePercent: number;
   marginPercent: number;
   salePrice: number;
   syncWithShopify: boolean;

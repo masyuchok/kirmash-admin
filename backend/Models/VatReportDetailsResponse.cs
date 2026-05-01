@@ -17,6 +17,8 @@ namespace backend.Models
         public DateTime? OrderDateUtc { get; set; }
         public string DeliveryName { get; set; } = string.Empty;
         public string DeliveryAddress { get; set; } = string.Empty;
+        public string ShippingAddress { get; set; } = string.Empty;
+        public string BillingAddress { get; set; } = string.Empty;
         public decimal GrossAmount { get; set; }
         public decimal Vat { get; set; }
         public decimal NetAmount { get; set; }
@@ -34,6 +36,7 @@ namespace backend.Models
         public decimal NetAmount { get; set; }
         public decimal ShippingGrossAmount { get; set; }
         public decimal ShippingNetAmount { get; set; }
+        public string InvoiceFileName { get; set; } = string.Empty;
         public List<VatReportDetailsPolandItem> Items { get; set; } = new();
     }
 

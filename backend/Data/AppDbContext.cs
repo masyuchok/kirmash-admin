@@ -15,6 +15,7 @@ namespace backend.Data
         public DbSet<VatReport> VatReports { get; set; } = default!;
         public DbSet<VatReportRow> VatReportRows { get; set; } = default!;
         public DbSet<VatReportRowItem> VatReportRowItems { get; set; } = default!;
+        public DbSet<InvoiceSettings> InvoiceSettings { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -34,6 +35,9 @@ namespace backend.Data
                     .IsRequired();
                 entity.Property( sp => sp.SupplierPrice )
                     .HasColumnType( "numeric(12,2)" );
+                entity.Property( sp => sp.VatRatePercent )
+                    .HasColumnType( "numeric(7,2)" )
+                    .HasDefaultValue( 23m );
                 entity.Property( sp => sp.MarginPercent )
                     .HasColumnType( "numeric(7,2)" );
                 entity.Property( sp => sp.SalePrice )
@@ -100,6 +104,12 @@ namespace backend.Data
                     .HasColumnType( "numeric(12,2)" );
                 entity.Property( r => r.ShippingNetAmount )
                     .HasColumnType( "numeric(12,2)" );
+                entity.Property( r => r.InvoiceFileName )
+                    .HasMaxLength( 512 );
+                entity.Property( r => r.InvoiceContentType )
+                    .HasMaxLength( 128 );
+                entity.Property( r => r.InvoiceData )
+                    .HasColumnType( "bytea" );
             } );
 
             modelBuilder.Entity<VatReportRowItem>( entity =>
@@ -125,6 +135,30 @@ namespace backend.Data
                 entity.Property( i => i.AssignmentReason )
                     .IsRequired()
                     .HasMaxLength( 256 );
+            } );
+
+            modelBuilder.Entity<InvoiceSettings>( entity =>
+            {
+                entity.Property( x => x.CompanyName )
+                    .IsRequired()
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.Address )
+                    .IsRequired()
+                    .HasMaxLength( 1024 );
+                entity.Property( x => x.Email )
+                    .IsRequired()
+                    .HasMaxLength( 320 );
+                entity.Property( x => x.Website )
+                    .IsRequired()
+                    .HasMaxLength( 1024 );
+                entity.Property( x => x.Nip )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.Currency )
+                    .IsRequired()
+                    .HasMaxLength( 16 );
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
             } );
         }
     }
