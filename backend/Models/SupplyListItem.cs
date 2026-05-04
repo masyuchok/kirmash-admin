@@ -8,6 +8,7 @@
         public string SupplierName { get; set; } = string.Empty;
         public DateOnly Date { get; set; }
         public int ProductNumber { get; set; }
+        public int TotalQuantity { get; set; }
 
     }
 }

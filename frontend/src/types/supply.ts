@@ -7,6 +7,8 @@ export type SupplyListItem = {
   date: string;
   /** Backend `ProductNumber`. */
   productNumber: number;
+  /** Sum of product quantities in this supply. */
+  totalQuantity: number;
 };
 
 export type SupplyDetailsProduct = {

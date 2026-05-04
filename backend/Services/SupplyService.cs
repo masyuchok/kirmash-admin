@@ -33,7 +33,8 @@ namespace backend.Services
                     SupplierId = s.SupplierId,
                     SupplierName = s.Supplier.Name,
                     Date = s.Date,
-                    ProductNumber = s.SupplyProducts.Count
+                    ProductNumber = s.SupplyProducts.Count,
+                    TotalQuantity = s.SupplyProducts.Sum( p => p.Quantity )
                 })
                 .OrderBy(s => s.Date)
                 .ToListAsync();
@@ -64,6 +65,21 @@ namespace backend.Services
                         .ToList()
                 } )
                 .FirstOrDefaultAsync();
+        }
+
+        public async Task<bool> DeleteSupplyAsync( int id )
+        {
+            Supply? supply = await _db.Supplies
+                .FirstOrDefaultAsync( s => s.Id == id );
+
+            if (supply == null)
+            {
+                return false;
+            }
+
+            _db.Supplies.Remove( supply );
+            await _db.SaveChangesAsync();
+            return true;
         }
 
         public async Task<SupplySaveResult> SaveSupplyAsync( SupplySaveRequest request )

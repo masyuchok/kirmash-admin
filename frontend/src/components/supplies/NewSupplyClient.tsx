@@ -1,15 +1,14 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { FiPlus, FiX } from 'react-icons/fi';
+import { FiArrowLeft, FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
-import { fetchSupplyById } from '@/lib/api/supplies';
+import { deleteSupply, fetchSupplyById } from '@/lib/api/supplies';
 import type { ProductWithSuppliers } from '@/types/product';
 
 type Props = {
@@ -18,11 +17,14 @@ type Props = {
   initialDate: string;
   supplyId?: string;
   selectedProductIds?: string[];
+  selectedProductQuantities?: Record<string, string>;
+  restoreDraft?: boolean;
 };
 
 type SupplierOption = {
   id: number;
   name: string;
+  isVatPayer: boolean;
 };
 
 type SupplyProductDraft = {
@@ -37,12 +39,53 @@ type SupplyProductDraft = {
   salePrice: string;
 };
 
+function cloneDrafts(rows: SupplyProductDraft[]): SupplyProductDraft[] {
+  return rows.map((row) => ({ ...row }));
+}
+
+type SupplyDraftSessionPayload = {
+  productDrafts: SupplyProductDraft[];
+  currentSupplierId: string;
+  currentSupplierName: string;
+  currentDate: string;
+};
+
+const SUPPLY_DRAFT_SESSION_PREFIX = 'kirma.supplyDraft.session.v1:';
+
+function supplyDraftSessionKey(supplyId: string | undefined): string {
+  return `${SUPPLY_DRAFT_SESSION_PREFIX}${supplyId ?? 'new'}`;
+}
+
+function peekDraftSessionAfterPicker(supplyId: string | undefined): SupplyDraftSessionPayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(supplyDraftSessionKey(supplyId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SupplyDraftSessionPayload;
+    if (!parsed || !Array.isArray(parsed.productDrafts)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function removeDraftSessionIfPresent(supplyId: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(supplyDraftSessionKey(supplyId));
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function NewSupplyClient({
   initialSupplierId = '',
   initialSupplierName = '',
   initialDate,
   supplyId,
   selectedProductIds = [],
+  selectedProductQuantities = {},
+  restoreDraft = false,
 }: Props) {
   const VAT_RATE_OPTIONS = [5, 23] as const;
   const VAT_BOOK = 0.05;
@@ -70,6 +113,8 @@ export default function NewSupplyClient({
     return VAT_RATE_OPTIONS.includes(value as (typeof VAT_RATE_OPTIONS)[number]) ? value : 23;
   };
 
+  const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
   const router = useRouter();
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [currentSupplierId, setCurrentSupplierId] = useState(initialSupplierId);
@@ -79,30 +124,114 @@ export default function NewSupplyClient({
   const [selectedProducts, setSelectedProducts] = useState<ProductWithSuppliers[]>([]);
   const [productCatalog, setProductCatalog] = useState<ProductWithSuppliers[]>([]);
   const [productDrafts, setProductDrafts] = useState<SupplyProductDraft[]>([]);
+  const [baselineDrafts, setBaselineDrafts] = useState<SupplyProductDraft[]>([]);
+  const [baselineSupplierId, setBaselineSupplierId] = useState('');
+  const [baselineSupplierName, setBaselineSupplierName] = useState('');
+  const [baselineDate, setBaselineDate] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmStep, setDeleteConfirmStep] = useState<1 | 2>(1);
   const [refreshing, setRefreshing] = useState(false);
+  const [addingProductsLoading, setAddingProductsLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
 
+  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
+  const handleResetToBaselineRef = useRef<() => void>(() => {});
+  const handleDeleteSupplyRef = useRef<() => Promise<void>>(async () => {});
+
+  const persistDraftSessionForNavigation = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const payload: SupplyDraftSessionPayload = {
+        productDrafts: cloneDrafts(productDrafts),
+        currentSupplierId,
+        currentSupplierName,
+        currentDate,
+      };
+      window.sessionStorage.setItem(supplyDraftSessionKey(supplyId), JSON.stringify(payload));
+    } catch {
+      /* ignore quota / private mode */
+    }
+  };
+
+  const openProductPicker = () => {
+    persistDraftSessionForNavigation();
+    const query = new URLSearchParams();
+    if (supplyId) query.set('supplyId', supplyId);
+    if (currentSupplierId) query.set('supplierId', currentSupplierId);
+    if (currentSupplierName) query.set('supplierName', currentSupplierName);
+    if (currentDate) query.set('date', currentDate);
+    const currentIds = productDrafts.map((p) => p.productId);
+    if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
+    if (currentIds.length > 0) {
+      const quantitiesPayload = currentIds.reduce<Record<string, string>>((acc, id) => {
+        const draft = productDrafts.find((row) => row.productId === id);
+        const quantity = draft?.quantity ?? '';
+        if (quantity.trim()) acc[id] = quantity;
+        return acc;
+      }, {});
+      query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
+    }
+    router.push(`/supplies/products?${query.toString()}`);
+  };
+
   useEffect(() => {
-    setTopbarPage({ title: supplyId ? `Пастаўка #${supplyId}` : 'Новая пастаўка' });
+    setTopbarPage({ title: supplyId ? 'Пастаўка' : 'Новая пастаўка' });
     setTopbarButtons([
+      ...(supplyId
+        ? [
+            {
+              label: 'Да спісу паставак',
+              icon: <FiArrowLeft />,
+              onClick: () => router.push('/supplies'),
+              variant: 'secondary' as const,
+              disabled: saving || deleting,
+              iconOnly: true,
+              position: 'left' as const,
+            },
+          ]
+        : []),
       {
-        label: 'Дадаць тавар',
-        icon: <FiPlus />,
+        label: saving ? 'Захоўваю...' : 'Захаваць змены',
+        icon: saving ? (
+          <span
+            className="size-4 animate-spin rounded-full border-2 border-white/35 border-t-white"
+            aria-hidden
+          />
+        ) : undefined,
         onClick: () => {
-          const query = new URLSearchParams();
-          if (supplyId) query.set('supplyId', supplyId);
-          if (currentSupplierId) query.set('supplierId', currentSupplierId);
-          if (currentSupplierName) query.set('supplierName', currentSupplierName);
-          if (currentDate) query.set('date', currentDate);
-          const currentIds = productDrafts.map((p) => p.productId);
-          if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
-          router.push(`/supplies/products?${query.toString()}`);
+          void handleSaveRef.current();
         },
         variant: 'primary',
+        disabled: saving || deleting,
       },
+      ...(supplyId
+        ? [
+            {
+              label: deleting ? 'Выдаляю...' : 'Выдаліць пастаўку',
+              onClick: () => {
+                setDeleteConfirmStep(1);
+                setDeleteConfirmOpen(true);
+              },
+              variant: 'danger' as const,
+              disabled: saving || refreshing || deleting,
+            },
+          ]
+        : []),
+      ...(supplyId
+        ? [
+            {
+              label: 'Скінуць',
+              icon: <FiRotateCcw />,
+              onClick: () => handleResetToBaselineRef.current(),
+              variant: 'secondary' as const,
+              disabled: saving || refreshing || deleting,
+            },
+          ]
+        : []),
     ]);
     return () => {
       setTopbarButtons([]);
@@ -112,11 +241,10 @@ export default function NewSupplyClient({
     setTopbarButtons,
     setTopbarPage,
     supplyId,
+    saving,
+    deleting,
+    refreshing,
     initialSupplierId,
-    currentSupplierId,
-    currentSupplierName,
-    currentDate,
-    productDrafts,
     router,
   ]);
 
@@ -131,8 +259,11 @@ export default function NewSupplyClient({
             const r = row as Record<string, unknown>;
             const id = typeof r.id === 'number' ? r.id : Number(r.id);
             const name = typeof r.name === 'string' ? r.name : '';
+            const isVatPayer = Boolean(
+              r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false
+            );
             if (!Number.isFinite(id) || !name.trim()) return null;
-            return { id, name };
+            return { id, name, isVatPayer };
           })
           .filter((row): row is SupplierOption => row !== null);
         setSuppliers(rows);
@@ -146,6 +277,48 @@ export default function NewSupplyClient({
   }, []);
 
   useEffect(() => {
+    if (supplyId) return;
+    if (!restoreDraft) return;
+    const sessionPayload = peekDraftSessionAfterPicker(undefined);
+    if (!sessionPayload) return;
+
+    setCurrentSupplierId(sessionPayload.currentSupplierId || currentSupplierId);
+    setCurrentSupplierName(sessionPayload.currentSupplierName || currentSupplierName);
+    setCurrentDate(sessionPayload.currentDate || currentDate);
+
+    let cancelled = false;
+    fetchProductsWithSuppliers()
+      .then((products) => {
+        if (cancelled) return;
+        setProductCatalog(products);
+        const sessionRows = cloneDrafts(sessionPayload.productDrafts);
+        setProductDrafts((prev) => {
+          const byId = new Map<string, SupplyProductDraft>();
+          for (const row of sessionRows) byId.set(row.productId, row);
+          for (const row of prev) {
+            if (!byId.has(row.productId)) byId.set(row.productId, row);
+          }
+          const merged = Array.from(byId.values());
+          removeDraftSessionIfPresent(undefined);
+          return merged;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProductDrafts(() => {
+            const merged = cloneDrafts(sessionPayload.productDrafts);
+            removeDraftSessionIfPresent(undefined);
+            return merged;
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supplyId, restoreDraft]);
+
+  useEffect(() => {
     if (!supplyId) {
       setInitialLoading(false);
       return;
@@ -155,12 +328,17 @@ export default function NewSupplyClient({
     Promise.all([fetchSupplyById(Number(supplyId)), fetchProductsWithSuppliers()])
       .then(([supply, products]) => {
         if (cancelled) return;
+        const sessionPayload = restoreDraft ? peekDraftSessionAfterPicker(supplyId) : null;
         setProductCatalog(products);
         setCurrentSupplierId(String(supply.supplierId || ''));
         setCurrentSupplierName(supply.supplierName || '');
         setCurrentDate(supply.date || '');
 
         const productMap = new Map(products.map((p) => [p.shopifyProductId, p]));
+        const supplierIdStr = String(supply.supplierId || '');
+        const supplierNm = supply.supplierName || '';
+        const dateStr = supply.date || '';
+
         const dbDrafts: SupplyProductDraft[] = supply.products.map((p) => {
           const match = productMap.get(p.shopifyProductId);
           return {
@@ -175,14 +353,30 @@ export default function NewSupplyClient({
             salePrice: p.salePrice > 0 ? String(p.salePrice) : '',
           };
         });
-        // Merge DB rows with rows already chosen in picker to avoid race-based overwrite.
+        setBaselineDrafts(cloneDrafts(dbDrafts));
+        setBaselineSupplierId(supplierIdStr);
+        setBaselineSupplierName(supplierNm);
+        setBaselineDate(dateStr);
+        if (sessionPayload) {
+          setCurrentSupplierId(sessionPayload.currentSupplierId || supplierIdStr);
+          setCurrentSupplierName(sessionPayload.currentSupplierName || supplierNm);
+          setCurrentDate(sessionPayload.currentDate || dateStr);
+        }
+        // Prefer in-memory drafts over DB for the same productId so returning from the picker
+        // does not wipe unsaved edits.
         setProductDrafts((prev) => {
           const byId = new Map<string, SupplyProductDraft>();
-          for (const row of dbDrafts) byId.set(row.productId, row);
-          for (const row of prev) {
+          if (sessionPayload) {
+            for (const row of cloneDrafts(sessionPayload.productDrafts)) byId.set(row.productId, row);
+          } else {
+            for (const row of prev) byId.set(row.productId, row);
+          }
+          for (const row of dbDrafts) {
             if (!byId.has(row.productId)) byId.set(row.productId, row);
           }
-          return Array.from(byId.values());
+          const merged = Array.from(byId.values());
+          if (sessionPayload) removeDraftSessionIfPresent(supplyId);
+          return merged;
         });
       })
       .catch((err: unknown) => {
@@ -196,13 +390,15 @@ export default function NewSupplyClient({
     return () => {
       cancelled = true;
     };
-  }, [supplyId]);
+  }, [supplyId, restoreDraft]);
 
   useEffect(() => {
     if (selectedProductIds.length === 0) {
+      setAddingProductsLoading(false);
       return;
     }
     let cancelled = false;
+    setAddingProductsLoading(true);
     fetchProductsWithSuppliers()
       .then((rows) => {
         if (cancelled) return;
@@ -212,6 +408,9 @@ export default function NewSupplyClient({
       })
       .catch(() => {
         if (!cancelled) setSelectedProducts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAddingProductsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -230,7 +429,7 @@ export default function NewSupplyClient({
           productName: product.productName,
           productType: product.productType,
           syncWithShopify: true,
-          quantity: '',
+          quantity: selectedProductQuantities[product.shopifyProductId] ?? '',
           supplierPrice: '',
           vatRatePercent: String(resolveDefaultVatRatePercent(product.productType)),
           marginPercent: '',
@@ -239,13 +438,36 @@ export default function NewSupplyClient({
       }
       return next;
     });
-  }, [selectedProducts]);
+  }, [selectedProducts, selectedProductQuantities]);
 
   const updateDraftField = (
     productId: string,
     field: 'quantity' | 'supplierPrice' | 'vatRatePercent' | 'marginPercent' | 'salePrice',
     value: string
   ) => {
+    const recalcByMargin = (
+      supplierNetPrice: number,
+      marginPct: number
+    ): { saleGross: number; vatAmount: number; netSale: number } => {
+      const netSale = round2(supplierNetPrice * (1 + marginPct / 100));
+      // Business rule: when margin is set, gross = net * 1.23.
+      const saleGross = round2(netSale * 1.23);
+      const vatGrossPart = round2((saleGross * 23) / 123);
+      const vatToPay = vatGrossPart;
+      return { saleGross, vatAmount: vatToPay, netSale };
+    };
+
+    const recalcByGross = (
+      supplierNetPrice: number,
+      saleGross: number
+    ): { marginPct: number; vatAmount: number; netSale: number } => {
+      const vatGrossPart = round2((saleGross * 23) / 123);
+      const vatToPay = vatGrossPart;
+      const netSale = round2(saleGross - vatToPay);
+      const marginPct = supplierNetPrice > 0 ? round2(((netSale - supplierNetPrice) / supplierNetPrice) * 100) : 0;
+      return { marginPct, vatAmount: vatToPay, netSale };
+    };
+
     setProductDrafts((prev) =>
       prev.map((row) => {
         if (row.productId !== productId) return row;
@@ -255,44 +477,37 @@ export default function NewSupplyClient({
         const vatRatePercent = parseDecimal(next.vatRatePercent);
         const marginPercent = parseDecimal(next.marginPercent);
         const salePrice = parseDecimal(next.salePrice);
-        const vatRate = vatRatePercent !== null ? vatRatePercent / 100 : 0;
+        const vatRate = vatRatePercent ?? 23;
 
-        // If user edits margin, auto-calc sale price.
+        // If user edits margin, auto-calc sale price (gross) from net margin logic.
         if (field === 'marginPercent' && supplierPrice !== null && marginPercent !== null) {
-          const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-          next.salePrice = formatDecimal(calculatedSale);
+          const calculated = recalcByMargin(supplierPrice, marginPercent);
+          next.salePrice = formatDecimal(calculated.saleGross);
         }
 
-        // If user edits sale price, auto-calc margin percent.
+        // If user edits sale price (gross), auto-calc margin from net sale.
         if (field === 'salePrice' && supplierPrice !== null && supplierPrice > 0 && salePrice !== null) {
-          const netWithVatBase = supplierPrice * (1 + vatRate);
-          if (netWithVatBase > 0) {
-            const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-            next.marginPercent = formatDecimal(calculatedMargin);
-          }
+          const calculated = recalcByGross(supplierPrice, salePrice);
+          next.marginPercent = formatDecimal(calculated.marginPct);
         }
 
-        // If supplier price changes, keep fields in sync based on what's available.
+        // If supplier net price changes, keep sale/margin synced.
         if (field === 'supplierPrice' && supplierPrice !== null && supplierPrice > 0) {
           if (marginPercent !== null) {
-            const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-            next.salePrice = formatDecimal(calculatedSale);
+            const calculated = recalcByMargin(supplierPrice, marginPercent);
+            next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const netWithVatBase = supplierPrice * (1 + vatRate);
-            const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-            next.marginPercent = formatDecimal(calculatedMargin);
+            const calculated = recalcByGross(supplierPrice, salePrice);
+            next.marginPercent = formatDecimal(calculated.marginPct);
           }
         }
         if (field === 'vatRatePercent' && supplierPrice !== null && supplierPrice > 0) {
           if (marginPercent !== null) {
-            const calculatedSale = supplierPrice * (1 + marginPercent / 100) * (1 + vatRate);
-            next.salePrice = formatDecimal(calculatedSale);
+            const calculated = recalcByMargin(supplierPrice, marginPercent);
+            next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const netWithVatBase = supplierPrice * (1 + vatRate);
-            if (netWithVatBase > 0) {
-              const calculatedMargin = ((salePrice / netWithVatBase) - 1) * 100;
-              next.marginPercent = formatDecimal(calculatedMargin);
-            }
+            const calculated = recalcByGross(supplierPrice, salePrice);
+            next.marginPercent = formatDecimal(calculated.marginPct);
           }
         }
 
@@ -312,6 +527,19 @@ export default function NewSupplyClient({
         row.productId === productId ? { ...row, syncWithShopify: !row.syncWithShopify } : row
       )
     );
+  };
+
+  const handleResetToBaseline = () => {
+    if (!supplyId) return;
+    setSaveError(null);
+    setSaveOk(null);
+    removeDraftSessionIfPresent(supplyId);
+    setCurrentSupplierId(baselineSupplierId);
+    setCurrentSupplierName(baselineSupplierName);
+    setCurrentDate(baselineDate);
+    setProductDrafts(cloneDrafts(baselineDrafts));
+    const allowed = new Set(baselineDrafts.map((r) => r.productId));
+    setSelectedProducts((prev) => prev.filter((p) => allowed.has(p.shopifyProductId)));
   };
 
   const handleSave = async () => {
@@ -378,6 +606,9 @@ export default function NewSupplyClient({
         products: payloadProducts,
       });
 
+      removeDraftSessionIfPresent(supplyId);
+      if (!supplyId) removeDraftSessionIfPresent(undefined);
+
       const updatedCount = result.inventoryUpdates.length;
       if (result.warning) {
         setSaveOk(
@@ -401,11 +632,36 @@ export default function NewSupplyClient({
         const currentIds = productDrafts.map((p) => p.productId);
         if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
         router.replace(`/supplies/${result.id}?${query.toString()}`);
+      } else if (supplyId) {
+        setBaselineDrafts(cloneDrafts(productDrafts));
+        setBaselineSupplierId(currentSupplierId);
+        setBaselineSupplierName(currentSupplierName);
+        setBaselineDate(currentDate);
       }
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : 'Памылка захавання');
     } finally {
       setSaving(false);
+    }
+  };
+
+  handleSaveRef.current = handleSave;
+  handleResetToBaselineRef.current = handleResetToBaseline;
+  handleDeleteSupplyRef.current = async () => {
+    if (!supplyId) return;
+
+    setDeleting(true);
+    setSaveError(null);
+    setSaveOk(null);
+    try {
+      await deleteSupply(Number(supplyId));
+      removeDraftSessionIfPresent(supplyId);
+      setDeleteConfirmOpen(false);
+      router.push('/supplies');
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : 'Памылка выдалення пастаўкі');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -463,17 +719,6 @@ export default function NewSupplyClient({
     return Number.isFinite(value) ? value.toFixed(2) : '0.00';
   };
 
-  if (!currentDate || (!currentSupplierId && !currentSupplierName.trim())) {
-    return (
-      <div className="mx-auto w-full max-w-6xl rounded-xl border border-gray-200 bg-white px-6 py-8 shadow-sm">
-        <p className="text-sm text-red-600">Не хапае параметраў для адкрыцця пастаўкі.</p>
-        <Link href="/supplies" className="mt-3 inline-block text-sm font-medium text-primary hover:underline">
-          Вярнуцца да паставак
-        </Link>
-      </div>
-    );
-  }
-
   if (initialLoading) {
     return <LoadingSpinner label="Загрузка пастаўкі..." />;
   }
@@ -481,26 +726,53 @@ export default function NewSupplyClient({
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       <div className="rounded-xl border border-gray-200 bg-white px-6 py-4 shadow-sm">
-        <p className="text-sm text-gray-700">
-          <span className="font-medium text-gray-900">Пастаўшчык:</span> {supplierName}
-        </p>
-        <p className="mt-1 text-sm text-gray-700">
-          <span className="font-medium text-gray-900">Дата пастаўкі:</span> {currentDate}
-        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1">
+            <span className="text-sm font-medium text-gray-900">Пастаўшчык</span>
+            <select
+              value={currentSupplierId}
+              onChange={(e) => {
+                const nextId = e.currentTarget.value;
+                setCurrentSupplierId(nextId);
+                const match = suppliers.find((s) => String(s.id) === nextId);
+                setCurrentSupplierName(match?.name ?? '');
+              }}
+              disabled={saving}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+            >
+              <option value="">Выберыце пастаўшчыка</option>
+              {suppliers.map((supplier) => (
+                <option key={supplier.id} value={String(supplier.id)}>
+                  {supplier.name}
+                </option>
+              ))}
+              {currentSupplierId &&
+                !suppliers.some((supplier) => String(supplier.id) === currentSupplierId) && (
+                  <option value={currentSupplierId}>{supplierName}</option>
+                )}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium text-gray-900">Дата пастаўкі</span>
+            <input
+              type="date"
+              value={currentDate}
+              onChange={(e) => setCurrentDate(e.currentTarget.value)}
+              disabled={saving}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+            />
+          </label>
+        </div>
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={handleSave}
+            onClick={openProductPicker}
             disabled={saving}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
+            className="inline-flex size-10 items-center justify-center rounded-lg bg-primary text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
+            aria-label="Дадаць тавар"
+            title="Дадаць тавар"
           >
-            {saving && (
-              <span
-                className="size-4 animate-spin rounded-full border-2 border-white/35 border-t-white"
-                aria-hidden
-              />
-            )}
-            {saving ? 'Захоўваю...' : 'Захаваць змены'}
+            <FiPlus className="size-5" />
           </button>
           <button
             type="button"
@@ -537,11 +809,17 @@ export default function NewSupplyClient({
               </tr>
             </thead>
             <tbody className="bg-white">
-              {productDrafts.length === 0 ? (
+              {addingProductsLoading ? (
+                <tr>
+                  <td colSpan={8} className="px-6 py-16 text-center">
+                    <LoadingSpinner label="Дадаю выбраныя тавары..." />
+                  </td>
+                </tr>
+              ) : productDrafts.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-6 py-16 text-center">
                     <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
-                    <p className="mt-1 text-sm text-gray-500">Націсніце "Дадаць тавар", каб выбраць прадукты.</p>
+                    <p className="mt-1 text-sm text-gray-500">Націсніце «+» пад датай пастаўкі, каб выбраць прадукты.</p>
                   </td>
                 </tr>
               ) : (
@@ -683,6 +961,60 @@ export default function NewSupplyClient({
           </table>
         </div>
       </div>
+
+      {deleteConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-supply-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
+            <h2 id="delete-supply-title" className="text-lg font-semibold text-gray-900">
+              {deleteConfirmStep === 1 ? 'Выдаліць пастаўку?' : 'Апошняе пацвярджэнне'}
+            </h2>
+            <p className="mt-3 text-sm text-gray-700">
+              {deleteConfirmStep === 1
+                ? 'Пасля выдалення вярнуць пастаўку будзе нельга.'
+                : 'Вы сапраўды хочаце незваротна выдаліць пастаўку?'}
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteConfirmOpen(false);
+                  setDeleteConfirmStep(1);
+                }}
+                disabled={deleting}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:opacity-60"
+              >
+                Адмена
+              </button>
+              {deleteConfirmStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmStep(2)}
+                  disabled={deleting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  Працягнуць
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleDeleteSupplyRef.current();
+                  }}
+                  disabled={deleting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  {deleting ? 'Выдаляю...' : 'Выдаліць назаўжды'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

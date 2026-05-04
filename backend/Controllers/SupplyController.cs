@@ -72,5 +72,24 @@ namespace backend.Controllers
                 return StatusCode(500, new { error = "Памылка захавання пастаўкі", details = ex.Message });
             }
         }
+
+        [HttpDelete("{id:int}")]
+        public async Task<ActionResult<object>> Delete( int id )
+        {
+            try
+            {
+                bool deleted = await _service.DeleteSupplyAsync( id );
+                if (!deleted)
+                {
+                    return NotFound( new { error = "Пастаўка не знойдзена" } );
+                }
+
+                return Ok( new { ok = true } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = "Памылка выдалення пастаўкі", details = ex.Message });
+            }
+        }
     }
 }

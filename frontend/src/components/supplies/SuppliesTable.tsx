@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { FiTrash2 } from 'react-icons/fi';
 import type { SupplyListItem } from '@/types/supply';
 
 type Props = {
@@ -10,6 +11,7 @@ type Props = {
   selectedSuppliers: string[];
   onToggleSupplierFilter: (name: string) => void;
   onOpenSupply: (supply: SupplyListItem) => void;
+  onRequestDelete?: (supply: SupplyListItem) => void;
 };
 
 function formatSupplyDate(iso: string): string {
@@ -31,6 +33,7 @@ export default function SuppliesTable({
   selectedSuppliers,
   onToggleSupplierFilter,
   onOpenSupply,
+  onRequestDelete,
 }: Props) {
   const [supplierMenuOpen, setSupplierMenuOpen] = useState(false);
   const [menuMounted, setMenuMounted] = useState(false);
@@ -115,6 +118,11 @@ export default function SuppliesTable({
               </button>
             </th>
             <th className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums">Тавары</th>
+            {onRequestDelete && (
+              <th className="whitespace-nowrap px-4 py-3.5 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Дзеянні
+              </th>
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
@@ -128,7 +136,23 @@ export default function SuppliesTable({
                 {row.supplierName}
               </td>
               <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">{formatSupplyDate(row.date)}</td>
-              <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.productNumber}</td>
+              <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.totalQuantity}</td>
+              {onRequestDelete && (
+                <td className="px-4 py-3.5 text-right">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestDelete(row);
+                    }}
+                    className="inline-flex size-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
+                    aria-label={`Выдаліць пастаўку ад ${row.supplierName}`}
+                    title="Выдаліць пастаўку"
+                  >
+                    <FiTrash2 className="size-4" />
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

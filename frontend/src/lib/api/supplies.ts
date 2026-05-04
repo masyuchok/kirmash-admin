@@ -46,6 +46,11 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
   const productNumber = readInt(
     r.productNumber ?? r.ProductNumber ?? r.booksNumber ?? r.BooksNumber
   );
+  const totalQuantityRaw = r.totalQuantity ?? r.TotalQuantity ?? r.quantityTotal ?? r.QuantityTotal;
+  const totalQuantity =
+    totalQuantityRaw == null
+      ? productNumber
+      : readInt(totalQuantityRaw);
 
   const dateVal = r.date ?? r.Date;
   let date = '';
@@ -64,6 +69,7 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
     supplierName,
     date,
     productNumber,
+    totalQuantity,
   };
 }
 
@@ -130,4 +136,15 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
     date: mapDateToIso(raw.date ?? raw.Date),
     products,
   };
+}
+
+export async function deleteSupply(id: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Supply/${id}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць пастаўку');
+    throw new Error(msg);
+  }
 }
