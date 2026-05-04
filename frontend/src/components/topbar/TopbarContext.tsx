@@ -1,7 +1,7 @@
 'use client';
 import { createContext, useContext, useState, ReactNode } from 'react';
 
-export type TopbarButtonVariant = 'primary' | 'secondary';
+export type TopbarButtonVariant = 'primary' | 'secondary' | 'danger';
 
 export type TopbarButton = {
   icon?: React.ReactNode;
@@ -9,6 +9,8 @@ export type TopbarButton = {
   onClick?: () => void;
   disabled?: boolean;
   variant?: TopbarButtonVariant;
+  iconOnly?: boolean;
+  position?: 'left' | 'right';
 };
 
 export type TopbarPage = {

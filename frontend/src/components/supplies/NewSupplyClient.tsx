@@ -1,15 +1,14 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
+import { FiArrowLeft, FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
-import { fetchSupplyById } from '@/lib/api/supplies';
+import { deleteSupply, fetchSupplyById } from '@/lib/api/supplies';
 import type { ProductWithSuppliers } from '@/types/product';
 
 type Props = {
@@ -130,6 +129,9 @@ export default function NewSupplyClient({
   const [baselineSupplierName, setBaselineSupplierName] = useState('');
   const [baselineDate, setBaselineDate] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmStep, setDeleteConfirmStep] = useState<1 | 2>(1);
   const [refreshing, setRefreshing] = useState(false);
   const [addingProductsLoading, setAddingProductsLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -138,6 +140,7 @@ export default function NewSupplyClient({
 
   const handleSaveRef = useRef<() => Promise<void>>(async () => {});
   const handleResetToBaselineRef = useRef<() => void>(() => {});
+  const handleDeleteSupplyRef = useRef<() => Promise<void>>(async () => {});
 
   const persistDraftSessionForNavigation = () => {
     if (typeof window === 'undefined') return;
@@ -176,8 +179,21 @@ export default function NewSupplyClient({
   };
 
   useEffect(() => {
-    setTopbarPage({ title: supplyId ? `Пастаўка #${supplyId}` : 'Новая пастаўка' });
+    setTopbarPage({ title: supplyId ? 'Пастаўка' : 'Новая пастаўка' });
     setTopbarButtons([
+      ...(supplyId
+        ? [
+            {
+              label: 'Да спісу паставак',
+              icon: <FiArrowLeft />,
+              onClick: () => router.push('/supplies'),
+              variant: 'secondary' as const,
+              disabled: saving || deleting,
+              iconOnly: true,
+              position: 'left' as const,
+            },
+          ]
+        : []),
       {
         label: saving ? 'Захоўваю...' : 'Захаваць змены',
         icon: saving ? (
@@ -190,8 +206,21 @@ export default function NewSupplyClient({
           void handleSaveRef.current();
         },
         variant: 'primary',
-        disabled: saving,
+        disabled: saving || deleting,
       },
+      ...(supplyId
+        ? [
+            {
+              label: deleting ? 'Выдаляю...' : 'Выдаліць пастаўку',
+              onClick: () => {
+                setDeleteConfirmStep(1);
+                setDeleteConfirmOpen(true);
+              },
+              variant: 'danger' as const,
+              disabled: saving || refreshing || deleting,
+            },
+          ]
+        : []),
       ...(supplyId
         ? [
             {
@@ -199,7 +228,7 @@ export default function NewSupplyClient({
               icon: <FiRotateCcw />,
               onClick: () => handleResetToBaselineRef.current(),
               variant: 'secondary' as const,
-              disabled: saving || refreshing,
+              disabled: saving || refreshing || deleting,
             },
           ]
         : []),
@@ -213,6 +242,7 @@ export default function NewSupplyClient({
     setTopbarPage,
     supplyId,
     saving,
+    deleting,
     refreshing,
     initialSupplierId,
     router,
@@ -617,6 +647,23 @@ export default function NewSupplyClient({
 
   handleSaveRef.current = handleSave;
   handleResetToBaselineRef.current = handleResetToBaseline;
+  handleDeleteSupplyRef.current = async () => {
+    if (!supplyId) return;
+
+    setDeleting(true);
+    setSaveError(null);
+    setSaveOk(null);
+    try {
+      await deleteSupply(Number(supplyId));
+      removeDraftSessionIfPresent(supplyId);
+      setDeleteConfirmOpen(false);
+      router.push('/supplies');
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : 'Памылка выдалення пастаўкі');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const refreshFromShopify = async () => {
     if (productDrafts.length === 0) return;
@@ -672,17 +719,6 @@ export default function NewSupplyClient({
     return Number.isFinite(value) ? value.toFixed(2) : '0.00';
   };
 
-  if (!currentDate || (!currentSupplierId && !currentSupplierName.trim())) {
-    return (
-      <div className="mx-auto w-full max-w-6xl rounded-xl border border-gray-200 bg-white px-6 py-8 shadow-sm">
-        <p className="text-sm text-red-600">Не хапае параметраў для адкрыцця пастаўкі.</p>
-        <Link href="/supplies" className="mt-3 inline-block text-sm font-medium text-primary hover:underline">
-          Вярнуцца да паставак
-        </Link>
-      </div>
-    );
-  }
-
   if (initialLoading) {
     return <LoadingSpinner label="Загрузка пастаўкі..." />;
   }
@@ -690,12 +726,43 @@ export default function NewSupplyClient({
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       <div className="rounded-xl border border-gray-200 bg-white px-6 py-4 shadow-sm">
-        <p className="text-sm text-gray-700">
-          <span className="font-medium text-gray-900">Пастаўшчык:</span> {supplierName}
-        </p>
-        <p className="mt-1 text-sm text-gray-700">
-          <span className="font-medium text-gray-900">Дата пастаўкі:</span> {currentDate}
-        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1">
+            <span className="text-sm font-medium text-gray-900">Пастаўшчык</span>
+            <select
+              value={currentSupplierId}
+              onChange={(e) => {
+                const nextId = e.currentTarget.value;
+                setCurrentSupplierId(nextId);
+                const match = suppliers.find((s) => String(s.id) === nextId);
+                setCurrentSupplierName(match?.name ?? '');
+              }}
+              disabled={saving}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+            >
+              <option value="">Выберыце пастаўшчыка</option>
+              {suppliers.map((supplier) => (
+                <option key={supplier.id} value={String(supplier.id)}>
+                  {supplier.name}
+                </option>
+              ))}
+              {currentSupplierId &&
+                !suppliers.some((supplier) => String(supplier.id) === currentSupplierId) && (
+                  <option value={currentSupplierId}>{supplierName}</option>
+                )}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-sm font-medium text-gray-900">Дата пастаўкі</span>
+            <input
+              type="date"
+              value={currentDate}
+              onChange={(e) => setCurrentDate(e.currentTarget.value)}
+              disabled={saving}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+            />
+          </label>
+        </div>
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -894,6 +961,60 @@ export default function NewSupplyClient({
           </table>
         </div>
       </div>
+
+      {deleteConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-supply-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
+            <h2 id="delete-supply-title" className="text-lg font-semibold text-gray-900">
+              {deleteConfirmStep === 1 ? 'Выдаліць пастаўку?' : 'Апошняе пацвярджэнне'}
+            </h2>
+            <p className="mt-3 text-sm text-gray-700">
+              {deleteConfirmStep === 1
+                ? 'Пасля выдалення вярнуць пастаўку будзе нельга.'
+                : 'Вы сапраўды хочаце незваротна выдаліць пастаўку?'}
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteConfirmOpen(false);
+                  setDeleteConfirmStep(1);
+                }}
+                disabled={deleting}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:opacity-60"
+              >
+                Адмена
+              </button>
+              {deleteConfirmStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmStep(2)}
+                  disabled={deleting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  Працягнуць
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleDeleteSupplyRef.current();
+                  }}
+                  disabled={deleting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  {deleting ? 'Выдаляю...' : 'Выдаліць назаўжды'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

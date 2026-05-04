@@ -67,6 +67,21 @@ namespace backend.Services
                 .FirstOrDefaultAsync();
         }
 
+        public async Task<bool> DeleteSupplyAsync( int id )
+        {
+            Supply? supply = await _db.Supplies
+                .FirstOrDefaultAsync( s => s.Id == id );
+
+            if (supply == null)
+            {
+                return false;
+            }
+
+            _db.Supplies.Remove( supply );
+            await _db.SaveChangesAsync();
+            return true;
+        }
+
         public async Task<SupplySaveResult> SaveSupplyAsync( SupplySaveRequest request )
         {
             string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;

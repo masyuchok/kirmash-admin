@@ -137,3 +137,14 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
     products,
   };
 }
+
+export async function deleteSupply(id: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Supply/${id}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць пастаўку');
+    throw new Error(msg);
+  }
+}

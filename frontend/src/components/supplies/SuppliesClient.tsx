@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { FiPlus } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import { fetchSupplies } from '@/lib/api/supplies';
+import { deleteSupply, fetchSupplies } from '@/lib/api/supplies';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import type { SupplyListItem } from '@/types/supply';
 import SuppliesTable from './SuppliesTable';
@@ -37,6 +37,16 @@ export default function SuppliesClient() {
   const [formError, setFormError] = useState<string | null>(null);
   const [dateSortDirection, setDateSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleteModalStep, setDeleteModalStep] = useState<1 | 2>(1);
+  const [supplyPendingDelete, setSupplyPendingDelete] = useState<SupplyListItem | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const refreshSupplies = useCallback(async () => {
+    const data = await fetchSupplies();
+    setRows(data);
+  }, []);
 
   useEffect(() => {
     setTopbarPage({
@@ -64,10 +74,7 @@ export default function SuppliesClient() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchSupplies()
-      .then((data) => {
-        if (!cancelled) setRows(data);
-      })
+    refreshSupplies()
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Памылка загрузкі');
@@ -79,7 +86,7 @@ export default function SuppliesClient() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshSupplies]);
 
   useEffect(() => {
     if (!createOpen) return;
@@ -176,6 +183,41 @@ export default function SuppliesClient() {
     router.push(`/supplies/${supply.id}?${query.toString()}`);
   };
 
+  const closeDeleteModal = () => {
+    setDeleteModalOpen(false);
+    setDeleteModalStep(1);
+    setSupplyPendingDelete(null);
+    setDeleteError(null);
+    setDeleteSubmitting(false);
+  };
+
+  const requestDeleteSupply = (supply: SupplyListItem) => {
+    setSupplyPendingDelete(supply);
+    setDeleteModalStep(1);
+    setDeleteError(null);
+    setDeleteModalOpen(true);
+  };
+
+  const confirmDeleteSupply = async () => {
+    if (!supplyPendingDelete) return;
+    const idNum = Number(supplyPendingDelete.id);
+    if (!Number.isFinite(idNum) || idNum <= 0) {
+      setDeleteError('Некарэктны ідэнтыфікатар пастаўкі.');
+      return;
+    }
+    setDeleteSubmitting(true);
+    setDeleteError(null);
+    try {
+      await deleteSupply(idNum);
+      setRows((prev) => prev.filter((r) => r.id !== supplyPendingDelete.id));
+      closeDeleteModal();
+    } catch (err: unknown) {
+      setDeleteError(err instanceof Error ? err.message : 'Памылка выдалення пастаўкі');
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  };
+
   if (loading) {
     return <LoadingSpinner label="Загрузка паставак..." />;
   }
@@ -194,11 +236,76 @@ export default function SuppliesClient() {
           selectedSuppliers={selectedSuppliers}
           onToggleSupplierFilter={toggleSupplierFilter}
           onOpenSupply={openSupply}
+          onRequestDelete={requestDeleteSupply}
           onToggleDateSort={() =>
             setDateSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'))
           }
         />
       </div>
+
+      {deleteModalOpen && supplyPendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-list-supply-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
+            <h2 id="delete-list-supply-title" className="text-lg font-semibold text-gray-900">
+              {deleteModalStep === 1 ? 'Выдаліць пастаўку?' : 'Апошняе пацвярджэнне'}
+            </h2>
+            <p className="mt-3 text-sm text-gray-700">
+              {deleteModalStep === 1 ? (
+                <>
+                  Пастаўшчык: <span className="font-medium">{supplyPendingDelete.supplierName}</span>
+                  <br />
+                  Дата:{' '}
+                  <span className="font-medium">
+                    {supplyPendingDelete.date || '—'}
+                  </span>
+                  <span className="mt-2 block text-gray-600">
+                    Пасля выдалення вярнуць пастаўку будзе нельга.
+                  </span>
+                </>
+              ) : (
+                'Вы сапраўды хочаце незваротна выдаліць гэтую пастаўку з табліцы?'
+              )}
+            </p>
+            {deleteError && <p className="mt-3 text-sm text-red-600">{deleteError}</p>}
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={deleteSubmitting}
+                className={btnSecondary}
+              >
+                Адмена
+              </button>
+              {deleteModalStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setDeleteModalStep(2)}
+                  disabled={deleteSubmitting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  Працягнуць
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void confirmDeleteSupply();
+                  }}
+                  disabled={deleteSubmitting}
+                  className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm transition hover:bg-red-100 disabled:opacity-60"
+                >
+                  {deleteSubmitting ? 'Выдаляю...' : 'Выдаліць назаўжды'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {createOpen && (
         <div
