@@ -15,6 +15,7 @@ type Props = {
   supplierName?: string;
   date?: string;
   selectedProductIds?: string[];
+  selectedProductQuantities?: Record<string, string>;
 };
 
 export default function SupplyProductPickerClient({
@@ -23,6 +24,7 @@ export default function SupplyProductPickerClient({
   supplierName = '',
   date = '',
   selectedProductIds = [],
+  selectedProductQuantities = {},
 }: Props) {
   const pageSize = 50;
   const router = useRouter();
@@ -33,6 +35,7 @@ export default function SupplyProductPickerClient({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(selectedProductIds);
+  const [draftQuantities, setDraftQuantities] = useState<Record<string, string>>(selectedProductQuantities);
   const [page, setPage] = useState(1);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const [menuMounted, setMenuMounted] = useState(false);
@@ -147,7 +150,17 @@ export default function SupplyProductPickerClient({
   }, [typeMenuOpen, typeTriggerEl, typeMenuEl]);
 
   const toggleProduct = (id: string) => {
-    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setSelectedIds((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((x) => x !== id);
+      }
+      setDraftQuantities((q) => (q[id] ? q : { ...q, [id]: '1' }));
+      return [...prev, id];
+    });
+  };
+
+  const updateQuantity = (id: string, value: string) => {
+    setDraftQuantities((prev) => ({ ...prev, [id]: value }));
   };
 
   const returnToSupply = () => {
@@ -156,6 +169,17 @@ export default function SupplyProductPickerClient({
     if (supplierId) query.set('supplierId', supplierId);
     if (supplierName) query.set('supplierName', supplierName);
     if (selectedIds.length > 0) query.set('selectedProductIds', selectedIds.join(','));
+    if (selectedIds.length > 0) {
+      const quantitiesPayload = selectedIds.reduce<Record<string, string>>((acc, id) => {
+        const quantity = draftQuantities[id];
+        if (typeof quantity === 'string' && quantity.trim() !== '') {
+          acc[id] = quantity;
+        }
+        return acc;
+      }, {});
+      query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
+    }
+    query.set('restoreDraft', '1');
     const target = supplyId ? `/supplies/${supplyId}` : '/supplies/new';
     router.push(`${target}?${query.toString()}`);
   };
@@ -236,6 +260,7 @@ export default function SupplyProductPickerClient({
                 <tr className="border-b border-gray-200 bg-gray-50/90 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <th className="px-4 py-3.5"></th>
                   <th className="px-6 py-3.5">Назва</th>
+                  <th className="px-4 py-3.5 text-center">Колькасць</th>
                   <th className="px-6 py-3.5 text-right">У наяўнасці</th>
                 </tr>
               </thead>
@@ -273,6 +298,25 @@ export default function SupplyProductPickerClient({
                           )}
                         </div>
                       </div>
+                    </td>
+                    <td className="px-4 py-3.5 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={draftQuantities[row.shopifyProductId] ?? ''}
+                        onChange={(e) => updateQuantity(row.shopifyProductId, e.currentTarget.value)}
+                        onFocus={() => {
+                          if (!selectedIds.includes(row.shopifyProductId)) {
+                            setSelectedIds((prev) => [...prev, row.shopifyProductId]);
+                          }
+                          setDraftQuantities((prev) =>
+                            prev[row.shopifyProductId] ? prev : { ...prev, [row.shopifyProductId]: '1' }
+                          );
+                        }}
+                        className="mx-auto w-20 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                        placeholder="0"
+                      />
                     </td>
                     <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.shopifyQuantityInStock}</td>
                   </tr>

@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FiPlus, FiX } from 'react-icons/fi';
+import { FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
@@ -18,6 +18,8 @@ type Props = {
   initialDate: string;
   supplyId?: string;
   selectedProductIds?: string[];
+  selectedProductQuantities?: Record<string, string>;
+  restoreDraft?: boolean;
 };
 
 type SupplierOption = {
@@ -38,12 +40,53 @@ type SupplyProductDraft = {
   salePrice: string;
 };
 
+function cloneDrafts(rows: SupplyProductDraft[]): SupplyProductDraft[] {
+  return rows.map((row) => ({ ...row }));
+}
+
+type SupplyDraftSessionPayload = {
+  productDrafts: SupplyProductDraft[];
+  currentSupplierId: string;
+  currentSupplierName: string;
+  currentDate: string;
+};
+
+const SUPPLY_DRAFT_SESSION_PREFIX = 'kirma.supplyDraft.session.v1:';
+
+function supplyDraftSessionKey(supplyId: string | undefined): string {
+  return `${SUPPLY_DRAFT_SESSION_PREFIX}${supplyId ?? 'new'}`;
+}
+
+function peekDraftSessionAfterPicker(supplyId: string | undefined): SupplyDraftSessionPayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(supplyDraftSessionKey(supplyId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SupplyDraftSessionPayload;
+    if (!parsed || !Array.isArray(parsed.productDrafts)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function removeDraftSessionIfPresent(supplyId: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(supplyDraftSessionKey(supplyId));
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function NewSupplyClient({
   initialSupplierId = '',
   initialSupplierName = '',
   initialDate,
   supplyId,
   selectedProductIds = [],
+  selectedProductQuantities = {},
+  restoreDraft = false,
 }: Props) {
   const VAT_RATE_OPTIONS = [5, 23] as const;
   const VAT_BOOK = 0.05;
@@ -82,6 +125,10 @@ export default function NewSupplyClient({
   const [selectedProducts, setSelectedProducts] = useState<ProductWithSuppliers[]>([]);
   const [productCatalog, setProductCatalog] = useState<ProductWithSuppliers[]>([]);
   const [productDrafts, setProductDrafts] = useState<SupplyProductDraft[]>([]);
+  const [baselineDrafts, setBaselineDrafts] = useState<SupplyProductDraft[]>([]);
+  const [baselineSupplierId, setBaselineSupplierId] = useState('');
+  const [baselineSupplierName, setBaselineSupplierName] = useState('');
+  const [baselineDate, setBaselineDate] = useState('');
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [addingProductsLoading, setAddingProductsLoading] = useState(false);
@@ -89,24 +136,73 @@ export default function NewSupplyClient({
   const [saveOk, setSaveOk] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
 
+  const handleSaveRef = useRef<() => Promise<void>>(async () => {});
+  const handleResetToBaselineRef = useRef<() => void>(() => {});
+
+  const persistDraftSessionForNavigation = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const payload: SupplyDraftSessionPayload = {
+        productDrafts: cloneDrafts(productDrafts),
+        currentSupplierId,
+        currentSupplierName,
+        currentDate,
+      };
+      window.sessionStorage.setItem(supplyDraftSessionKey(supplyId), JSON.stringify(payload));
+    } catch {
+      /* ignore quota / private mode */
+    }
+  };
+
+  const openProductPicker = () => {
+    persistDraftSessionForNavigation();
+    const query = new URLSearchParams();
+    if (supplyId) query.set('supplyId', supplyId);
+    if (currentSupplierId) query.set('supplierId', currentSupplierId);
+    if (currentSupplierName) query.set('supplierName', currentSupplierName);
+    if (currentDate) query.set('date', currentDate);
+    const currentIds = productDrafts.map((p) => p.productId);
+    if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
+    if (currentIds.length > 0) {
+      const quantitiesPayload = currentIds.reduce<Record<string, string>>((acc, id) => {
+        const draft = productDrafts.find((row) => row.productId === id);
+        const quantity = draft?.quantity ?? '';
+        if (quantity.trim()) acc[id] = quantity;
+        return acc;
+      }, {});
+      query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
+    }
+    router.push(`/supplies/products?${query.toString()}`);
+  };
+
   useEffect(() => {
     setTopbarPage({ title: supplyId ? `Пастаўка #${supplyId}` : 'Новая пастаўка' });
     setTopbarButtons([
       {
-        label: 'Дадаць тавар',
-        icon: <FiPlus />,
+        label: saving ? 'Захоўваю...' : 'Захаваць змены',
+        icon: saving ? (
+          <span
+            className="size-4 animate-spin rounded-full border-2 border-white/35 border-t-white"
+            aria-hidden
+          />
+        ) : undefined,
         onClick: () => {
-          const query = new URLSearchParams();
-          if (supplyId) query.set('supplyId', supplyId);
-          if (currentSupplierId) query.set('supplierId', currentSupplierId);
-          if (currentSupplierName) query.set('supplierName', currentSupplierName);
-          if (currentDate) query.set('date', currentDate);
-          const currentIds = productDrafts.map((p) => p.productId);
-          if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
-          router.push(`/supplies/products?${query.toString()}`);
+          void handleSaveRef.current();
         },
         variant: 'primary',
+        disabled: saving,
       },
+      ...(supplyId
+        ? [
+            {
+              label: 'Скінуць',
+              icon: <FiRotateCcw />,
+              onClick: () => handleResetToBaselineRef.current(),
+              variant: 'secondary' as const,
+              disabled: saving || refreshing,
+            },
+          ]
+        : []),
     ]);
     return () => {
       setTopbarButtons([]);
@@ -116,11 +212,9 @@ export default function NewSupplyClient({
     setTopbarButtons,
     setTopbarPage,
     supplyId,
+    saving,
+    refreshing,
     initialSupplierId,
-    currentSupplierId,
-    currentSupplierName,
-    currentDate,
-    productDrafts,
     router,
   ]);
 
@@ -153,6 +247,48 @@ export default function NewSupplyClient({
   }, []);
 
   useEffect(() => {
+    if (supplyId) return;
+    if (!restoreDraft) return;
+    const sessionPayload = peekDraftSessionAfterPicker(undefined);
+    if (!sessionPayload) return;
+
+    setCurrentSupplierId(sessionPayload.currentSupplierId || currentSupplierId);
+    setCurrentSupplierName(sessionPayload.currentSupplierName || currentSupplierName);
+    setCurrentDate(sessionPayload.currentDate || currentDate);
+
+    let cancelled = false;
+    fetchProductsWithSuppliers()
+      .then((products) => {
+        if (cancelled) return;
+        setProductCatalog(products);
+        const sessionRows = cloneDrafts(sessionPayload.productDrafts);
+        setProductDrafts((prev) => {
+          const byId = new Map<string, SupplyProductDraft>();
+          for (const row of sessionRows) byId.set(row.productId, row);
+          for (const row of prev) {
+            if (!byId.has(row.productId)) byId.set(row.productId, row);
+          }
+          const merged = Array.from(byId.values());
+          removeDraftSessionIfPresent(undefined);
+          return merged;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProductDrafts(() => {
+            const merged = cloneDrafts(sessionPayload.productDrafts);
+            removeDraftSessionIfPresent(undefined);
+            return merged;
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supplyId, restoreDraft]);
+
+  useEffect(() => {
     if (!supplyId) {
       setInitialLoading(false);
       return;
@@ -162,12 +298,17 @@ export default function NewSupplyClient({
     Promise.all([fetchSupplyById(Number(supplyId)), fetchProductsWithSuppliers()])
       .then(([supply, products]) => {
         if (cancelled) return;
+        const sessionPayload = restoreDraft ? peekDraftSessionAfterPicker(supplyId) : null;
         setProductCatalog(products);
         setCurrentSupplierId(String(supply.supplierId || ''));
         setCurrentSupplierName(supply.supplierName || '');
         setCurrentDate(supply.date || '');
 
         const productMap = new Map(products.map((p) => [p.shopifyProductId, p]));
+        const supplierIdStr = String(supply.supplierId || '');
+        const supplierNm = supply.supplierName || '';
+        const dateStr = supply.date || '';
+
         const dbDrafts: SupplyProductDraft[] = supply.products.map((p) => {
           const match = productMap.get(p.shopifyProductId);
           return {
@@ -182,14 +323,30 @@ export default function NewSupplyClient({
             salePrice: p.salePrice > 0 ? String(p.salePrice) : '',
           };
         });
-        // Merge DB rows with rows already chosen in picker to avoid race-based overwrite.
+        setBaselineDrafts(cloneDrafts(dbDrafts));
+        setBaselineSupplierId(supplierIdStr);
+        setBaselineSupplierName(supplierNm);
+        setBaselineDate(dateStr);
+        if (sessionPayload) {
+          setCurrentSupplierId(sessionPayload.currentSupplierId || supplierIdStr);
+          setCurrentSupplierName(sessionPayload.currentSupplierName || supplierNm);
+          setCurrentDate(sessionPayload.currentDate || dateStr);
+        }
+        // Prefer in-memory drafts over DB for the same productId so returning from the picker
+        // does not wipe unsaved edits.
         setProductDrafts((prev) => {
           const byId = new Map<string, SupplyProductDraft>();
-          for (const row of dbDrafts) byId.set(row.productId, row);
-          for (const row of prev) {
+          if (sessionPayload) {
+            for (const row of cloneDrafts(sessionPayload.productDrafts)) byId.set(row.productId, row);
+          } else {
+            for (const row of prev) byId.set(row.productId, row);
+          }
+          for (const row of dbDrafts) {
             if (!byId.has(row.productId)) byId.set(row.productId, row);
           }
-          return Array.from(byId.values());
+          const merged = Array.from(byId.values());
+          if (sessionPayload) removeDraftSessionIfPresent(supplyId);
+          return merged;
         });
       })
       .catch((err: unknown) => {
@@ -203,7 +360,7 @@ export default function NewSupplyClient({
     return () => {
       cancelled = true;
     };
-  }, [supplyId]);
+  }, [supplyId, restoreDraft]);
 
   useEffect(() => {
     if (selectedProductIds.length === 0) {
@@ -242,7 +399,7 @@ export default function NewSupplyClient({
           productName: product.productName,
           productType: product.productType,
           syncWithShopify: true,
-          quantity: '',
+          quantity: selectedProductQuantities[product.shopifyProductId] ?? '',
           supplierPrice: '',
           vatRatePercent: String(resolveDefaultVatRatePercent(product.productType)),
           marginPercent: '',
@@ -251,7 +408,7 @@ export default function NewSupplyClient({
       }
       return next;
     });
-  }, [selectedProducts]);
+  }, [selectedProducts, selectedProductQuantities]);
 
   const updateDraftField = (
     productId: string,
@@ -342,6 +499,19 @@ export default function NewSupplyClient({
     );
   };
 
+  const handleResetToBaseline = () => {
+    if (!supplyId) return;
+    setSaveError(null);
+    setSaveOk(null);
+    removeDraftSessionIfPresent(supplyId);
+    setCurrentSupplierId(baselineSupplierId);
+    setCurrentSupplierName(baselineSupplierName);
+    setCurrentDate(baselineDate);
+    setProductDrafts(cloneDrafts(baselineDrafts));
+    const allowed = new Set(baselineDrafts.map((r) => r.productId));
+    setSelectedProducts((prev) => prev.filter((p) => allowed.has(p.shopifyProductId)));
+  };
+
   const handleSave = async () => {
     const supplierIdNumber = Number(currentSupplierId);
     if (!Number.isFinite(supplierIdNumber) || supplierIdNumber <= 0) {
@@ -406,6 +576,9 @@ export default function NewSupplyClient({
         products: payloadProducts,
       });
 
+      removeDraftSessionIfPresent(supplyId);
+      if (!supplyId) removeDraftSessionIfPresent(undefined);
+
       const updatedCount = result.inventoryUpdates.length;
       if (result.warning) {
         setSaveOk(
@@ -429,6 +602,11 @@ export default function NewSupplyClient({
         const currentIds = productDrafts.map((p) => p.productId);
         if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
         router.replace(`/supplies/${result.id}?${query.toString()}`);
+      } else if (supplyId) {
+        setBaselineDrafts(cloneDrafts(productDrafts));
+        setBaselineSupplierId(currentSupplierId);
+        setBaselineSupplierName(currentSupplierName);
+        setBaselineDate(currentDate);
       }
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : 'Памылка захавання');
@@ -436,6 +614,9 @@ export default function NewSupplyClient({
       setSaving(false);
     }
   };
+
+  handleSaveRef.current = handleSave;
+  handleResetToBaselineRef.current = handleResetToBaseline;
 
   const refreshFromShopify = async () => {
     if (productDrafts.length === 0) return;
@@ -518,17 +699,13 @@ export default function NewSupplyClient({
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={handleSave}
+            onClick={openProductPicker}
             disabled={saving}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
+            className="inline-flex size-10 items-center justify-center rounded-lg bg-primary text-white shadow-sm transition hover:bg-primary-hover disabled:opacity-50"
+            aria-label="Дадаць тавар"
+            title="Дадаць тавар"
           >
-            {saving && (
-              <span
-                className="size-4 animate-spin rounded-full border-2 border-white/35 border-t-white"
-                aria-hidden
-              />
-            )}
-            {saving ? 'Захоўваю...' : 'Захаваць змены'}
+            <FiPlus className="size-5" />
           </button>
           <button
             type="button"
@@ -575,7 +752,7 @@ export default function NewSupplyClient({
                 <tr>
                   <td colSpan={8} className="px-6 py-16 text-center">
                     <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
-                    <p className="mt-1 text-sm text-gray-500">Націсніце "Дадаць тавар", каб выбраць прадукты.</p>
+                    <p className="mt-1 text-sm text-gray-500">Націсніце «+» пад датай пастаўкі, каб выбраць прадукты.</p>
                   </td>
                 </tr>
               ) : (

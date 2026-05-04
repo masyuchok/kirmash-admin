@@ -33,7 +33,8 @@ namespace backend.Services
                     SupplierId = s.SupplierId,
                     SupplierName = s.Supplier.Name,
                     Date = s.Date,
-                    ProductNumber = s.SupplyProducts.Count
+                    ProductNumber = s.SupplyProducts.Count,
+                    TotalQuantity = s.SupplyProducts.Sum( p => p.Quantity )
                 })
                 .OrderBy(s => s.Date)
                 .ToListAsync();

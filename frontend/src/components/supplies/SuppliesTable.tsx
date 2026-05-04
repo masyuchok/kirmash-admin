@@ -128,7 +128,7 @@ export default function SuppliesTable({
                 {row.supplierName}
               </td>
               <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">{formatSupplyDate(row.date)}</td>
-              <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.productNumber}</td>
+              <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.totalQuantity}</td>
             </tr>
           ))}
         </tbody>

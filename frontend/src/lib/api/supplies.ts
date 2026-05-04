@@ -46,6 +46,11 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
   const productNumber = readInt(
     r.productNumber ?? r.ProductNumber ?? r.booksNumber ?? r.BooksNumber
   );
+  const totalQuantityRaw = r.totalQuantity ?? r.TotalQuantity ?? r.quantityTotal ?? r.QuantityTotal;
+  const totalQuantity =
+    totalQuantityRaw == null
+      ? productNumber
+      : readInt(totalQuantityRaw);
 
   const dateVal = r.date ?? r.Date;
   let date = '';
@@ -64,6 +69,7 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
     supplierName,
     date,
     productNumber,
+    totalQuantity,
   };
 }
 
