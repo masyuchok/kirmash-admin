@@ -153,6 +153,7 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
                       ? detailItemsRaw.map((it) => {
                           const i = it as Record<string, unknown>;
                           return {
+                            id: readInt(i.id ?? i.Id),
                             productTitle: String(i.productTitle ?? i.ProductTitle ?? ''),
                             productType: String(i.productType ?? i.ProductType ?? ''),
                             quantity: readInt(i.quantity ?? i.Quantity),
@@ -198,6 +199,24 @@ export async function updateVatReportRow(payload: {
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося захаваць радок справаздачы');
+    throw new Error(msg);
+  }
+}
+
+export async function updateVatReportRowItemVat(payload: {
+  itemId: number;
+  vatRatePercent: number;
+}): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/items/${payload.itemId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({
+      vatRatePercent: payload.vatRatePercent,
+    }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося захаваць VAT па тавары');
     throw new Error(msg);
   }
 }
@@ -259,6 +278,26 @@ export async function deleteVatReportRow(rowId: number): Promise<void> {
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося выдаліць радок справаздачы');
+    throw new Error(msg);
+  }
+}
+
+export async function moveVatReportRowToForeign(payload: {
+  rowId: number;
+  deliveryName: string;
+  deliveryAddress: string;
+}): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${payload.rowId}/move-to-foreign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({
+      deliveryName: payload.deliveryName,
+      deliveryAddress: payload.deliveryAddress,
+    }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося перанесці радок у замежныя');
     throw new Error(msg);
   }
 }

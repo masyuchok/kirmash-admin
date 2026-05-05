@@ -13,6 +13,7 @@ export type VatReportPolandDetailRow = {
 };
 
 export type VatReportPolandDetailItem = {
+  id: number;
   productTitle: string;
   productType: string;
   quantity: number;

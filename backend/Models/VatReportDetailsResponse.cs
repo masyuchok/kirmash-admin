@@ -42,6 +42,7 @@ namespace backend.Models
 
     public class VatReportDetailsPolandItem
     {
+        public int Id { get; set; }
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public int Quantity { get; set; }

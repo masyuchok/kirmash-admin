@@ -132,6 +132,24 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPatch( "rows/items/{itemId:int}" )]
+        public async Task<IActionResult> UpdateRowItemVat( int itemId, [FromBody] VatReportRowItemUpdateRequest request )
+        {
+            try
+            {
+                await _service.UpdateRowItemVatAsync( itemId, request.VatRatePercent );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка захавання VAT па тавары", details = ex.Message } );
+            }
+        }
+
         [HttpPost( "{id:int}/rows" )]
         public async Task<IActionResult> AddRow( int id, [FromBody] VatReportRowCreateRequest request )
         {
@@ -165,6 +183,24 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка выдалення радка справаздачы", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "rows/{rowId:int}/move-to-foreign" )]
+        public async Task<IActionResult> MoveRowToForeign( int rowId, [FromBody] MoveVatReportRowToForeignRequest request )
+        {
+            try
+            {
+                await _service.MoveRowToForeignAsync( rowId, request.DeliveryName, request.DeliveryAddress );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка пераносу радка ў замежныя", details = ex.Message } );
             }
         }
 

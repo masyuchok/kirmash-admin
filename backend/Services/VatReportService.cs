@@ -190,6 +190,7 @@ namespace backend.Services
                                 Items = x.Items
                                     .Select( i => new VatReportDetailsPolandItem
                                     {
+                                        Id = i.Id,
                                         ProductTitle = i.ProductTitle,
                                         ProductType = i.ProductType,
                                         Quantity = i.Quantity,
@@ -218,14 +219,15 @@ namespace backend.Services
                     .Select( g =>
                     {
                         deliveryByOrderId.TryGetValue( g.Key, out ForeignDeliveryInfo? info );
+                        (string parsedOrderNumber, string parsedDeliveryName, string parsedDeliveryAddress) = ParseOrderNumberAndContact( g.First().OrderNumber );
                         return new VatReportDetailsSummaryRow
                         {
                             Type = report.Type,
-                            Name = g.First().OrderNumber ?? g.Key,
+                            Name = !string.IsNullOrWhiteSpace( parsedOrderNumber ) ? parsedOrderNumber : (g.First().OrderNumber ?? g.Key),
                             ShopifyOrderId = g.Key,
                             OrderDateUtc = g.Min( x => x.OrderDateUtc ),
-                            DeliveryName = info?.Name ?? string.Empty,
-                            DeliveryAddress = info?.ShippingAddress ?? info?.BillingAddress ?? string.Empty,
+                            DeliveryName = info?.Name ?? parsedDeliveryName,
+                            DeliveryAddress = info?.ShippingAddress ?? info?.BillingAddress ?? parsedDeliveryAddress,
                             ShippingAddress = info?.ShippingAddress ?? string.Empty,
                             BillingAddress = info?.BillingAddress ?? string.Empty,
                             GrossAmount = Round2( g.Sum( x => x.GrossAmount ) ),
@@ -248,6 +250,7 @@ namespace backend.Services
                                     Items = x.Items
                                         .Select( i => new VatReportDetailsPolandItem
                                         {
+                                            Id = i.Id,
                                             ProductTitle = i.ProductTitle,
                                             ProductType = i.ProductType,
                                             Quantity = i.Quantity,
@@ -273,6 +276,104 @@ namespace backend.Services
                 Vat = report.Vat,
                 Rows = rows
             };
+        }
+
+        public async Task MoveRowToForeignAsync( int rowId, string deliveryName, string deliveryAddress )
+        {
+            VatReportRow? sourceRow = await _db.VatReportRows
+                .Include( r => r.Items )
+                .Include( r => r.VatReport )
+                .FirstOrDefaultAsync( r => r.Id == rowId );
+            if (sourceRow is null)
+            {
+                throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+            }
+            if (!string.Equals( sourceRow.VatReport.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+            {
+                throw new InvalidOperationException( "Перанос у замежныя даступны толькі з польскага справаздачы." );
+            }
+
+            string cleanName = (deliveryName ?? string.Empty).Trim();
+            string cleanAddress = (deliveryAddress ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace( cleanName ))
+            {
+                throw new InvalidOperationException( "Увядзіце імя атрымальніка для фактуры." );
+            }
+            if (string.IsNullOrWhiteSpace( cleanAddress ))
+            {
+                throw new InvalidOperationException( "Увядзіце адрас для пераносу ў замежныя." );
+            }
+
+            int year = sourceRow.VatReport.PeriodYear;
+            int month = sourceRow.VatReport.PeriodMonth;
+            VatReport sourceReport = sourceRow.VatReport;
+
+            VatReport? targetReport = await _db.VatReports
+                .FirstOrDefaultAsync( r =>
+                    r.PeriodYear == year &&
+                    r.PeriodMonth == month &&
+                    r.Type == VatReportType.Foreign
+                );
+            if (targetReport is null)
+            {
+                targetReport = new VatReport
+                {
+                    PeriodYear = year,
+                    PeriodMonth = month,
+                    Type = VatReportType.Foreign,
+                    Name = BuildReportName( VatReportType.Foreign, year, month ),
+                    Document = null,
+                    Vat = 0m,
+                    VatCredit = 0m,
+                    VatToPay = 0m,
+                    Documents = [],
+                    ShopifyOrderIds = [],
+                    CreatedAtUtc = DateTime.UtcNow
+                };
+                _db.VatReports.Add( targetReport );
+                await _db.SaveChangesAsync();
+            }
+
+            string safeOrderNumber = (sourceRow.OrderNumber ?? string.Empty).Trim();
+            string orderNumberBase = string.IsNullOrWhiteSpace( safeOrderNumber ) ? $"manual-{sourceRow.Id}" : safeOrderNumber;
+            string encodedOrderNumber = EncodeOrderNumberWithContact( orderNumberBase, cleanName, cleanAddress );
+            string targetShopifyOrderId = !string.IsNullOrWhiteSpace( sourceRow.ShopifyOrderId )
+                ? sourceRow.ShopifyOrderId
+                : $"manual-moved-{sourceRow.Id}";
+
+            VatReportRow targetRow = new()
+            {
+                VatReportId = targetReport.Id,
+                ShopifyOrderId = targetShopifyOrderId,
+                OrderNumber = encodedOrderNumber,
+                OrderDateUtc = sourceRow.OrderDateUtc,
+                VatRatePercent = sourceRow.VatRatePercent,
+                GrossAmount = sourceRow.GrossAmount,
+                VatAmount = sourceRow.VatAmount,
+                NetAmount = sourceRow.NetAmount,
+                ShippingGrossAmount = sourceRow.ShippingGrossAmount,
+                ShippingNetAmount = sourceRow.ShippingNetAmount,
+                InvoiceFileName = sourceRow.InvoiceFileName,
+                InvoiceContentType = sourceRow.InvoiceContentType,
+                InvoiceData = sourceRow.InvoiceData,
+                Items = sourceRow.Items.Select( i => new VatReportRowItem
+                {
+                    ProductTitle = i.ProductTitle,
+                    ProductType = i.ProductType,
+                    Quantity = i.Quantity,
+                    UnitPrice = i.UnitPrice,
+                    GrossAmount = i.GrossAmount,
+                    AssignedVatRatePercent = i.AssignedVatRatePercent,
+                    AssignmentReason = i.AssignmentReason
+                } ).ToList()
+            };
+
+            _db.VatReportRows.Add( targetRow );
+            _db.VatReportRows.Remove( sourceRow );
+            await _db.SaveChangesAsync();
+
+            await RecalculateReportTotalsAsync( sourceReport.Id );
+            await RecalculateReportTotalsAsync( targetReport.Id );
         }
 
         public async Task UpdateRowAsync(
@@ -328,6 +429,168 @@ namespace backend.Services
             report.VatToPay = report.Vat;
 
             await _db.SaveChangesAsync();
+        }
+
+        public async Task UpdateRowItemVatAsync( int itemId, decimal vatRatePercent )
+        {
+            if (vatRatePercent != 0m && vatRatePercent != 5m && vatRatePercent != 23m)
+            {
+                throw new InvalidOperationException( "Стаўка VAT павінна быць 0, 5 або 23." );
+            }
+
+            VatReportRowItem? item = await _db.VatReportRowItems
+                .Include( i => i.VatReportRow )
+                .FirstOrDefaultAsync( i => i.Id == itemId );
+            if (item is null)
+            {
+                throw new InvalidOperationException( "Пазіцыя радка справаздачы не знойдзена." );
+            }
+
+            VatReportRow row = item.VatReportRow;
+            item.AssignedVatRatePercent = Round2( vatRatePercent );
+            item.AssignmentReason = "manual override";
+
+            // When items in the same order are assigned to different VAT rates,
+            // the delivery (shipping) must be split across those VAT groups too.
+            int reportId = row.VatReportId;
+            string shopifyOrderId = row.ShopifyOrderId;
+
+            List<VatReportRow> orderRows = await _db.VatReportRows
+                .Where( r => r.VatReportId == reportId && r.ShopifyOrderId == shopifyOrderId )
+                .Include( r => r.Items )
+                .ToListAsync();
+
+            if (orderRows.Count == 0)
+            {
+                await _db.SaveChangesAsync();
+                await RecalculateReportTotalsAsync( reportId );
+                return;
+            }
+
+            List<VatReportRowItem> allItems = orderRows.SelectMany( r => r.Items ).ToList();
+            decimal totalGoodsGross = Round2( allItems.Sum( x => x.GrossAmount ) );
+            decimal totalShippingGross = Round2( orderRows.Sum( r => r.ShippingGrossAmount ) );
+
+            // Group items by currently assigned VAT rate (0/5/23) and rebuild shipping distribution accordingly.
+            Dictionary<decimal, decimal> goodsGrossByRate = allItems
+                .GroupBy( i => i.AssignedVatRatePercent )
+                .ToDictionary( g => g.Key, g => Round2( g.Sum( x => x.GrossAmount ) ) );
+
+            // Ensure we have rows for every encountered rate.
+            Dictionary<decimal, VatReportRow> rowsByRate = orderRows
+                .GroupBy( r => r.VatRatePercent )
+                .ToDictionary( g => g.Key, g => g.First() );
+
+            Dictionary<decimal, VatReportRow> targetRowsByRate = new();
+            Dictionary<decimal, decimal> shippingGrossByRate = new();
+
+            VatReportRow template = orderRows.First();
+            foreach ((decimal rate, decimal goodsGross) in goodsGrossByRate)
+            {
+                if (rate != 0m && rate != 5m && rate != 23m) continue;
+
+                if (!rowsByRate.TryGetValue( rate, out VatReportRow? target ))
+                {
+                    target = new VatReportRow
+                    {
+                        VatReportId = template.VatReportId,
+                        ShopifyOrderId = template.ShopifyOrderId,
+                        OrderNumber = template.OrderNumber,
+                        OrderDateUtc = template.OrderDateUtc,
+                        VatRatePercent = Round2( rate ),
+                        GrossAmount = 0m,
+                        VatAmount = 0m,
+                        NetAmount = 0m,
+                        ShippingGrossAmount = 0m,
+                        ShippingNetAmount = 0m,
+                        InvoiceFileName = string.Empty,
+                        InvoiceContentType = "application/pdf",
+                        InvoiceData = null,
+                        Items = new List<VatReportRowItem>()
+                    };
+                    _db.VatReportRows.Add( target );
+                    rowsByRate[rate] = target;
+                    orderRows.Add( target );
+                }
+
+                targetRowsByRate[rate] = target;
+
+                decimal shippingForRate = totalGoodsGross > 0m
+                    ? Round2( totalShippingGross * (goodsGross / totalGoodsGross) )
+                    : 0m;
+                shippingGrossByRate[rate] = shippingForRate;
+            }
+
+            // Keep totals exact after rounding split.
+            decimal assignedShippingGross = Round2( shippingGrossByRate.Values.Sum() );
+            decimal diff = Round2( totalShippingGross - assignedShippingGross );
+            if (diff != 0m && shippingGrossByRate.Count > 0)
+            {
+                // Add drift to the rate group with the biggest goods gross.
+                decimal driftRate = shippingGrossByRate
+                    .OrderByDescending( kv => goodsGrossByRate.TryGetValue( kv.Key, out decimal gg ) ? gg : 0m )
+                    .Select( kv => kv.Key )
+                    .First();
+                shippingGrossByRate[driftRate] = Round2( shippingGrossByRate[driftRate] + diff );
+            }
+
+            // Move items into correct VAT rows and recalculate row amounts from scratch.
+            foreach (VatReportRowItem i in allItems)
+            {
+                decimal rate = i.AssignedVatRatePercent;
+                if (!targetRowsByRate.TryGetValue( rate, out VatReportRow? target ))
+                {
+                    // Shouldn't happen due to goodsGrossByRate construction, but keep safe.
+                    continue;
+                }
+                i.VatReportRow = target;
+            }
+
+            // Recalculate each row based on which items are assigned to it.
+            foreach (VatReportRow r in orderRows.Where( x => x.ShopifyOrderId == shopifyOrderId ))
+            {
+                if (!targetRowsByRate.ContainsKey( r.VatRatePercent ))
+                {
+                    r.ShippingGrossAmount = 0m;
+                    r.ShippingNetAmount = 0m;
+                    r.GrossAmount = 0m;
+                    r.VatAmount = 0m;
+                    r.NetAmount = 0m;
+                    continue;
+                }
+
+                decimal rate = r.VatRatePercent;
+                List<VatReportRowItem> itemsForRate = allItems
+                    .Where( x => x.AssignedVatRatePercent == rate )
+                    .ToList();
+                decimal goodsGross = Round2( itemsForRate.Sum( x => x.GrossAmount ) );
+                decimal shippingGross = shippingGrossByRate.TryGetValue( rate, out decimal sg ) ? sg : 0m;
+
+                decimal vatRate = rate / 100m;
+                decimal shippingNet = Round2( shippingGross / (1m + vatRate) );
+                decimal shippingVat = Round2( shippingGross - shippingNet );
+
+                decimal itemsVat = Round2(
+                    itemsForRate.Sum( x =>
+                    {
+                        decimal rRate = x.AssignedVatRatePercent / 100m;
+                        return rRate <= 0m ? 0m : Round2( x.GrossAmount * rRate / (1m + rRate) );
+                    } )
+                );
+
+                decimal gross = Round2( goodsGross + shippingGross );
+                decimal vatAmount = Round2( itemsVat + shippingVat );
+                decimal netAmount = Round2( gross - vatAmount );
+
+                r.ShippingGrossAmount = Round2( shippingGross );
+                r.ShippingNetAmount = Round2( shippingNet );
+                r.GrossAmount = gross;
+                r.VatAmount = vatAmount;
+                r.NetAmount = netAmount;
+            }
+
+            await _db.SaveChangesAsync();
+            await RecalculateReportTotalsAsync( reportId );
         }
 
         public async Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId )
@@ -1540,6 +1803,37 @@ namespace backend.Services
         {
             string prefix = type == VatReportType.Poland ? "Польшча" : "Замежжа";
             return $"{prefix} {year:D4}-{month:D2}";
+        }
+
+        private static string EncodeOrderNumberWithContact( string orderNumberBase, string deliveryName, string deliveryAddress )
+        {
+            string order = (orderNumberBase ?? string.Empty).Trim();
+            string name = (deliveryName ?? string.Empty).Trim();
+            string address = (deliveryAddress ?? string.Empty).Trim();
+            string encoded = $"{order} || {name} || {address}";
+            if (encoded.Length <= 64) return encoded;
+
+            int available = Math.Max( 0, 64 - order.Length - 8 );
+            string clippedName = name[..Math.Min( name.Length, available )];
+            available = Math.Max( 0, 64 - order.Length - clippedName.Length - 8 );
+            string clippedAddress = address[..Math.Min( address.Length, available )];
+            encoded = $"{order} || {clippedName} || {clippedAddress}";
+            return encoded.Length <= 64 ? encoded : order[..Math.Min( order.Length, 64 )];
+        }
+
+        private static (string orderNumber, string deliveryName, string deliveryAddress) ParseOrderNumberAndContact( string orderNumberRaw )
+        {
+            if (string.IsNullOrWhiteSpace( orderNumberRaw )) return (string.Empty, string.Empty, string.Empty);
+            string[] parts = orderNumberRaw.Split( "||", StringSplitOptions.TrimEntries );
+            if (parts.Length >= 3)
+            {
+                return (parts[0].Trim(), parts[1].Trim(), parts[2].Trim());
+            }
+            if (parts.Length == 2)
+            {
+                return (parts[0].Trim(), string.Empty, parts[1].Trim());
+            }
+            return (orderNumberRaw.Trim(), string.Empty, string.Empty);
         }
 
         private static void ValidatePeriod( int year, int month )

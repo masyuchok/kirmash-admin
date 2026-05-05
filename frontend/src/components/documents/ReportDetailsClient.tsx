@@ -11,10 +11,11 @@ import {
   fetchVatReports,
   fetchVatReportSourceOrders,
   regenerateVatReport,
+  moveVatReportRowToForeign,
   uploadVatReportRowInvoice,
   updateVatReportRow,
+  updateVatReportRowItemVat,
 } from '@/lib/api/reports';
-import { getApiBaseUrl } from '@/lib/api/common';
 import { fetchInvoiceSettings } from '@/lib/api/settings';
 import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
 import { FiRefreshCw } from 'react-icons/fi';
@@ -84,7 +85,15 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [pendingRegenerateRowKey, setPendingRegenerateRowKey] = useState<string | null>(null);
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [deletingRowKey, setDeletingRowKey] = useState<string | null>(null);
+  const [updatingItemVatId, setUpdatingItemVatId] = useState<number | null>(null);
+  const [updatingShippingVatRowId, setUpdatingShippingVatRowId] = useState<number | null>(null);
   const [pendingDeleteRow, setPendingDeleteRow] = useState<{ rowId: number; rowKey: string } | null>(null);
+  const [pendingMoveToForeignRow, setPendingMoveToForeignRow] = useState<{ rowId: number; rowKey: string } | null>(
+    null
+  );
+  const [moveToForeignName, setMoveToForeignName] = useState('');
+  const [moveToForeignAddress, setMoveToForeignAddress] = useState('');
+  const [movingToForeignRowKey, setMovingToForeignRowKey] = useState<string | null>(null);
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addMode, setAddMode] = useState<'select' | 'manual'>('select');
   const [sourceOrderOptions, setSourceOrderOptions] = useState<VatReportSourceOrderOption[]>([]);
@@ -406,6 +415,28 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   };
 
+  const downloadBlobAsFile = (blob: Blob, fileName: string) => {
+    const safeName = fileName.replace(/[\\/:*?"<>|]/g, '_').trim() || 'invoice.pdf';
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = safeName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+
+  const getInvoiceNumberForFile = (raw: string | null | undefined, fallback: string): string => {
+    const source = String(raw ?? '').trim();
+    const compact = source.replace(/\s+/g, '');
+    const withoutHash = compact.replace(/^#/, '');
+    const digitsOnly = withoutHash.replace(/\D/g, '');
+    if (digitsOnly) return digitsOnly;
+    if (withoutHash) return withoutHash;
+    return fallback;
+  };
+
   const handleUploadInvoice = async (rowId: number) => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -566,10 +597,19 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     const uploadedInvoiceRow = row.polandRows.find((group) => Boolean(group.invoiceFileName));
     if (uploadedInvoiceRow) {
       setError(null);
-      const invoiceUrl = `${getApiBaseUrl()}/Reports/rows/${uploadedInvoiceRow.id}/invoice`;
-      window.open(invoiceUrl, '_blank', 'noopener,noreferrer');
+      try {
+        const { blob } = await downloadVatReportRowInvoice(uploadedInvoiceRow.id);
+        const invoiceNumber = getInvoiceNumberForFile(
+          row.name?.trim() || uploadedInvoiceRow.orderNumber,
+          `order-${uploadedInvoiceRow.id}`
+        );
+        downloadBlobAsFile(blob, `${invoiceNumber}.pdf`);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Памылка загрузкі фактуры');
+      }
       return;
     }
+    const invoiceNumber = getInvoiceNumberForFile(row.name, `order-${row.shopifyOrderId || reportId}`);
     let invoiceSettings: {
       companyName: string;
       address: string;
@@ -648,7 +688,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       .sort((a, b) => a[0] - b[0])
       .map(([, amount]) => formatAmount(amount))
       .join('\n');
-    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Замежжа</title><style>
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${invoiceNumber}</title><style>
       @page { size: A4 portrait; margin: 14mm; }
       :root { --brand:#07809f; --text:#0f172a; --muted:#64748b; --line:#e2e8f0; --soft:#f8fafc; }
       body { font-family: Arial, sans-serif; color:var(--text); margin:0; }
@@ -695,7 +735,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               <div class="row"><span class="label">Date:</span> ${row.orderDateUtc ? formatDate(row.orderDateUtc) : '—'}</div>
               <div class="row"><span class="label">Recipient:</span> ${row.deliveryName || '—'}</div>
               <div class="row"><span class="label">Shipping address:</span> ${row.shippingAddress || row.deliveryAddress || '—'}</div>
-              <div class="row"><span class="label">Billing address:</span> ${row.billingAddress || '—'}</div>
+              <div class="row"><span class="label">Billing address:</span> ${row.billingAddress || row.shippingAddress || row.deliveryAddress || '—'}</div>
             </div>
           </div>
         </div>
@@ -768,20 +808,114 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     }
   };
 
+  const confirmMoveRowToForeign = async () => {
+    if (!pendingMoveToForeignRow) return;
+    const { rowId, rowKey } = pendingMoveToForeignRow;
+    const name = moveToForeignName.trim();
+    const address = moveToForeignAddress.trim();
+    if (!name) {
+      setError('Увядзіце імя атрымальніка для фактуры');
+      return;
+    }
+    if (!address) {
+      setError('Увядзіце адрас для пераносу ў замежныя');
+      return;
+    }
+
+    setMovingToForeignRowKey(rowKey);
+    setError(null);
+    try {
+      await moveVatReportRowToForeign({ rowId, deliveryName: name, deliveryAddress: address });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+      if (editingRowKey === rowKey) setEditingRowKey(null);
+      setPendingMoveToForeignRow(null);
+      setMoveToForeignName('');
+      setMoveToForeignAddress('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка пераносу радка ў замежныя');
+    } finally {
+      setMovingToForeignRowKey(null);
+    }
+  };
+
+  const handleUpdateForeignItemVat = async (itemId: number, vatRatePercent: number) => {
+    setUpdatingItemVatId(itemId);
+    setError(null);
+    try {
+      await updateVatReportRowItemVat({ itemId, vatRatePercent });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка абнаўлення VAT па тавары');
+    } finally {
+      setUpdatingItemVatId(null);
+    }
+  };
+
+  const handleUpdateForeignShippingVat = async (
+    group: VatReportDetails['rows'][number]['polandRows'][number],
+    vatRatePercent: number
+  ) => {
+    setUpdatingShippingVatRowId(group.id);
+    setError(null);
+    try {
+      const itemsVat = round2(
+        group.items.reduce((sum, item) => {
+          const rate = item.assignedVatRatePercent / 100;
+          if (rate <= 0) return sum;
+          return sum + round2((item.grossAmount * rate) / (1 + rate));
+        }, 0)
+      );
+      const shippingCalc = recalcVatAndNet(group.shippingGrossAmount, vatRatePercent);
+      const vatAmount = round2(itemsVat + shippingCalc.vatAmount);
+      const netAmount = round2(group.grossAmount - vatAmount);
+      await updateVatReportRow({
+        rowId: group.id,
+        vatRatePercent,
+        grossAmount: group.grossAmount,
+        vatAmount,
+        netAmount,
+        shippingGrossAmount: group.shippingGrossAmount,
+      });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка абнаўлення VAT па дастаўцы');
+    } finally {
+      setUpdatingShippingVatRowId(null);
+    }
+  };
+
   useEffect(() => {
-    if (!pendingDeleteRow && !pendingRegenerateRowKey && !addModalOpen) return;
+    if (!pendingDeleteRow && !pendingRegenerateRowKey && !addModalOpen && !pendingMoveToForeignRow) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (deletingRowKey || regeneratingRowKey || addingRow) return;
+      if (deletingRowKey || regeneratingRowKey || addingRow || movingToForeignRowKey) return;
       setPendingDeleteRow(null);
       setPendingRegenerateRowKey(null);
+      setPendingMoveToForeignRow(null);
+      setMoveToForeignName('');
+      setMoveToForeignAddress('');
       setAddModalOpen(false);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [pendingDeleteRow, pendingRegenerateRowKey, addModalOpen, deletingRowKey, regeneratingRowKey, addingRow]);
+  }, [
+    pendingDeleteRow,
+    pendingRegenerateRowKey,
+    addModalOpen,
+    pendingMoveToForeignRow,
+    deletingRowKey,
+    regeneratingRowKey,
+    addingRow,
+    movingToForeignRowKey,
+  ]);
 
   useEffect(() => {
     if (!addModalOpen || addMode !== 'select' || !selectedSourceKey) return;
@@ -922,6 +1056,28 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             >
                               <FiPrinter className="size-4" aria-hidden />
                             </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const targetRowId = row.polandRows[0]?.id;
+                                if (!targetRowId) return;
+                                setPendingDeleteRow({
+                                  rowId: targetRowId,
+                                  rowKey: `foreign-${targetRowId}`,
+                                });
+                              }}
+                              disabled={!row.polandRows[0]?.id || deletingRowKey === `foreign-${row.polandRows[0]?.id}`}
+                              className="inline-flex size-8 items-center justify-center rounded-full border border-red-200 bg-white text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-60"
+                              aria-label="Выдаліць радок"
+                              title="Выдаліць радок"
+                            >
+                              {deletingRowKey === `foreign-${row.polandRows[0]?.id}` ? (
+                                <span className="size-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" />
+                              ) : (
+                                <FiTrash2 className="size-4" aria-hidden />
+                              )}
+                            </button>
                           </div>
                         </td>
                       </>
@@ -977,7 +1133,27 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                     <td className="px-2 py-1.5">{item.productTitle}</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
-                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.assignedVatRatePercent)}%</td>
+                                    <td className="px-2 py-1.5 text-right">
+                                      <div className="inline-flex items-center justify-end gap-2">
+                                        <select
+                                          value={String(item.assignedVatRatePercent)}
+                                          onChange={(e) => {
+                                            const nextVat = Number(e.currentTarget.value);
+                                            if (!Number.isFinite(nextVat)) return;
+                                            void handleUpdateForeignItemVat(item.id, nextVat);
+                                          }}
+                                          disabled={updatingItemVatId === item.id}
+                                          className="w-20 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-xs focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+                                        >
+                                          <option value="0">0%</option>
+                                          <option value="5">5%</option>
+                                          <option value="23">23%</option>
+                                        </select>
+                                        {updatingItemVatId === item.id && (
+                                          <span className="size-3 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                                        )}
+                                      </div>
+                                    </td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(vatAmount)}</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.grossAmount)}</td>
                                   </tr>
@@ -991,7 +1167,27 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   <td className="px-2 py-1.5 font-medium">Дастаўка ({formatAmount(group.vatRatePercent)}%)</td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">1</td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingNetAmount)}</td>
-                                  <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.vatRatePercent)}%</td>
+                                  <td className="px-2 py-1.5 text-right">
+                                    <div className="inline-flex items-center justify-end gap-2">
+                                      <select
+                                        value={String(group.vatRatePercent)}
+                                        onChange={(e) => {
+                                          const nextVat = Number(e.currentTarget.value);
+                                          if (!Number.isFinite(nextVat)) return;
+                                          void handleUpdateForeignShippingVat(group, nextVat);
+                                        }}
+                                        disabled={updatingShippingVatRowId === group.id}
+                                        className="w-20 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-xs focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+                                      >
+                                        <option value="0">0%</option>
+                                        <option value="5">5%</option>
+                                        <option value="23">23%</option>
+                                      </select>
+                                      {updatingShippingVatRowId === group.id && (
+                                        <span className="size-3 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                                      )}
+                                    </div>
+                                  </td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount - group.shippingNetAmount)}</td>
                                   <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount)}</td>
                                 </tr>
@@ -1041,10 +1237,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               <button
                 type="button"
                 onClick={openAddModal}
-                className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-primary/90 active:scale-[0.99]"
+                className="inline-flex size-9 items-center justify-center rounded-lg border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90 active:scale-[0.99]"
+                aria-label="Дадаць радок"
+                title="Дадаць радок"
               >
                 <FiPlus className="size-4" aria-hidden />
-                Дадаць радок
               </button>
               <button
                 type="button"
@@ -1342,6 +1539,24 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           </button>
                           <button
                             type="button"
+                            onClick={() => {
+                              setPendingMoveToForeignRow({ rowId: row.id, rowKey });
+                              setMoveToForeignName('');
+                              setMoveToForeignAddress('');
+                            }}
+                            disabled={movingToForeignRowKey === rowKey}
+                            className="inline-flex h-8 items-center rounded-full border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 shadow-sm transition hover:bg-blue-50 disabled:opacity-60"
+                            aria-label="Перанесці ў замежныя"
+                            title="Перанесці ў замежныя"
+                          >
+                            {movingToForeignRowKey === rowKey ? (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700" />
+                            ) : (
+                              'У замежныя'
+                            )}
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setPendingDeleteRow({ rowId: row.id, rowKey })}
                             disabled={deletingRowKey === rowKey}
                             className="inline-flex size-8 items-center justify-center rounded-full border border-red-200 bg-white text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-60"
@@ -1486,6 +1701,28 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           >
                             <FiPrinter className="size-4" aria-hidden />
                           </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const targetRowId = row.polandRows[0]?.id;
+                              if (!targetRowId) return;
+                              setPendingDeleteRow({
+                                rowId: targetRowId,
+                                rowKey: `foreign-${targetRowId}`,
+                              });
+                            }}
+                            disabled={!row.polandRows[0]?.id || deletingRowKey === `foreign-${row.polandRows[0]?.id}`}
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-red-200 bg-white text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-60"
+                            aria-label="Выдаліць радок"
+                            title="Выдаліць радок"
+                          >
+                            {deletingRowKey === `foreign-${row.polandRows[0]?.id}` ? (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" />
+                            ) : (
+                              <FiTrash2 className="size-4" aria-hidden />
+                            )}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1520,7 +1757,43 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   return (
                                     <tr key={`foreign-group-${group.id}`}>
                                       <td className="px-2 py-1.5 text-right tabular-nums">
-                                        {formatAmount(group.vatRatePercent)}%
+                                        {isEditing ? (
+                                          <select
+                                            value={edited?.vatRatePercent ?? group.vatRatePercent}
+                                            onChange={(e) => {
+                                              const value = Number(e.currentTarget.value) || 0;
+                                              setEditedRows((prev) => {
+                                                const base = prev[rowKey] ?? {
+                                                  orderDateUtc: toDateInputValue(group.orderDateUtc),
+                                                  vatRatePercent: group.vatRatePercent,
+                                                  grossAmount: group.grossAmount,
+                                                  vatAmount: group.vatAmount,
+                                                  netAmount: group.netAmount,
+                                                  shippingGrossAmount: group.shippingGrossAmount,
+                                                  vatManualOverride: false,
+                                                };
+                                                const autoVat = recalcVatAndNet(base.grossAmount, value).vatAmount;
+                                                const nextVat = base.vatManualOverride ? base.vatAmount : autoVat;
+                                                return {
+                                                  ...prev,
+                                                  [rowKey]: {
+                                                    ...base,
+                                                    vatRatePercent: value,
+                                                    vatAmount: nextVat,
+                                                    netAmount: round2(base.grossAmount - nextVat),
+                                                  },
+                                                };
+                                              });
+                                            }}
+                                            className="w-20 rounded-md border border-gray-200 px-2 py-1 text-right text-xs"
+                                          >
+                                            <option value={0}>0</option>
+                                            <option value={5}>5</option>
+                                            <option value={23}>23</option>
+                                          </select>
+                                        ) : (
+                                          `${formatAmount(group.vatRatePercent)}%`
+                                        )}
                                       </td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">
                                         {isEditing ? (
@@ -1734,7 +2007,27 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                       <td className="px-2 py-1.5">{item.productTitle}</td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
-                                      <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.assignedVatRatePercent)}%</td>
+                                      <td className="px-2 py-1.5 text-right">
+                                        <div className="inline-flex items-center justify-end gap-2">
+                                          <select
+                                            value={String(item.assignedVatRatePercent)}
+                                            onChange={(e) => {
+                                              const nextVat = Number(e.currentTarget.value);
+                                              if (!Number.isFinite(nextVat)) return;
+                                              void handleUpdateForeignItemVat(item.id, nextVat);
+                                            }}
+                                            disabled={updatingItemVatId === item.id}
+                                            className="w-20 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-xs focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+                                          >
+                                            <option value="0">0%</option>
+                                            <option value="5">5%</option>
+                                            <option value="23">23%</option>
+                                          </select>
+                                          {updatingItemVatId === item.id && (
+                                            <span className="size-3 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                                          )}
+                                        </div>
+                                      </td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(vatAmount)}</td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(item.grossAmount)}</td>
                                     </tr>
@@ -1748,7 +2041,27 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                     <td className="px-2 py-1.5 font-medium">Дастаўка ({formatAmount(group.vatRatePercent)}%)</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">1</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingNetAmount)}</td>
-                                    <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.vatRatePercent)}%</td>
+                                    <td className="px-2 py-1.5 text-right">
+                                      <div className="inline-flex items-center justify-end gap-2">
+                                        <select
+                                          value={String(group.vatRatePercent)}
+                                          onChange={(e) => {
+                                            const nextVat = Number(e.currentTarget.value);
+                                            if (!Number.isFinite(nextVat)) return;
+                                            void handleUpdateForeignShippingVat(group, nextVat);
+                                          }}
+                                          disabled={updatingShippingVatRowId === group.id}
+                                          className="w-20 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-xs focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 disabled:opacity-60"
+                                        >
+                                          <option value="0">0%</option>
+                                          <option value="5">5%</option>
+                                          <option value="23">23%</option>
+                                        </select>
+                                        {updatingShippingVatRowId === group.id && (
+                                          <span className="size-3 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                                        )}
+                                      </div>
+                                    </td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount - group.shippingNetAmount)}</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(group.shippingGrossAmount)}</td>
                                   </tr>
@@ -1976,6 +2289,76 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <span className="size-4 animate-spin rounded-full border-2 border-red-200 border-t-white" />
                 ) : (
                   'Выдаліць'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingMoveToForeignRow && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => {
+            if (movingToForeignRowKey) return;
+            setPendingMoveToForeignRow(null);
+            setMoveToForeignName('');
+            setMoveToForeignAddress('');
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-base font-semibold text-gray-900">Перанос у замежныя</div>
+            <p className="mt-2 text-sm text-gray-600">
+              Увядзіце даныя для фактуры. Радок будзе перанесены з польскага ў замежны справаздачу.
+            </p>
+            <label className="mt-4 block text-sm font-medium text-gray-700">
+              Імя
+              <input
+                type="text"
+                value={moveToForeignName}
+                onChange={(e) => setMoveToForeignName(e.currentTarget.value)}
+                placeholder="Увядзіце імя атрымальніка"
+                disabled={!!movingToForeignRowKey}
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
+              />
+            </label>
+            <label className="mt-4 block text-sm font-medium text-gray-700">
+              Адрас
+              <textarea
+                value={moveToForeignAddress}
+                onChange={(e) => setMoveToForeignAddress(e.currentTarget.value)}
+                placeholder="Увядзіце адрас"
+                rows={3}
+                disabled={!!movingToForeignRowKey}
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
+              />
+            </label>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingMoveToForeignRow(null);
+                  setMoveToForeignName('');
+                  setMoveToForeignAddress('');
+                }}
+                disabled={!!movingToForeignRowKey}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-60"
+              >
+                Адмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmMoveRowToForeign}
+                disabled={!!movingToForeignRowKey || !moveToForeignName.trim() || !moveToForeignAddress.trim()}
+                className="inline-flex min-w-24 items-center justify-center rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
+              >
+                {movingToForeignRowKey ? (
+                  <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-white" />
+                ) : (
+                  'Перанесці'
                 )}
               </button>
             </div>
