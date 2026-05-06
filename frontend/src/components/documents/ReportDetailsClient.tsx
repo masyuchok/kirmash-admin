@@ -20,7 +20,7 @@ import { fetchInvoiceSettings } from '@/lib/api/settings';
 import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
 import { FiRefreshCw } from 'react-icons/fi';
 import { FiChevronDown } from 'react-icons/fi';
-import { FiEdit2, FiEye, FiPlus, FiPrinter, FiTrash2, FiUpload, FiX } from 'react-icons/fi';
+import { FiCornerUpRight, FiDownload, FiEdit2, FiEye, FiPlus, FiTrash2, FiUpload, FiX } from 'react-icons/fi';
 
 function formatAmount(value: number): string {
   return value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -62,6 +62,15 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 function recalcVatAndNet(grossAmount: number, vatRatePercent: number): { vatAmount: number; netAmount: number } {
   const rate = vatRatePercent / 100;
   if (!Number.isFinite(grossAmount) || grossAmount <= 0 || !Number.isFinite(rate) || rate <= 0) {
@@ -80,7 +89,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [error, setError] = useState<string | null>(null);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [expandedForeignOrderId, setExpandedForeignOrderId] = useState<string | null>(null);
-  const [showAuditDetails, setShowAuditDetails] = useState(false);
+  const [expandedPolandRowId, setExpandedPolandRowId] = useState<number | null>(null);
   const [regeneratingRowKey, setRegeneratingRowKey] = useState<string | null>(null);
   const [pendingRegenerateRowKey, setPendingRegenerateRowKey] = useState<string | null>(null);
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
@@ -502,6 +511,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     });
     // Remove VAT filter control from export header.
     printableTable.querySelectorAll('button[aria-label="Фільтр па стаўцы VAT"]').forEach((el) => el.remove());
+    // Export should use Polish column labels while UI stays Belarusian.
+    const exportHeaderCells = printableTable.querySelectorAll('thead th');
+    if (exportHeaderCells.length >= 6) {
+      exportHeaderCells[0].textContent = 'Numer zamowienia';
+      exportHeaderCells[1].textContent = 'Data';
+      exportHeaderCells[2].textContent = 'Stawka VAT';
+      exportHeaderCells[3].textContent = 'Kwota brutto';
+      exportHeaderCells[4].textContent = 'VAT';
+      exportHeaderCells[5].textContent = 'Kwota netto';
+    }
 
     const totals = exportRows.reduce(
       (acc, row) => ({
@@ -517,7 +536,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     totalRow.className = 'export-total-row';
     const labelCell = totalRow.insertCell();
     labelCell.colSpan = 3;
-    labelCell.textContent = 'Усяго';
+    labelCell.textContent = 'Razem';
     labelCell.style.fontWeight = '700';
     const grossCell = totalRow.insertCell();
     grossCell.textContent = formatAmount(totals.grossAmount);
@@ -593,22 +612,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     window.setTimeout(printFromIframe, 250);
   };
 
-  const handleExportForeignOrderToPdf = async (row: VatReportDetails['rows'][number]) => {
-    const uploadedInvoiceRow = row.polandRows.find((group) => Boolean(group.invoiceFileName));
-    if (uploadedInvoiceRow) {
-      setError(null);
-      try {
-        const { blob } = await downloadVatReportRowInvoice(uploadedInvoiceRow.id);
-        const invoiceNumber = getInvoiceNumberForFile(
-          row.name?.trim() || uploadedInvoiceRow.orderNumber,
-          `order-${uploadedInvoiceRow.id}`
-        );
-        downloadBlobAsFile(blob, `${invoiceNumber}.pdf`);
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Памылка загрузкі фактуры');
-      }
-      return;
-    }
+  const handleExportForeignOrderToXml = async (row: VatReportDetails['rows'][number]) => {
+    setError(null);
     const invoiceNumber = getInvoiceNumberForFile(row.name, `order-${row.shopifyOrderId || reportId}`);
     let invoiceSettings: {
       companyName: string;
@@ -647,146 +652,141 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         vatAmount: round2(group.shippingGrossAmount - group.shippingNetAmount),
         grossAmount: group.shippingGrossAmount,
       }));
-    const itemsRowsHtml = itemRows
+
+    const lineRows = [
+      ...itemRows.map((item) => ({
+        title: item.title || '—',
+        quantity: item.quantity > 0 ? item.quantity : 1,
+        netAmount: item.netAmount,
+        vatRatePercent: item.vatRatePercent,
+        vatAmount: item.vatAmount,
+        grossAmount: item.grossAmount,
+      })),
+      ...shippingRows.map((shipping) => ({
+        title: 'Shipping',
+        quantity: 1,
+        netAmount: shipping.netAmount,
+        vatRatePercent: shipping.vatRatePercent,
+        vatAmount: shipping.vatAmount,
+        grossAmount: shipping.grossAmount,
+      })),
+    ];
+
+    const formatKsefDate = (raw: string | null | undefined): string => {
+      if (!raw) return new Date().toISOString().slice(0, 10);
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
+      return d.toISOString().slice(0, 10);
+    };
+
+    const decimal = (value: number) => round2(value).toFixed(2);
+    const xmlItems = lineRows
       .map(
-        (item) => `<tr>
-          <td>${item.title}</td>
-          <td class="num">${item.quantity}</td>
-          <td class="num">${formatAmount(item.netAmount)}</td>
-          <td class="num">${formatAmount(item.vatRatePercent)}%</td>
-          <td class="num">${formatAmount(item.vatAmount)}</td>
-          <td class="num">${formatAmount(item.grossAmount)}</td>
-        </tr>`
+        (item, index) => `    <FaWiersz>
+      <NrWierszaFa>${index + 1}</NrWierszaFa>
+      <P_7>${escapeXml(item.title)}</P_7>
+      <P_8A>szt.</P_8A>
+      <P_8B>${decimal(item.quantity)}</P_8B>
+      <P_9A>${decimal(item.netAmount / Math.max(item.quantity, 1))}</P_9A>
+      <P_11>${decimal(item.vatAmount)}</P_11>
+      <P_12>${decimal(item.vatRatePercent)}</P_12>
+    </FaWiersz>`
       )
-      .join('');
-    const shippingHtml = shippingRows
-      .map(
-        (s) => `<tr>
-          <td>Shipping</td>
-          <td class="num">1</td>
-          <td class="num">${formatAmount(s.netAmount)}</td>
-          <td class="num">${formatAmount(s.vatRatePercent)}%</td>
-          <td class="num">${formatAmount(s.vatAmount)}</td>
-          <td class="num">${formatAmount(s.grossAmount)}</td>
-        </tr>`
-      )
-      .join('');
-    const vatByRate = row.polandRows
-      .reduce(
-        (acc, group) => {
-          const key = Number(group.vatRatePercent || 0);
-          acc.set(key, (acc.get(key) ?? 0) + (group.vatAmount || 0));
-          return acc;
-        },
-        new Map<number, number>()
-      );
-    const vatRateSummary = Array.from(vatByRate.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([rate]) => `${formatAmount(rate)}%`)
       .join('\n');
-    const vatAmountSummary = Array.from(vatByRate.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([, amount]) => formatAmount(amount))
-      .join('\n');
-    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>${invoiceNumber}</title><style>
-      @page { size: A4 portrait; margin: 14mm; }
-      :root { --brand:#07809f; --text:#0f172a; --muted:#64748b; --line:#e2e8f0; --soft:#f8fafc; }
-      body { font-family: Arial, sans-serif; color:var(--text); margin:0; }
-      .invoice { width:100%; }
-      .title-wrap { margin-bottom: 14px; border-bottom:2px solid var(--line); padding-bottom:10px; }
-      .title { text-align:center; font-size:24px; font-weight:800; letter-spacing:.8px; color:var(--brand); margin:0; }
-      .meta-grid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; margin-bottom:16px; }
-      .block-title { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin:0 0 6px; }
-      .block { font-size:12px; line-height:1.5; }
-      .row { margin:0 0 3px; }
-      .label { color:var(--muted); font-weight:700; }
-      table { width:100%; border-collapse:separate; border-spacing:0; font-size:12px; }
-      th, td { padding:8px 8px; vertical-align:top; border-bottom:1px solid var(--line); }
-      th { background:var(--soft); color:var(--muted); text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
-      tr td:first-child, tr th:first-child { border-left:1px solid transparent; }
-      tr td:last-child, tr th:last-child { border-right:1px solid transparent; }
-      td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
-      tfoot td { font-weight:700; border-top:2px solid var(--brand); border-bottom:0; }
-      .total-label { color:var(--brand); }
-      .multi-line { white-space: pre-line; }
-    </style></head><body>
-      <div class="invoice">
-        <div class="title-wrap">
-          <h1 class="title">INVOICE ${row.name}</h1>
-        </div>
-        <div class="meta-grid">
-          <div>
-            <p class="block-title">Seller</p>
-            <div class="block">
-              ${
-                invoiceSettings
-                  ? `<div class="row"><strong>${invoiceSettings.companyName}</strong></div>
-              <div class="row">${invoiceSettings.address}</div>
-              <div class="row">${invoiceSettings.email}, ${invoiceSettings.website}</div>
-              <div class="row"><span class="label">NIP:</span> ${invoiceSettings.nip}</div>`
-                  : `<div class="row">—</div>`
-              }
-            </div>
-          </div>
-          <div>
-            <p class="block-title">Buyer & Order</p>
-            <div class="block">
-              <div class="row"><span class="label">Order number:</span> ${row.name}</div>
-              <div class="row"><span class="label">Date:</span> ${row.orderDateUtc ? formatDate(row.orderDateUtc) : '—'}</div>
-              <div class="row"><span class="label">Recipient:</span> ${row.deliveryName || '—'}</div>
-              <div class="row"><span class="label">Shipping address:</span> ${row.shippingAddress || row.deliveryAddress || '—'}</div>
-              <div class="row"><span class="label">Billing address:</span> ${row.billingAddress || row.shippingAddress || row.deliveryAddress || '—'}</div>
-            </div>
-          </div>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Item</th>
-              <th class="num">Qty</th>
-              <th class="num">Net amount, ${currency}</th>
-              <th class="num">VAT rate</th>
-              <th class="num">VAT, ${currency}</th>
-              <th class="num">Gross amount, ${currency}</th>
-            </tr>
-          </thead>
-          <tbody>${itemsRowsHtml}${shippingHtml}</tbody>
-          <tfoot>
-            <tr>
-              <td colspan="2" class="total-label">Total</td>
-              <td class="num">${formatAmount(row.netAmount ?? 0)}</td>
-              <td class="num multi-line">${vatRateSummary || '—'}</td>
-              <td class="num multi-line">${vatAmountSummary || formatAmount(row.vat)}</td>
-              <td class="num">${formatAmount(row.grossAmount ?? 0)}</td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-    </body></html>`;
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = '0';
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument ?? iframe.contentWindow?.document;
-    if (!doc) {
-      iframe.remove();
+    const sellerNip = (invoiceSettings?.nip ?? '').replace(/\D/g, '');
+    const sellerName = invoiceSettings?.companyName?.trim() || 'Seller';
+    const buyerName = row.deliveryName?.trim() || row.name?.trim() || 'Buyer';
+    const buyerAddress = row.shippingAddress || row.deliveryAddress || row.billingAddress || '';
+    const issueDate = formatKsefDate(row.orderDateUtc);
+    const netTotalValue = round2(row.netAmount ?? 0);
+    const vatTotalValue = round2(row.vat);
+    const grossTotalValue = round2(row.grossAmount ?? 0);
+    const netTotal = decimal(netTotalValue);
+    const vatTotal = decimal(vatTotalValue);
+    const grossTotal = decimal(grossTotalValue);
+    const linesNetTotal = round2(lineRows.reduce((sum, item) => sum + item.netAmount, 0));
+    const linesVatTotal = round2(lineRows.reduce((sum, item) => sum + item.vatAmount, 0));
+    const linesGrossTotal = round2(lineRows.reduce((sum, item) => sum + item.grossAmount, 0));
+
+    if (!invoiceSettings?.companyName?.trim()) {
+      setError('Для экспарту KSeF запоўніце назву прадаўца ў наладах фактуры.');
       return;
     }
-    doc.open();
-    doc.write(html);
-    doc.close();
-    let printed = false;
-    const printFromIframe = () => {
-      if (printed) return;
-      printed = true;
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-      window.setTimeout(() => iframe.remove(), 500);
-    };
-    iframe.onload = printFromIframe;
-    window.setTimeout(printFromIframe, 250);
+    if (sellerNip.length !== 10) {
+      setError('Для экспарту KSeF патрэбны карэктны NIP прадаўца (10 лічбаў) у наладах фактуры.');
+      return;
+    }
+    if (!invoiceNumber.trim()) {
+      setError('Для экспарту KSeF адсутнічае нумар фактуры.');
+      return;
+    }
+    if (!issueDate.trim()) {
+      setError('Для экспарту KSeF адсутнічае дата фактуры.');
+      return;
+    }
+    if (lineRows.length === 0) {
+      setError('Для экспарту KSeF патрэбна хаця б адна пазіцыя фактуры.');
+      return;
+    }
+    if (!buyerName.trim()) {
+      setError('Для экспарту KSeF адсутнічаюць даныя пакупніка.');
+      return;
+    }
+    if (currency.length !== 3) {
+      setError('Для экспарту KSeF валюта павінна быць у фармаце ISO (3 літары, напр. PLN).');
+      return;
+    }
+    if (
+      Math.abs(linesNetTotal - netTotalValue) > 0.01 ||
+      Math.abs(linesVatTotal - vatTotalValue) > 0.01 ||
+      Math.abs(linesGrossTotal - grossTotalValue) > 0.01
+    ) {
+      setError('Сумы радкоў не супадаюць з агульнымі сумамі. Праверце даныя перад экспартам у KSeF.');
+      return;
+    }
+
+    const generationTimestamp = new Date().toISOString();
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Faktura xmlns="http://crd.gov.pl/wzor/2024/10/31/10312/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Naglowek>
+    <KodFormularza kodSystemowy="FA (3)" wersjaSchemy="1-0E">FA</KodFormularza>
+    <WariantFormularza>3</WariantFormularza>
+    <DataWytworzeniaFa>${escapeXml(generationTimestamp)}</DataWytworzeniaFa>
+    <SystemInfo>Kirma.sh</SystemInfo>
+  </Naglowek>
+  <Podmiot1>
+    <DaneIdentyfikacyjne>
+      <NIP>${escapeXml(sellerNip || '0000000000')}</NIP>
+      <Nazwa>${escapeXml(sellerName)}</Nazwa>
+    </DaneIdentyfikacyjne>
+    <Adres>
+      <AdresL1>${escapeXml(invoiceSettings?.address ?? '')}</AdresL1>
+    </Adres>
+  </Podmiot1>
+  <Podmiot2>
+    <DaneIdentyfikacyjne>
+      <Nazwa>${escapeXml(buyerName)}</Nazwa>
+    </DaneIdentyfikacyjne>
+    <Adres>
+      <AdresL1>${escapeXml(buyerAddress)}</AdresL1>
+    </Adres>
+  </Podmiot2>
+  <Fa>
+    <KodWaluty>${escapeXml(currency)}</KodWaluty>
+    <P_1>${escapeXml(issueDate)}</P_1>
+    <P_2>${escapeXml(invoiceNumber)}</P_2>
+    <P_6>${escapeXml(issueDate)}</P_6>
+${xmlItems}
+    <FaCtrl>
+      <LiczbaWierszyFaktur>${lineRows.length}</LiczbaWierszyFaktur>
+      <WartoscFaktury>${grossTotal}</WartoscFaktury>
+      <WartoscNetto>${netTotal}</WartoscNetto>
+      <WartoscVat>${vatTotal}</WartoscVat>
+    </FaCtrl>
+  </Fa>
+</Faktura>`;
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    downloadBlobAsFile(blob, `${invoiceNumber}.xml`);
   };
 
   const confirmDeleteRow = async () => {
@@ -972,7 +972,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     <th className="px-4 py-2.5 text-right">Сума нета</th>
                     <th className="px-4 py-2.5 text-right">VAT</th>
                     <th className="px-4 py-2.5 text-right">Сума брута</th>
-                    <th className="px-4 py-2.5 text-right">PDF</th>
+                    <th className="px-4 py-2.5 text-right">XML</th>
                   </>
                 ) : (
                   <>
@@ -1038,7 +1038,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                 const targetRowId = row.polandRows[0]?.id;
                                 if (targetRowId) void handleUploadInvoice(targetRowId);
                               }}
-                              className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/15 hover:text-primary"
+                              className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                               aria-label="Загрузіць фактуру"
                               title="Загрузіць фактуру"
                             >
@@ -1048,13 +1048,13 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleExportForeignOrderToPdf(row);
+                                handleExportForeignOrderToXml(row);
                               }}
-                              className="inline-flex size-8 items-center justify-center rounded-full border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90"
-                              aria-label="Экспарт у PDF"
-                              title="Экспарт у PDF"
+                              className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                              aria-label="Экспарт у XML"
+                              title="Экспарт у XML"
                             >
-                              <FiPrinter className="size-4" aria-hidden />
+                              <FiDownload className="size-4" aria-hidden />
                             </button>
                             <button
                               type="button"
@@ -1094,7 +1094,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                               setPendingRegenerateRowKey(`${row.type}-${row.shopifyOrderId}`);
                             }}
                             disabled={regeneratingRowKey === `${row.type}-${row.shopifyOrderId}`}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
                             aria-label="Перегенераваць справаздачу"
                             title="Перегенераваць справаздачу"
                           >
@@ -1226,7 +1226,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       setVatFilter5(true);
                       setVatFilter23(true);
                     }}
-                    className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                    className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                     aria-label="Скінуць фільтры"
                     title="Скінуць фільтры"
                   >
@@ -1237,7 +1237,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               <button
                 type="button"
                 onClick={openAddModal}
-                className="inline-flex size-9 items-center justify-center rounded-lg border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90 active:scale-[0.99]"
+                className="inline-flex size-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary active:scale-[0.99]"
                 aria-label="Дадаць радок"
                 title="Дадаць радок"
               >
@@ -1245,19 +1245,12 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               </button>
               <button
                 type="button"
-                onClick={() => setShowAuditDetails((prev) => !prev)}
-                className="rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-primary/90 active:scale-[0.99]"
-              >
-                {showAuditDetails ? 'Схаваць дэталізацыю' : 'Дэталізацыя'}
-              </button>
-              <button
-                type="button"
                 onClick={handleExportTableToPdf}
-                className="inline-flex size-9 items-center justify-center rounded-lg border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90 active:scale-[0.99]"
+                className="inline-flex size-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary active:scale-[0.99]"
                 aria-label="Экспарт у PDF"
                 title="Экспарт у PDF"
               >
-                <FiPrinter className="size-4" aria-hidden />
+                <FiDownload className="size-4" aria-hidden />
               </button>
             </div>
           </div>
@@ -1327,7 +1320,14 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       const isEditing = editingRowKey === rowKey;
                       const edited = editedRows[rowKey];
                       return (
-                    <tr className={row.invoiceFileName ? 'bg-emerald-200/60 font-medium' : undefined}>
+                    <tr
+                      className={`${row.invoiceFileName ? 'bg-emerald-200/60 font-medium' : ''} cursor-pointer hover:bg-primary/10`}
+                      onClick={(e) => {
+                        const target = e.target as HTMLElement;
+                        if (target.closest('button, input, select, textarea, a, label')) return;
+                        setExpandedPolandRowId((prev) => (prev === row.id ? null : row.id));
+                      }}
+                    >
                       <td className="px-4 py-3">
                         <div className="inline-flex items-center gap-2">
                           <span>{row.orderNumber}</span>
@@ -1475,7 +1475,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           <button
                             type="button"
                             onClick={() => handleUploadInvoice(row.id)}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/15 hover:text-primary"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                             aria-label="Загрузіць фактуру"
                             title="Загрузіць фактуру"
                           >
@@ -1485,7 +1485,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             type="button"
                             onClick={() => handleOpenInvoice(row.id)}
                             disabled={!row.invoiceFileName}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/15 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label="Праглядзець фактуру"
                             title={row.invoiceFileName ? 'Праглядзець фактуру' : 'Фактура не загружана'}
                           >
@@ -1527,10 +1527,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                 });
                               }
                             }}
-                            className={`inline-flex size-8 items-center justify-center rounded-full border text-gray-700 shadow-sm transition ${
+                            className={`inline-flex size-8 items-center justify-center rounded-full border text-gray-900 shadow-sm transition ${
                               isEditing
-                                ? 'border-primary bg-primary text-white hover:bg-primary/90'
-                                : 'border-gray-200 bg-white hover:border-primary/40 hover:bg-primary/15 hover:text-primary'
+                                ? 'border-primary/40 bg-white text-primary hover:bg-primary/10'
+                                : 'border-gray-200 bg-white hover:border-primary/40 hover:bg-primary/10 hover:text-primary'
                             }`}
                             aria-label={isEditing ? 'Завяршыць рэдагаванне радка' : 'Рэдагаваць радок'}
                             title={isEditing ? 'Завяршыць рэдагаванне радка' : 'Рэдагаваць радок'}
@@ -1545,14 +1545,14 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                               setMoveToForeignAddress('');
                             }}
                             disabled={movingToForeignRowKey === rowKey}
-                            className="inline-flex h-8 items-center rounded-full border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 shadow-sm transition hover:bg-blue-50 disabled:opacity-60"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
                             aria-label="Перанесці ў замежныя"
                             title="Перанесці ў замежныя"
                           >
                             {movingToForeignRowKey === rowKey ? (
-                              <span className="size-3.5 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700" />
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
                             ) : (
-                              'У замежныя'
+                              <FiCornerUpRight className="size-4" aria-hidden />
                             )}
                           </button>
                           <button
@@ -1574,7 +1574,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     </tr>
                       );
                     })()}
-                    {showAuditDetails && row.items.length > 0 && (
+                    {expandedPolandRowId === row.id && row.items.length > 0 && (
                       <tr className="bg-gray-50/50">
                         <td className="px-4 py-2 text-xs text-gray-500" colSpan={7}>
                           {row.items.map((item, itemIdx) => (
@@ -1619,7 +1619,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 <button
                   type="button"
                   onClick={() => setForeignOrderSearch('')}
-                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                   aria-label="Скінуць пошук"
                   title="Скінуць пошук"
                 >
@@ -1638,7 +1638,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <th className="px-4 py-2.5 text-right">Сума нета</th>
                   <th className="px-4 py-2.5 text-right">VAT</th>
                   <th className="px-4 py-2.5 text-right">Сума брута</th>
-                  <th className="px-4 py-2.5 text-right">PDF</th>
+                  <th className="px-4 py-2.5 text-right">XML</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -1683,7 +1683,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                               const targetRowId = row.polandRows[0]?.id;
                               if (targetRowId) void handleUploadInvoice(targetRowId);
                             }}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/15 hover:text-primary"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                             aria-label="Загрузіць фактуру"
                             title="Загрузіць фактуру"
                           >
@@ -1693,13 +1693,13 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleExportForeignOrderToPdf(row);
+                              handleExportForeignOrderToXml(row);
                             }}
-                            className="inline-flex size-8 items-center justify-center rounded-full border border-primary bg-primary text-white shadow-sm transition hover:bg-primary/90"
-                            aria-label="Экспарт у PDF"
-                            title="Экспарт у PDF"
+                            className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                            aria-label="Экспарт у XML"
+                            title="Экспарт у XML"
                           >
-                            <FiPrinter className="size-4" aria-hidden />
+                            <FiDownload className="size-4" aria-hidden />
                           </button>
                           <button
                             type="button"
@@ -2155,7 +2155,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={newRow.orderNumber}
-                    onChange={(e) => setNewRow((prev) => ({ ...prev, orderNumber: e.currentTarget.value }))}
+                    onChange={(e) => {
+                      const orderNumber = e.currentTarget.value;
+                      setNewRow((prev) => ({ ...prev, orderNumber }));
+                    }}
                     disabled={addingRow}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -2165,7 +2168,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="date"
                     value={newRow.orderDateUtc}
-                    onChange={(e) => setNewRow((prev) => ({ ...prev, orderDateUtc: e.currentTarget.value }))}
+                    onChange={(e) => {
+                      const orderDateUtc = e.currentTarget.value;
+                      setNewRow((prev) => ({ ...prev, orderDateUtc }));
+                    }}
                     disabled={addingRow}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -2211,7 +2217,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     type="number"
                     step="0.01"
                     value={newRow.vatAmount}
-                    onChange={(e) => setNewRow((prev) => ({ ...prev, vatAmount: Number(e.currentTarget.value) || 0 }))}
+                    onChange={(e) => {
+                      const vatAmount = Number(e.currentTarget.value) || 0;
+                      setNewRow((prev) => ({ ...prev, vatAmount }));
+                    }}
                     disabled={addingRow}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -2222,7 +2231,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     type="number"
                     step="0.01"
                     value={newRow.netAmount}
-                    onChange={(e) => setNewRow((prev) => ({ ...prev, netAmount: Number(e.currentTarget.value) || 0 }))}
+                    onChange={(e) => {
+                      const netAmount = Number(e.currentTarget.value) || 0;
+                      setNewRow((prev) => ({ ...prev, netAmount }));
+                    }}
                     disabled={addingRow}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
