@@ -118,10 +118,14 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
       ? rowsRaw.map((item) => {
           const r = item as Record<string, unknown>;
           const polandRowsRaw = r.polandRows ?? r.PolandRows;
+          const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
           return {
-            type: (String(r.type ?? r.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland') as
-              | 'poland'
-              | 'foreign',
+            type: ((): 'poland' | 'foreign' | 'expense' => {
+              const normalized = String(r.type ?? r.Type ?? 'poland').toLowerCase();
+              if (normalized === 'foreign') return 'foreign';
+              if (normalized === 'expense') return 'expense';
+              return 'poland';
+            })(),
             name: String(r.name ?? r.Name ?? ''),
             shopifyOrderId: String(r.shopifyOrderId ?? r.ShopifyOrderId ?? ''),
             orderDateUtc: (r.orderDateUtc ?? r.OrderDateUtc)
@@ -134,6 +138,46 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
             grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
             vat: readNumber(r.vat ?? r.Vat),
             netAmount: readNumber(r.netAmount ?? r.NetAmount),
+            expenseRows: Array.isArray(expenseRowsRaw)
+              ? expenseRowsRaw.map((x: unknown) => {
+                  const e = x as Record<string, unknown>;
+                  return {
+                    id: readInt(e.id ?? e.Id),
+                    grossAmount: readNumber(e.grossAmount ?? e.GrossAmount),
+                    vatAmount: readNumber(e.vatAmount ?? e.VatAmount),
+                    netAmount: readNumber(e.netAmount ?? e.NetAmount),
+                    expenseDateUtc: String(e.expenseDateUtc ?? e.ExpenseDateUtc ?? ''),
+                    comment: String(e.comment ?? e.Comment ?? ''),
+                    isPaid: Boolean(e.isPaid ?? e.IsPaid ?? false),
+                    expenseInvoiceTypeId: readInt(e.expenseInvoiceTypeId ?? e.ExpenseInvoiceTypeId),
+                    expenseInvoiceTypeName: String(
+                      e.expenseInvoiceTypeName ?? e.ExpenseInvoiceTypeName ?? ''
+                    ),
+                    invoiceFileName: String(e.invoiceFileName ?? e.InvoiceFileName ?? ''),
+                    createdAtUtc: String(e.createdAtUtc ?? e.CreatedAtUtc ?? ''),
+                    supplierId: (() => {
+                      const raw = e.supplierId ?? e.SupplierId;
+                      if (raw == null) return null;
+                      const n = readInt(raw);
+                      return n > 0 ? n : null;
+                    })(),
+                    supplierName: String(e.supplierName ?? e.SupplierName ?? ''),
+                    products: (() => {
+                      const productsRaw = e.products ?? e.Products;
+                      if (!Array.isArray(productsRaw)) return [];
+                      return productsRaw.map((p: unknown) => {
+                        const row = p as Record<string, unknown>;
+                        return {
+                          id: readInt(row.id ?? row.Id),
+                          shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
+                          productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
+                          quantity: readInt(row.quantity ?? row.Quantity),
+                        };
+                      });
+                    })(),
+                  };
+                })
+              : [],
             polandRows: Array.isArray(polandRowsRaw)
               ? polandRowsRaw.map((p) => {
                   const d = p as Record<string, unknown>;
@@ -173,6 +217,81 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
         })
       : [],
   };
+}
+
+export async function createVatReportExpense(
+  reportId: number,
+  payload: {
+    grossAmount: number;
+    vatAmount: number;
+    netAmount: number;
+    expenseDateUtc: string;
+    comment?: string;
+    isPaid: boolean;
+    expenseInvoiceTypeId: number;
+    supplierId?: number;
+    products?: Array<{
+      shopifyProductId: string;
+      productTitle: string;
+      quantity: number;
+    }>;
+  }
+): Promise<number> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/expenses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося дадаць расход');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  return readInt(data.id ?? data.Id);
+}
+
+export async function uploadVatReportExpenseInvoice(expenseId: number, file: File): Promise<void> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`, {
+    method: 'POST',
+    credentials: apiCredentials,
+    body: formData,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць фактуру');
+    throw new Error(msg);
+  }
+}
+
+export async function downloadVatReportExpenseInvoice(
+  expenseId: number
+): Promise<{ blob: Blob; fileName: string }> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`, {
+    method: 'GET',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося атрымаць фактуру');
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const contentDisposition = res.headers.get('content-disposition') ?? '';
+  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(contentDisposition);
+  const fileName = match ? decodeURIComponent(match[1]) : `expense-${expenseId}.pdf`;
+  return { blob, fileName };
+}
+
+export async function deleteVatReportExpense(expenseId: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць расход');
+    throw new Error(msg);
+  }
 }
 
 export async function updateVatReportRow(payload: {

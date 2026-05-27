@@ -153,6 +153,12 @@ namespace backend.Services
                 .AsNoTracking()
                 .Include( r => r.Rows )
                 .ThenInclude( r => r.Items )
+                .Include( r => r.Expenses )
+                .ThenInclude( e => e.ExpenseInvoiceType )
+                .Include( r => r.Expenses )
+                .ThenInclude( e => e.Supplier )
+                .Include( r => r.Expenses )
+                .ThenInclude( e => e.Products )
                 .FirstOrDefaultAsync( r => r.Id == id );
             if (report is null)
             {
@@ -204,6 +210,46 @@ namespace backend.Services
                             .ToList()
                     }
                 };
+                decimal expenseVat = Round2( report.Expenses.Sum( x => x.VatAmount ) );
+                decimal expenseGross = Round2( report.Expenses.Sum( x => x.GrossAmount ) );
+                rows.Add( new VatReportDetailsSummaryRow
+                {
+                    Type = "expense",
+                    Name = "Расход",
+                    ShopifyOrderId = "expense-summary",
+                    Vat = expenseVat,
+                    GrossAmount = expenseGross,
+                    NetAmount = Round2( expenseGross - expenseVat ),
+                    ExpenseRows = report.Expenses
+                        .OrderByDescending( x => x.CreatedAtUtc )
+                        .Select( x => new VatReportExpenseRow
+                        {
+                            Id = x.Id,
+                            GrossAmount = x.GrossAmount,
+                            VatAmount = x.VatAmount,
+                            NetAmount = x.NetAmount,
+                            ExpenseDateUtc = x.ExpenseDateUtc,
+                            Comment = x.Comment ?? string.Empty,
+                            IsPaid = x.IsPaid,
+                            ExpenseInvoiceTypeId = x.ExpenseInvoiceTypeId,
+                            ExpenseInvoiceTypeName = x.ExpenseInvoiceType.Name,
+                            InvoiceFileName = x.InvoiceFileName,
+                            CreatedAtUtc = x.CreatedAtUtc,
+                            SupplierId = x.SupplierId,
+                            SupplierName = x.Supplier?.Name ?? string.Empty,
+                            Products = x.Products
+                                .OrderBy( p => p.ProductTitle )
+                                .Select( p => new VatReportExpenseProductRow
+                                {
+                                    Id = p.Id,
+                                    ShopifyProductId = p.ShopifyProductId,
+                                    ProductTitle = p.ProductTitle,
+                                    Quantity = p.Quantity
+                                } )
+                                .ToList()
+                        } )
+                        .ToList()
+                } );
             }
             else
             {
@@ -685,6 +731,185 @@ namespace backend.Services
             await _db.SaveChangesAsync();
 
             await RecalculateReportTotalsAsync( reportId );
+        }
+
+        public async Task<int> AddExpenseAsync( int reportId, VatReportExpenseCreateRequest request )
+        {
+            if (request.GrossAmount < 0m || request.VatAmount < 0m || request.NetAmount < 0m)
+            {
+                throw new InvalidOperationException( "Сумы не могуць быць адмоўнымі." );
+            }
+
+            VatReport? report = await _db.VatReports.FirstOrDefaultAsync( r => r.Id == reportId );
+            if (report is null)
+            {
+                throw new InvalidOperationException( "Справаздача не знойдзена." );
+            }
+
+            if (!string.Equals( report.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+            {
+                throw new InvalidOperationException( "Расходы можна дадаваць толькі ў польскі справаздачу." );
+            }
+
+            await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
+            ExpenseInvoiceType? invoiceType = await _db.ExpenseInvoiceTypes
+                .FirstOrDefaultAsync( x => x.Id == request.ExpenseInvoiceTypeId );
+            if (invoiceType is null)
+            {
+                throw new InvalidOperationException( "Тып расходнай фактуры не знойдзены." );
+            }
+
+            decimal gross = Round2( request.GrossAmount );
+            decimal vat = Round2( request.VatAmount );
+            decimal net = Round2( request.NetAmount );
+            if (gross <= 0m && vat <= 0m && net <= 0m)
+            {
+                throw new InvalidOperationException( "Увядзіце хаця б адну суму." );
+            }
+
+            bool isSupplierPayment = string.Equals(
+                invoiceType.Name,
+                ExpenseInvoiceTypeSeeder.SupplierPaymentDefaultName,
+                StringComparison.Ordinal );
+
+            int? supplierId = null;
+            List<VatReportExpenseProductCreateRequest> productLines = new();
+            if (isSupplierPayment)
+            {
+                if (!request.SupplierId.HasValue || request.SupplierId.Value <= 0)
+                {
+                    throw new InvalidOperationException( "Выберыце пастаўшчыка." );
+                }
+
+                Supplier? supplier = await _db.Suppliers.FirstOrDefaultAsync( s => s.Id == request.SupplierId.Value );
+                if (supplier is null)
+                {
+                    throw new InvalidOperationException( "Пастаўшчык не знойдзены." );
+                }
+
+                productLines = (request.Products ?? new List<VatReportExpenseProductCreateRequest>())
+                    .Where( p => p.Quantity > 0 && !string.IsNullOrWhiteSpace( p.ShopifyProductId ) )
+                    .ToList();
+                if (productLines.Count == 0)
+                {
+                    throw new InvalidOperationException( "Дадайце хаця б адзін тавар з колькасцю." );
+                }
+
+                List<string> supplierProductIds = await _db.SupplyProducts
+                    .AsNoTracking()
+                    .Where( sp => sp.Supply.SupplierId == request.SupplierId.Value )
+                    .Select( sp => sp.ShopifyProductId )
+                    .ToListAsync();
+                HashSet<string> normalizedSupplierProductIds = supplierProductIds
+                    .Select( id => NormalizeFromShopifyGid( id, "gid://shopify/Product/" ).Trim() )
+                    .ToHashSet( StringComparer.OrdinalIgnoreCase );
+
+                foreach (VatReportExpenseProductCreateRequest line in productLines)
+                {
+                    string normalizedProductId = NormalizeFromShopifyGid(
+                        line.ShopifyProductId.Trim(),
+                        "gid://shopify/Product/"
+                    ).Trim();
+                    if (!normalizedSupplierProductIds.Contains( normalizedProductId ))
+                    {
+                        throw new InvalidOperationException(
+                            $"Тавар «{line.ProductTitle}» не належыць выбранаму пастаўшчыку."
+                        );
+                    }
+                }
+
+                supplierId = supplier.Id;
+            }
+
+            DateTime expenseDate = request.ExpenseDateUtc == default
+                ? DateTime.UtcNow
+                : DateTime.SpecifyKind( request.ExpenseDateUtc, DateTimeKind.Utc );
+
+            VatReportExpense expense = new()
+            {
+                VatReportId = reportId,
+                ExpenseInvoiceTypeId = invoiceType.Id,
+                GrossAmount = gross,
+                VatAmount = vat,
+                NetAmount = net,
+                ExpenseDateUtc = expenseDate,
+                Comment = string.IsNullOrWhiteSpace( request.Comment ) ? null : request.Comment.Trim(),
+                IsPaid = request.IsPaid,
+                SupplierId = supplierId,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+
+            foreach (VatReportExpenseProductCreateRequest line in productLines)
+            {
+                expense.Products.Add( new VatReportExpenseProduct
+                {
+                    ShopifyProductId = NormalizeFromShopifyGid(
+                        line.ShopifyProductId.Trim(),
+                        "gid://shopify/Product/"
+                    ).Trim(),
+                    ProductTitle = string.IsNullOrWhiteSpace( line.ProductTitle )
+                        ? line.ShopifyProductId.Trim()
+                        : line.ProductTitle.Trim(),
+                    Quantity = line.Quantity
+                } );
+            }
+
+            _db.VatReportExpenses.Add( expense );
+            await _db.SaveChangesAsync();
+            return expense.Id;
+        }
+
+        public async Task UploadExpenseInvoiceAsync( int expenseId, string fileName, string contentType, byte[] data )
+        {
+            VatReportExpense? expense = await _db.VatReportExpenses.FirstOrDefaultAsync( x => x.Id == expenseId );
+            if (expense is null)
+            {
+                throw new InvalidOperationException( "Расход не знойдзены." );
+            }
+            if (data.Length == 0)
+            {
+                throw new InvalidOperationException( "Файл пусты." );
+            }
+            if (data.Length > 10 * 1024 * 1024)
+            {
+                throw new InvalidOperationException( "Файл занадта вялікі. Максімум 10 MB." );
+            }
+
+            expense.InvoiceFileName = fileName;
+            expense.InvoiceContentType = contentType;
+            expense.InvoiceData = data;
+            await _db.SaveChangesAsync();
+        }
+
+        public async Task<(string FileName, string ContentType, byte[] Data)> GetExpenseInvoiceAsync( int expenseId )
+        {
+            VatReportExpense? expense = await _db.VatReportExpenses.FirstOrDefaultAsync( x => x.Id == expenseId );
+            if (expense is null)
+            {
+                throw new InvalidOperationException( "Расход не знойдзены." );
+            }
+            if (expense.InvoiceData is null || expense.InvoiceData.Length == 0)
+            {
+                throw new InvalidOperationException( "Фактура для гэтага расходу не загружана." );
+            }
+
+            return (
+                string.IsNullOrWhiteSpace( expense.InvoiceFileName ) ? $"expense-{expense.Id}.pdf" : expense.InvoiceFileName,
+                string.IsNullOrWhiteSpace( expense.InvoiceContentType ) ? "application/pdf" : expense.InvoiceContentType,
+                expense.InvoiceData
+            );
+        }
+
+        public async Task DeleteExpenseAsync( int expenseId )
+        {
+            VatReportExpense? expense = await _db.VatReportExpenses.FirstOrDefaultAsync( x => x.Id == expenseId );
+            if (expense is null)
+            {
+                throw new InvalidOperationException( "Расход не знойдзены." );
+            }
+
+            _db.VatReportExpenses.Remove( expense );
+            await _db.SaveChangesAsync();
         }
 
         public async Task UploadRowInvoiceAsync( int rowId, string fileName, string contentType, byte[] data )

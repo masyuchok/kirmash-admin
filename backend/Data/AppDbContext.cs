@@ -15,7 +15,10 @@ namespace backend.Data
         public DbSet<VatReport> VatReports { get; set; } = default!;
         public DbSet<VatReportRow> VatReportRows { get; set; } = default!;
         public DbSet<VatReportRowItem> VatReportRowItems { get; set; } = default!;
+        public DbSet<VatReportExpense> VatReportExpenses { get; set; } = default!;
+        public DbSet<VatReportExpenseProduct> VatReportExpenseProducts { get; set; } = default!;
         public DbSet<InvoiceSettings> InvoiceSettings { get; set; } = default!;
+        public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -74,6 +77,60 @@ namespace backend.Data
                 entity.Property( r => r.ShopifyOrderIds )
                     .HasColumnType( "text[]" );
                 entity.Property( r => r.CreatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<VatReportExpense>( entity =>
+            {
+                entity.HasOne( x => x.VatReport )
+                    .WithMany( r => r.Expenses )
+                    .HasForeignKey( x => x.VatReportId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.HasOne( x => x.ExpenseInvoiceType )
+                    .WithMany( t => t.Expenses )
+                    .HasForeignKey( x => x.ExpenseInvoiceTypeId )
+                    .OnDelete( DeleteBehavior.Restrict );
+
+                entity.Property( x => x.GrossAmount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.VatAmount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.NetAmount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.ExpenseDateUtc )
+                    .IsRequired();
+                entity.Property( x => x.Comment )
+                    .HasMaxLength( 1024 );
+                entity.Property( x => x.InvoiceFileName )
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.InvoiceContentType )
+                    .HasMaxLength( 128 );
+                entity.Property( x => x.InvoiceData )
+                    .HasColumnType( "bytea" );
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+
+                entity.HasOne( x => x.Supplier )
+                    .WithMany()
+                    .HasForeignKey( x => x.SupplierId )
+                    .OnDelete( DeleteBehavior.SetNull );
+            } );
+
+            modelBuilder.Entity<VatReportExpenseProduct>( entity =>
+            {
+                entity.HasOne( x => x.VatReportExpense )
+                    .WithMany( e => e.Products )
+                    .HasForeignKey( x => x.VatReportExpenseId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ProductTitle )
+                    .IsRequired()
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.Quantity )
                     .IsRequired();
             } );
 
@@ -158,6 +215,17 @@ namespace backend.Data
                     .IsRequired()
                     .HasMaxLength( 16 );
                 entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<ExpenseInvoiceType>( entity =>
+            {
+                entity.Property( x => x.Name )
+                    .IsRequired()
+                    .HasMaxLength( 256 );
+                entity.Property( x => x.IsSystem )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
                     .IsRequired();
             } );
         }

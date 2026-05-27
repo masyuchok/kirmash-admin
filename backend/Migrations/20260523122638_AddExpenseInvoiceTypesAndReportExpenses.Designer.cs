@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using backend.Data;
@@ -11,9 +12,11 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260523122638_AddExpenseInvoiceTypesAndReportExpenses")]
+    partial class AddExpenseInvoiceTypesAndReportExpenses
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -293,14 +296,7 @@ namespace backend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("Comment")
-                        .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
-
                     b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("ExpenseDateUtc")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("ExpenseInvoiceTypeId")
@@ -309,27 +305,8 @@ namespace backend.Migrations
                     b.Property<decimal>("GrossAmount")
                         .HasColumnType("numeric(12,2)");
 
-                    b.Property<string>("InvoiceContentType")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<byte[]>("InvoiceData")
-                        .HasColumnType("bytea");
-
-                    b.Property<string>("InvoiceFileName")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
                     b.Property<bool>("IsPaid")
                         .HasColumnType("boolean");
-
-                    b.Property<decimal>("NetAmount")
-                        .HasColumnType("numeric(12,2)");
-
-                    b.Property<int?>("SupplierId")
-                        .HasColumnType("integer");
 
                     b.Property<decimal>("VatAmount")
                         .HasColumnType("numeric(12,2)");
@@ -341,42 +318,9 @@ namespace backend.Migrations
 
                     b.HasIndex("ExpenseInvoiceTypeId");
 
-                    b.HasIndex("SupplierId");
-
                     b.HasIndex("VatReportId");
 
                     b.ToTable("VatReportExpenses");
-                });
-
-            modelBuilder.Entity("backend.Models.VatReportExpenseProduct", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("ProductTitle")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<int>("Quantity")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ShopifyProductId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("VatReportExpenseId")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("VatReportExpenseId");
-
-                    b.ToTable("VatReportExpenseProducts");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportRow", b =>
@@ -523,11 +467,6 @@ namespace backend.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("backend.Models.Supplier", "Supplier")
-                        .WithMany()
-                        .HasForeignKey("SupplierId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
                     b.HasOne("backend.Models.VatReport", "VatReport")
                         .WithMany("Expenses")
                         .HasForeignKey("VatReportId")
@@ -536,20 +475,7 @@ namespace backend.Migrations
 
                     b.Navigation("ExpenseInvoiceType");
 
-                    b.Navigation("Supplier");
-
                     b.Navigation("VatReport");
-                });
-
-            modelBuilder.Entity("backend.Models.VatReportExpenseProduct", b =>
-                {
-                    b.HasOne("backend.Models.VatReportExpense", "VatReportExpense")
-                        .WithMany("Products")
-                        .HasForeignKey("VatReportExpenseId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("VatReportExpense");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportRow", b =>
@@ -596,11 +522,6 @@ namespace backend.Migrations
                     b.Navigation("Expenses");
 
                     b.Navigation("Rows");
-                });
-
-            modelBuilder.Entity("backend.Models.VatReportExpense", b =>
-                {
-                    b.Navigation("Products");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportRow", b =>

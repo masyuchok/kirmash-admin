@@ -4,5 +4,6 @@ namespace backend.Models
     {
         public const string Poland = "poland";
         public const string Foreign = "foreign";
+        public const string Expense = "expense";
     }
 }

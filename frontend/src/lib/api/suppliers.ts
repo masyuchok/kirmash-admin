@@ -12,6 +12,28 @@ import {
 } from '@/lib/suppliers/supplierFormTypes';
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
 
+export async function fetchSuppliers(): Promise<import('@/types/supplier').Supplier[]> {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць пастаўшчыкоў');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data.map((item) => {
+    const row = item as Record<string, unknown>;
+    return {
+      id: Number(row.id ?? row.Id ?? 0),
+      name: String(row.name ?? row.Name ?? ''),
+      telegram: String(row.tGContact ?? row.TGContact ?? row.telegram ?? ''),
+      website: String(row.website ?? row.Website ?? ''),
+      country: String(row.country ?? row.Country ?? ''),
+      city: String(row.city ?? row.City ?? ''),
+      isVatPayer: Boolean(row.isVATPayer ?? row.isVatPayer ?? false),
+    };
+  });
+}
+
 /** Response shape for GET /suppliers/:id — extend when backend is ready. */
 export type SupplierApiDetail = Partial<SupplierFormValues> & {
   id: number;
