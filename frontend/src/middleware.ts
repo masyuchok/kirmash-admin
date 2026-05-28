@@ -1,45 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { decodeJwt } from 'jose';
-import { getApiBaseUrl } from '@/lib/api/common';
+import { getAuthLoginUrl } from '@/lib/api/common';
 
 const COOKIE = process.env.AUTH_COOKIE_NAME || 'jwt_token';
 
-export function middleware(req: NextRequest) {
-  const { pathname, search } = req.nextUrl;
-  const backendUrl = getApiBaseUrl();
+function redirectToLogin(req: NextRequest): NextResponse {
+  const url = getAuthLoginUrl(req.url);
+  url.searchParams.set('shop', process.env.NEXT_PUBLIC_SHOP_DOMAIN!);
+  return NextResponse.redirect(url);
+}
 
-  // public paths without auth
+export function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
   const publicPaths = [
     '/_next',
     '/favicon.ico',
     '/robots.txt',
     '/sitemap.xml',
     '/login',
+    '/api',
   ];
-  if (publicPaths.some((p) => pathname.startsWith(p)))
+  if (publicPaths.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
+  }
 
   const token = req.cookies.get(COOKIE)?.value;
 
-  // if there is no token — start login via backend
   if (!token) {
-    const url = new URL(`${backendUrl}/auth/login`);
-    url.searchParams.set('shop', process.env.NEXT_PUBLIC_SHOP_DOMAIN!);
-    return NextResponse.redirect(url);
+    return redirectToLogin(req);
   }
 
   try {
     const { exp } = decodeJwt(token);
     const now = Math.floor(Date.now() / 1000);
     if (exp && exp < now) {
-      const url = new URL(`${backendUrl}/auth/login`);
-      url.searchParams.set('shop', process.env.NEXT_PUBLIC_SHOP_DOMAIN!);
-      return NextResponse.redirect(url);
+      return redirectToLogin(req);
     }
   } catch {
-    const url = new URL(`${backendUrl}/auth/login`);
-    url.searchParams.set('shop', process.env.NEXT_PUBLIC_SHOP_DOMAIN!);
-    return NextResponse.redirect(url);
+    return redirectToLogin(req);
   }
 
   return NextResponse.next();

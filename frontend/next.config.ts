@@ -1,11 +1,22 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next';
+
+const apiProxyTarget = process.env.API_PROXY_TARGET?.trim();
 
 const nextConfig: NextConfig = {
-  /* config options here */
   reactStrictMode: true,
-  // Use custom build directory to avoid intermittent lock/corruption
-  // on default `.next` folder in this Windows workspace.
-  distDir: ".next-runtime",
+  distDir: '.next-runtime',
+  async rewrites() {
+    if (!apiProxyTarget) {
+      return [];
+    }
+
+    return [
+      {
+        source: '/api/:path*',
+        destination: `${apiProxyTarget.replace(/\/$/, '')}/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

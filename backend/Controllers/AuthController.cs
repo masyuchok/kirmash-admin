@@ -33,8 +33,13 @@ namespace backend.Controllers
         {
             string? clientId = _config["Shopify:ApiKey"];
             string? scopes = _config["Shopify:Scopes"];
-            string? baseUrl = _config["BaseUrl"];
-            string? redirectUri = $"{baseUrl}/auth/callback";
+            string? baseUrl = GetRequiredPublicUrl( "BaseUrl" );
+            if (baseUrl is null)
+            {
+                return StatusCode( 500, "BaseUrl is not configured." );
+            }
+
+            string redirectUri = $"{baseUrl}/auth/callback";
 
             string shopifyUrl = $"https://{shop}/admin/oauth/authorize" +
                              $"?client_id={clientId}" +
@@ -77,18 +82,48 @@ namespace backend.Controllers
             // Generates the JWT Token
             string jwt = _jwt.GenerateJwtToken( shop, tokenResponse.access_token );
 
-            // Sets JWT to Cookies
-            Response.Cookies.Append( "jwt_token", jwt, new CookieOptions
+            string cookieName = _config["Auth:CookieName"] ?? "jwt_token";
+            CookieOptions cookieOptions = new CookieOptions
             {
                 HttpOnly = true,
                 Secure = true,
                 SameSite = SameSiteMode.None,
                 Path = "/",
-                //Domain = ".kirma.sh" // for prod only
-            } );
+            };
 
-            // Redirect to landing page
-            return Redirect( $"{_config["ClientUrl"]}/" );
+            string? clientUrl = GetRequiredPublicUrl( "ClientUrl" );
+            if (clientUrl is not null && clientUrl.Contains( "kirma.sh", StringComparison.OrdinalIgnoreCase ))
+            {
+                cookieOptions.Domain = ".kirma.sh";
+            }
+
+            Response.Cookies.Append( cookieName, jwt, cookieOptions );
+
+            if (string.IsNullOrWhiteSpace( clientUrl ))
+            {
+                return StatusCode( 500, "ClientUrl is not configured." );
+            }
+
+            return Redirect( $"{clientUrl}/" );
+        }
+
+        private string? GetRequiredPublicUrl( string key )
+        {
+            string? value = _config[key]?.Trim().TrimEnd( '/' );
+            if (string.IsNullOrWhiteSpace( value ))
+            {
+                return null;
+            }
+
+            if (!_env.IsDevelopment( )
+                && (value.Contains( "localhost", StringComparison.OrdinalIgnoreCase )
+                    || value.Contains( "127.0.0.1", StringComparison.OrdinalIgnoreCase )))
+            {
+                throw new InvalidOperationException(
+                    $"Configuration '{key}' must not point to localhost in Production (current: {value})." );
+            }
+
+            return value;
         }
 
         private bool IsHmacValid( IQueryCollection query, string receivedHmac )

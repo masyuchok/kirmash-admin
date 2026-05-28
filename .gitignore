@@ -20,3 +20,4 @@ obj/
 node_modules/
 .next/
 .env
+.env.*

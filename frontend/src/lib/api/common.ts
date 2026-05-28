@@ -1,10 +1,28 @@
-/** Normalized API origin (no trailing slash). */
+/**
+ * Normalized API origin (no trailing slash).
+ * In the browser always uses the current site + `/api` so auth redirects never
+ * stick to a stale localhost baked in at build time.
+ */
 export function getApiBaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_URL;
-  if (!url?.trim()) {
-    throw new Error('NEXT_PUBLIC_API_URL is not set');
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/api`;
   }
-  return url.replace(/\/$/, '');
+
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (!configured) {
+    return '/api';
+  }
+
+  if (configured.startsWith('http://') || configured.startsWith('https://')) {
+    return configured.replace(/\/$/, '');
+  }
+
+  return `https://${configured.replace(/\/$/, '')}`;
+}
+
+/** For middleware: login URL on the same host the user opened. */
+export function getAuthLoginUrl(requestUrl: string): URL {
+  return new URL('/api/auth/login', requestUrl);
 }
 
 /** Default for cookie-authenticated API calls. */
