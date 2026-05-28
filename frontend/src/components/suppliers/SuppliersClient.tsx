@@ -5,7 +5,7 @@ import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { Supplier } from '@/types/supplier';
 import { FiPlus, FiPackage } from 'react-icons/fi';
-import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
+import { fetchSuppliers } from '@/lib/api/suppliers';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
 import SuppliersTable from './SuppliersTable';
@@ -24,6 +24,7 @@ const SuppliersClient = () => {
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(null);
   const [inventorySupplierName, setInventorySupplierName] = useState('');
@@ -103,34 +104,25 @@ const SuppliersClient = () => {
   };
 
   useEffect(() => {
-    fetch(`${getApiBaseUrl()}/suppliers`, {
-      credentials: apiCredentials,
-    })
-      .then((res) => res.json())
-      .then((data: unknown) => {
-        const rows = Array.isArray(data)
-          ? data.map((row) => {
-              const r = row as Record<string, unknown>;
-              return {
-                id: Number(r.id ?? r.Id ?? 0),
-                name: String(r.name ?? r.Name ?? ''),
-                telegram: String(
-                  r.telegram ?? r.Telegram ?? r.tgContact ?? r.tGContact ?? r.TGContact ?? ''
-                ),
-                website: String(r.website ?? r.Website ?? ''),
-                country: String(r.country ?? r.Country ?? ''),
-                city: String(r.city ?? r.City ?? ''),
-                isVatPayer: Boolean(r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false),
-              } satisfies Supplier;
-            })
-          : [];
+    let cancelled = false;
+    setLoading(true);
+    fetchSuppliers()
+      .then((rows) => {
+        if (cancelled) return;
         setSuppliers(rows);
-        setLoading(false);
+        setLoadError(null);
       })
-      .catch((err) => {
-        console.error('Памылка загрузкі пастаўшчыкоў:', err);
-        setLoading(false);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў');
+        setSuppliers([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
@@ -156,6 +148,11 @@ const SuppliersClient = () => {
     default: {
       return (
         <div className="mx-auto w-full max-w-6xl space-y-6">
+          {loadError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {loadError}
+            </div>
+          )}
           <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-100 p-5 sm:p-6">
               <SupplierNameSearch

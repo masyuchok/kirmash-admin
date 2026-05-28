@@ -1,6 +1,7 @@
 ﻿using backend.Data;
 using backend.Services;
 using backend.Services.Auth;
+using backend.Services.Shopify;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -59,6 +60,7 @@ builder.Services.AddCors( options =>
 } );
 
 builder.Services.AddControllers( );
+builder.Services.AddHttpClient( "Shopify" );
 
 builder.Services.AddScoped<JwtService>( );
 builder.Services.AddScoped<SupplierService>( );
@@ -66,6 +68,13 @@ builder.Services.AddScoped<SupplierInventoryService>( );
 builder.Services.AddScoped<InventorySalesCacheService>( );
 builder.Services.AddScoped<SupplyService>();
 builder.Services.AddScoped<ProductService>();
+builder.Services.AddScoped<ShopifyGraphqlClient>();
+builder.Services.AddScoped<ShopifyInventoryService>();
+builder.Services.AddScoped<ShopifyProductCatalogService>();
+builder.Services.AddScoped<ShopifyOrderFetchService>();
+builder.Services.AddScoped<VatReportQueryService>();
+builder.Services.AddScoped<VatReportGenerationService>();
+builder.Services.AddScoped<VatReportMutationService>();
 builder.Services.AddScoped<VatReportService>();
 builder.Services.AddHttpContextAccessor();
 

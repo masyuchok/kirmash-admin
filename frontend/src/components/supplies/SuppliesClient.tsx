@@ -6,7 +6,7 @@ import { FiPlus } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { deleteSupply, fetchSupplies } from '@/lib/api/supplies';
-import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
+import { fetchSupplierOptions } from '@/lib/api/suppliers';
 import type { SupplyListItem } from '@/types/supply';
 import SuppliesTable from './SuppliesTable';
 
@@ -93,24 +93,10 @@ export default function SuppliesClient() {
     let cancelled = false;
     setSupplierLoading(true);
     setSupplierError(null);
-    fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials })
-      .then((res) => res.json())
-      .then((data: unknown) => {
+    fetchSupplierOptions()
+      .then((options) => {
         if (cancelled) return;
-        if (!Array.isArray(data)) {
-          setSupplierOptions([]);
-          return;
-        }
-        const options = data
-          .map((row) => {
-            const r = row as Record<string, unknown>;
-            const id = typeof r.id === 'number' ? r.id : Number(r.id);
-            const name = typeof r.name === 'string' ? r.name : '';
-            if (!Number.isFinite(id) || !name.trim()) return null;
-            return { id, name };
-          })
-          .filter((row): row is SupplierOption => row !== null);
-        setSupplierOptions(options);
+        setSupplierOptions(options.map(({ id, name }) => ({ id, name })));
       })
       .catch((err: unknown) => {
         if (!cancelled) {

@@ -11,25 +11,14 @@ import {
   mapListSupplierToFormValues,
 } from '@/lib/suppliers/supplierFormTypes';
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import { readBoolean, readInt, readNumber, readString } from '@/lib/api/json';
 import type { SupplierInventoryResult, SupplierInventoryRow } from '@/types/supplier-inventory';
 
-function readInt(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.trunc(n) : 0;
-  }
-  return 0;
-}
-
-function readNumber(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
+export type SupplierOption = {
+  id: number;
+  name: string;
+  isVatPayer: boolean;
+};
 
 function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
   return {
@@ -105,15 +94,22 @@ export async function fetchSuppliers(): Promise<import('@/types/supplier').Suppl
   return data.map((item) => {
     const row = item as Record<string, unknown>;
     return {
-      id: Number(row.id ?? row.Id ?? 0),
-      name: String(row.name ?? row.Name ?? ''),
-      telegram: String(row.tGContact ?? row.TGContact ?? row.telegram ?? ''),
-      website: String(row.website ?? row.Website ?? ''),
-      country: String(row.country ?? row.Country ?? ''),
-      city: String(row.city ?? row.City ?? ''),
-      isVatPayer: Boolean(row.isVATPayer ?? row.isVatPayer ?? false),
+      id: readInt(row.id ?? row.Id),
+      name: readString(row.name ?? row.Name),
+      telegram: readString(row.tGContact ?? row.TGContact ?? row.telegram),
+      website: readString(row.website ?? row.Website),
+      country: readString(row.country ?? row.Country),
+      city: readString(row.city ?? row.City),
+      isVatPayer: readBoolean(row.isVATPayer ?? row.isVatPayer ?? row.IsVATPayer ?? row.IsVatPayer),
     };
   });
+}
+
+export async function fetchSupplierOptions(): Promise<SupplierOption[]> {
+  const suppliers = await fetchSuppliers();
+  return suppliers
+    .filter((s) => s.id > 0 && s.name.trim().length > 0)
+    .map((s) => ({ id: s.id, name: s.name, isVatPayer: s.isVatPayer }));
 }
 
 /** Response shape for GET /suppliers/:id — extend when backend is ready. */

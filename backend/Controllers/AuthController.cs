@@ -14,12 +14,18 @@ namespace backend.Controllers
         private readonly IConfiguration _config;
         private readonly JwtService _jwt;
         private readonly IWebHostEnvironment _env;
+        private readonly IHttpClientFactory _httpClientFactory;
 
-        public AuthController( IConfiguration config, JwtService jwt, IWebHostEnvironment env )
+        public AuthController(
+            IConfiguration config,
+            JwtService jwt,
+            IWebHostEnvironment env,
+            IHttpClientFactory httpClientFactory )
         {
             _config = config;
             _jwt = jwt;
             _env = env;
+            _httpClientFactory = httpClientFactory;
         }
 
         [HttpGet( "login" )]
@@ -47,8 +53,7 @@ namespace backend.Controllers
                 return BadRequest( "Invalid HMAC signature" );
             }
                 
-            // Gets Shopify token
-            HttpClient client = new HttpClient( );
+            HttpClient client = _httpClientFactory.CreateClient( "Shopify" );
             HttpResponseMessage response = await client.PostAsync(
                 $"https://{shop}/admin/oauth/access_token",
                 new FormUrlEncodedContent( new Dictionary<string, string>
@@ -58,15 +63,19 @@ namespace backend.Controllers
                     ["code"] = code
                 } ) );
 
-            if (response != null && !response.IsSuccessStatusCode)
+            if (!response.IsSuccessStatusCode)
             {
                 return StatusCode( 500, "Token exchange with Shopify failed" );
             }
 
-            ShopifyTokenResponse tokenResponse = await response.Content.ReadFromJsonAsync<ShopifyTokenResponse>( );
+            ShopifyTokenResponse? tokenResponse = await response.Content.ReadFromJsonAsync<ShopifyTokenResponse>( );
+            if (string.IsNullOrWhiteSpace( tokenResponse?.access_token ))
+            {
+                return StatusCode( 500, "Token exchange with Shopify failed: empty token" );
+            }
 
             // Generates the JWT Token
-            string jwt = _jwt.GenerateJwtToken( shop, tokenResponse!.access_token! );
+            string jwt = _jwt.GenerateJwtToken( shop, tokenResponse.access_token );
 
             // Sets JWT to Cookies
             Response.Cookies.Append( "jwt_token", jwt, new CookieOptions

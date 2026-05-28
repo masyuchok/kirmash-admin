@@ -1,636 +1,245 @@
-using System.Text.Json;
-using System.Globalization;
 using backend.Data;
 using backend.Models;
+using backend.Services.Shopify;
 using Microsoft.EntityFrameworkCore;
 
-namespace backend.Services
+namespace backend.Services;
+
+public class ProductService
 {
-    public class ProductService
+    private readonly AppDbContext _db;
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly ShopifyProductCatalogService _catalog;
+    private readonly ShopifyInventoryService _inventory;
+
+    public ProductService(
+        AppDbContext db,
+        IHttpContextAccessor httpContextAccessor,
+        ShopifyProductCatalogService catalog,
+        ShopifyInventoryService inventory )
     {
-        private readonly AppDbContext _db;
-        private readonly IHttpContextAccessor _httpContextAccessor;
+        _db = db;
+        _httpContextAccessor = httpContextAccessor;
+        _catalog = catalog;
+        _inventory = inventory;
+    }
 
-        public ProductService( AppDbContext db, IHttpContextAccessor httpContextAccessor )
-        {
-            _db = db;
-            _httpContextAccessor = httpContextAccessor;
-        }
+    public async Task<List<ProductWithSuppliersListItem>> GetProductsWithSuppliersAsync()
+    {
+        ShopifySession session = ShopifySessionReader.Require(
+            _httpContextAccessor,
+            "Няма Shopify-кантэксту для загрузкі прадуктаў."
+        );
 
-        public async Task<List<ProductWithSuppliersListItem>> GetProductsWithSuppliersAsync()
-        {
-            string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;
-            string? accessToken = _httpContextAccessor.HttpContext?.User.FindFirst( "access_token" )?.Value;
+        List<SupplyProduct> supplyProducts = await _db.SupplyProducts
+            .AsNoTracking()
+            .Include( sp => sp.Supply )
+            .ThenInclude( s => s.Supplier )
+            .ToListAsync();
 
-            if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
-            {
-                throw new InvalidOperationException( "Няма Shopify-кантэксту для загрузкі прадуктаў." );
-            }
+        Dictionary<string, HashSet<string>> suppliersByProductId = supplyProducts
+            .GroupBy( sp => ShopifyIds.NormalizeProductId( sp.ShopifyProductId ) )
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select( sp => sp.Supply.Supplier.Name )
+                    .Where( n => !string.IsNullOrWhiteSpace( n ) )
+                    .ToHashSet( StringComparer.OrdinalIgnoreCase ),
+                StringComparer.OrdinalIgnoreCase
+            );
 
-            List<SupplyProduct> supplyProducts = await _db.SupplyProducts
-                .AsNoTracking()
-                .Include( sp => sp.Supply )
-                .ThenInclude( s => s.Supplier )
-                .ToListAsync();
-
-            Dictionary<string, HashSet<string>> suppliersByProductId = supplyProducts
-                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.Select( sp => sp.Supply.Supplier.Name )
-                        .Where( n => !string.IsNullOrWhiteSpace( n ) )
-                        .ToHashSet( StringComparer.OrdinalIgnoreCase ),
-                    StringComparer.OrdinalIgnoreCase
-                );
-
-            Dictionary<string, List<ProductSupplierPriceItem>> supplierPricesByProductId = supplyProducts
-                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
-                .ToDictionary(
-                    g => g.Key,
-                    g => g
-                        .GroupBy(
-                            sp => new
+        Dictionary<string, List<ProductSupplierPriceItem>> supplierPricesByProductId = supplyProducts
+            .GroupBy( sp => ShopifyIds.NormalizeProductId( sp.ShopifyProductId ) )
+            .ToDictionary(
+                g => g.Key,
+                g => g
+                    .GroupBy(
+                        sp => new
+                        {
+                            sp.Supply.SupplierId,
+                            sp.Supply.Supplier.Name
+                        }
+                    )
+                    .Select( supplierGroup =>
+                        supplierGroup
+                            .OrderByDescending( sp => sp.Supply.Date )
+                            .ThenByDescending( sp => sp.Supply.Id )
+                            .Select( sp => new ProductSupplierPriceItem
                             {
                                 SupplierId = sp.Supply.SupplierId,
-                                SupplierName = sp.Supply.Supplier.Name
-                            }
-                        )
-                        .Select( supplierGroup =>
-                            supplierGroup
-                                .OrderByDescending( sp => sp.Supply.Date )
-                                .ThenByDescending( sp => sp.Supply.Id )
-                                .Select( sp => new ProductSupplierPriceItem
-                                {
-                                    SupplierId = sp.Supply.SupplierId,
-                                    SupplierName = sp.Supply.Supplier.Name,
-                                    SupplierPrice = sp.SupplierPrice,
-                                    SalePrice = sp.SalePrice
-                                } )
-                                .First()
-                        )
-                        .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
-                        .ToList(),
-                    StringComparer.OrdinalIgnoreCase
-                );
+                                SupplierName = sp.Supply.Supplier.Name,
+                                SupplierPrice = sp.SupplierPrice,
+                                SalePrice = sp.SalePrice
+                            } )
+                            .First()
+                    )
+                    .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
+                    .ToList(),
+                StringComparer.OrdinalIgnoreCase
+            );
 
-            Dictionary<string, string> lastSyncedSupplierByProductId = supplyProducts
-                .Where( sp => sp.SyncWithShopify )
-                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
-                .ToDictionary(
-                    g => g.Key,
-                    g => g
-                        .OrderByDescending( sp => sp.Supply.Date )
-                        .ThenByDescending( sp => sp.Supply.Id )
-                        .Select( sp => sp.Supply.Supplier.Name )
-                        .FirstOrDefault() ?? string.Empty,
-                    StringComparer.OrdinalIgnoreCase
-                );
+        Dictionary<string, string> lastSyncedSupplierByProductId = supplyProducts
+            .Where( sp => sp.SyncWithShopify )
+            .GroupBy( sp => ShopifyIds.NormalizeProductId( sp.ShopifyProductId ) )
+            .ToDictionary(
+                g => g.Key,
+                g => g
+                    .OrderByDescending( sp => sp.Supply.Date )
+                    .ThenByDescending( sp => sp.Supply.Id )
+                    .Select( sp => sp.Supply.Supplier.Name )
+                    .FirstOrDefault() ?? string.Empty,
+                StringComparer.OrdinalIgnoreCase
+            );
 
-            Dictionary<string, List<ProductUnsyncedSupplierItem>> unsyncedSuppliersByProductId = supplyProducts
-                .Where( sp => !sp.SyncWithShopify )
-                .GroupBy( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) )
-                .ToDictionary(
-                    g => g.Key,
-                    g => g
-                        .GroupBy(
-                            sp => new
-                            {
-                                SupplierId = sp.Supply.SupplierId,
-                                SupplierName = sp.Supply.Supplier.Name
-                            }
-                        )
-                        .Select( sg => new ProductUnsyncedSupplierItem
+        Dictionary<string, List<ProductUnsyncedSupplierItem>> unsyncedSuppliersByProductId = supplyProducts
+            .Where( sp => !sp.SyncWithShopify )
+            .GroupBy( sp => ShopifyIds.NormalizeProductId( sp.ShopifyProductId ) )
+            .ToDictionary(
+                g => g.Key,
+                g => g
+                    .GroupBy(
+                        sp => new
                         {
-                            SupplierId = sg.Key.SupplierId,
-                            SupplierName = sg.Key.SupplierName,
-                            Quantity = sg.Sum( x => x.Quantity )
-                        } )
-                        .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
-                        .ToList(),
-                    StringComparer.OrdinalIgnoreCase
-                );
-
-            Dictionary<string, int> unsyncedQuantityByProductId = await _db.SupplyProducts
-                .AsNoTracking()
-                .Where( sp => !sp.SyncWithShopify )
-                .GroupBy( sp => sp.ShopifyProductId )
-                .ToDictionaryAsync(
-                    g => NormalizeFromShopifyGid( g.Key ),
-                    g => g.Sum( sp => sp.Quantity )
-                );
-
-            return await FetchShopifyProductsAsync(
-                shop,
-                accessToken,
-                suppliersByProductId,
-                supplierPricesByProductId,
-                lastSyncedSupplierByProductId,
-                unsyncedSuppliersByProductId,
-                unsyncedQuantityByProductId
+                            sp.Supply.SupplierId,
+                            sp.Supply.Supplier.Name
+                        }
+                    )
+                    .Select( sg => new ProductUnsyncedSupplierItem
+                    {
+                        SupplierId = sg.Key.SupplierId,
+                        SupplierName = sg.Key.Name,
+                        Quantity = sg.Sum( x => x.Quantity )
+                    } )
+                    .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
+                    .ToList(),
+                StringComparer.OrdinalIgnoreCase
             );
-        }
 
-        public async Task<ProductSyncResult> SyncUnsyncedSupplierRowAsync( string shopifyProductId, int supplierId )
+        Dictionary<string, int> unsyncedQuantityByProductId = await _db.SupplyProducts
+            .AsNoTracking()
+            .Where( sp => !sp.SyncWithShopify )
+            .GroupBy( sp => sp.ShopifyProductId )
+            .ToDictionaryAsync(
+                g => ShopifyIds.NormalizeProductId( g.Key ),
+                g => g.Sum( sp => sp.Quantity )
+            );
+
+        List<ShopifyCatalogProduct> catalogProducts =
+            await _catalog.FetchAllProductsAsync( session.Shop, session.AccessToken );
+
+        string storeSlug = session.Shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase );
+        List<ProductWithSuppliersListItem> result = new();
+
+        foreach (ShopifyCatalogProduct product in catalogProducts)
         {
-            if (string.IsNullOrWhiteSpace( shopifyProductId ))
-            {
-                throw new InvalidOperationException( "Не зададзены Shopify ID прадукту." );
-            }
-            if (supplierId <= 0)
-            {
-                throw new InvalidOperationException( "Не зададзены пастаўшчык." );
-            }
-
-            string? shop = _httpContextAccessor.HttpContext?.User.FindFirst( "shop" )?.Value;
-            string? accessToken = _httpContextAccessor.HttpContext?.User.FindFirst( "access_token" )?.Value;
-            if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
-            {
-                throw new InvalidOperationException( "Няма Shopify-кантэксту для сінхранізацыі." );
-            }
-
-            string normalizedId = NormalizeFromShopifyGid( shopifyProductId.Trim() );
-
-            List<SupplyProduct> candidateRows = await _db.SupplyProducts
-                .Include( sp => sp.Supply )
-                .Where( sp => !sp.SyncWithShopify && sp.Supply.SupplierId == supplierId )
-                .ToListAsync();
-
-            List<SupplyProduct> rowsToSync = candidateRows
-                .Where( sp => NormalizeFromShopifyGid( sp.ShopifyProductId ) == normalizedId )
+            suppliersByProductId.TryGetValue( product.ProductId, out HashSet<string>? suppliersSet );
+            List<string> suppliers = (suppliersSet ?? [])
+                .OrderBy( n => n, StringComparer.OrdinalIgnoreCase )
                 .ToList();
+            supplierPricesByProductId.TryGetValue( product.ProductId, out List<ProductSupplierPriceItem>? supplierPrices );
+            lastSyncedSupplierByProductId.TryGetValue( product.ProductId, out string? lastSyncedSupplierName );
+            unsyncedSuppliersByProductId.TryGetValue( product.ProductId, out List<ProductUnsyncedSupplierItem>? unsyncedSuppliers );
+            bool hasSupplyQuantityOverride = unsyncedQuantityByProductId.TryGetValue( product.ProductId, out int overrideQuantity );
+            int effectiveQuantity = hasSupplyQuantityOverride ? overrideQuantity : product.TotalInventory;
 
-            if (rowsToSync.Count == 0)
+            result.Add( new ProductWithSuppliersListItem
             {
-                throw new InvalidOperationException( "Не знойдзены несінхранізаваныя радкі для гэтага прадукту і пастаўшчыка." );
-            }
-
-            int delta = rowsToSync.Sum( r => r.Quantity );
-            if (delta <= 0)
-            {
-                throw new InvalidOperationException( "Няма колькасці для сінхранізацыі." );
-            }
-
-            decimal salePriceToSync = rowsToSync
-                .OrderByDescending( r => r.Supply.Date )
-                .ThenByDescending( r => r.Supply.Id )
-                .Select( r => r.SalePrice )
-                .FirstOrDefault();
-
-            if (salePriceToSync < 0)
-            {
-                throw new InvalidOperationException( "Цана продажу не можа быць адмоўнай." );
-            }
-
-            (int previous, int next) = await ApplySingleInventoryDeltaToShopifyAsync( shop, accessToken, normalizedId, delta );
-            // Update Shopify price only when sale price is explicitly set (> 0).
-            if (salePriceToSync > 0)
-            {
-                await UpdateProductPriceInShopifyAsync( shop, accessToken, normalizedId, salePriceToSync );
-            }
-
-            foreach (SupplyProduct row in rowsToSync)
-            {
-                row.SyncWithShopify = true;
-            }
-            await _db.SaveChangesAsync();
-
-            return new ProductSyncResult
-            {
-                ShopifyProductId = normalizedId,
-                SupplierId = supplierId,
-                SyncedQuantity = delta,
-                PreviousAvailable = previous,
-                NewAvailable = next
-            };
-        }
-
-        private static string NormalizeFromShopifyGid( string id )
-        {
-            const string prefix = "gid://shopify/Product/";
-            return id.StartsWith( prefix, StringComparison.OrdinalIgnoreCase )
-                ? id[prefix.Length..]
-                : id;
-        }
-
-        private async Task<List<ProductWithSuppliersListItem>> FetchShopifyProductsAsync(
-            string shop,
-            string accessToken,
-            Dictionary<string, HashSet<string>> suppliersByProductId,
-            Dictionary<string, List<ProductSupplierPriceItem>> supplierPricesByProductId,
-            Dictionary<string, string> lastSyncedSupplierByProductId,
-            Dictionary<string, List<ProductUnsyncedSupplierItem>> unsyncedSuppliersByProductId,
-            Dictionary<string, int> unsyncedQuantityByProductId
-        )
-        {
-            List<ProductWithSuppliersListItem> result = new();
-            using HttpClient client = new();
-
-            string? afterCursor = null;
-            bool hasNextPage;
-
-            do
-            {
-                const string query = """
-                query ProductsPage($after: String) {
-                  products(first: 250, after: $after) {
-                    edges {
-                      cursor
-                      node {
-                        id
-                        legacyResourceId
-                        title
-                        productType
-                        totalInventory
-                        variants(first: 100) {
-                          edges {
-                            node {
-                              id
-                              title
-                              inventoryQuantity
-                              selectedOptions {
-                                name
-                                value
-                              }
-                            }
-                          }
-                        }
-                        featuredImage {
-                          url
-                        }
-                      }
-                    }
-                    pageInfo {
-                      hasNextPage
-                      endCursor
-                    }
-                  }
-                }
-                """;
-
-                string payload = JsonSerializer.Serialize( new
-                {
-                    query,
-                    variables = new { after = afterCursor }
-                } );
-
-                using HttpRequestMessage request = new(
-                    HttpMethod.Post,
-                    $"https://{shop}/admin/api/2024-10/graphql.json"
-                );
-                request.Headers.Add( "X-Shopify-Access-Token", accessToken );
-                request.Content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
-
-                using HttpResponseMessage response = await client.SendAsync( request );
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw new InvalidOperationException( "Не ўдалося загрузіць прадукты з Shopify." );
-                }
-
-                using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
-                JsonElement root = json.RootElement;
-                JsonElement products = root.GetProperty( "data" ).GetProperty( "products" );
-                JsonElement edges = products.GetProperty( "edges" );
-
-                foreach (JsonElement edge in edges.EnumerateArray())
-                {
-                    JsonElement node = edge.GetProperty( "node" );
-                    string productName = node.GetProperty( "title" ).GetString() ?? "—";
-                    string productType = node.TryGetProperty( "productType", out JsonElement productTypeEl ) &&
-                                         productTypeEl.ValueKind == JsonValueKind.String
-                        ? (productTypeEl.GetString() ?? string.Empty)
-                        : string.Empty;
-                    List<ProductVariantItem> variants = new();
-                    string? mainImageUrl = null;
-                    int quantityInStock = 0;
-                    string productId = "";
-                    if (node.TryGetProperty( "totalInventory", out JsonElement totalInventoryEl ) &&
-                        totalInventoryEl.ValueKind == JsonValueKind.Number &&
-                        totalInventoryEl.TryGetInt32( out int parsedInventory ))
-                    {
-                        quantityInStock = parsedInventory;
-                    }
-                    if (node.TryGetProperty( "featuredImage", out JsonElement imageEl ) &&
-                        imageEl.ValueKind == JsonValueKind.Object &&
-                        imageEl.TryGetProperty( "url", out JsonElement imageUrlEl ) &&
-                        imageUrlEl.ValueKind == JsonValueKind.String)
-                    {
-                        mainImageUrl = imageUrlEl.GetString();
-                    }
-                    if (node.TryGetProperty( "variants", out JsonElement variantsEl ) &&
-                        variantsEl.ValueKind == JsonValueKind.Object &&
-                        variantsEl.TryGetProperty( "edges", out JsonElement variantEdgesEl ) &&
-                        variantEdgesEl.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (JsonElement edgeEl in variantEdgesEl.EnumerateArray())
-                        {
-                            if (!edgeEl.TryGetProperty( "node", out JsonElement variantNode ) ||
-                                variantNode.ValueKind != JsonValueKind.Object)
-                            {
-                                continue;
-                            }
-
-                            string variantId = variantNode.TryGetProperty( "id", out JsonElement variantIdEl ) &&
-                                               variantIdEl.ValueKind == JsonValueKind.String
-                                ? NormalizeFromShopifyGid( variantIdEl.GetString() ?? string.Empty )
-                                : string.Empty;
-                            string variantName = variantNode.TryGetProperty( "title", out JsonElement variantTitleEl ) &&
-                                                 variantTitleEl.ValueKind == JsonValueKind.String
-                                ? (variantTitleEl.GetString() ?? string.Empty)
-                                : string.Empty;
-                            int variantQuantity = variantNode.TryGetProperty( "inventoryQuantity", out JsonElement variantQtyEl ) &&
-                                                  variantQtyEl.ValueKind == JsonValueKind.Number &&
-                                                  variantQtyEl.TryGetInt32( out int parsedVariantQty )
-                                ? parsedVariantQty
-                                : 0;
-                            if ((string.IsNullOrWhiteSpace( variantName ) || variantName == "Default Title") &&
-                                variantNode.TryGetProperty( "selectedOptions", out JsonElement selectedOptionsEl ) &&
-                                selectedOptionsEl.ValueKind == JsonValueKind.Array)
-                            {
-                                List<string> optionValues = new();
-                                foreach (JsonElement opt in selectedOptionsEl.EnumerateArray())
-                                {
-                                    if (opt.TryGetProperty( "value", out JsonElement valEl ) &&
-                                        valEl.ValueKind == JsonValueKind.String)
-                                    {
-                                        string val = valEl.GetString() ?? string.Empty;
-                                        if (!string.IsNullOrWhiteSpace( val ) &&
-                                            !string.Equals( val, "Default Title", StringComparison.OrdinalIgnoreCase ))
-                                        {
-                                            optionValues.Add( val );
-                                        }
-                                    }
-                                }
-                                if (optionValues.Count > 0)
-                                {
-                                    variantName = string.Join( " / ", optionValues );
-                                }
-                            }
-                            if (string.IsNullOrWhiteSpace( variantName ) ||
-                                string.Equals( variantName, "Default Title", StringComparison.OrdinalIgnoreCase ))
-                            {
-                                continue;
-                            }
-                            variants.Add( new ProductVariantItem
-                            {
-                                VariantId = variantId,
-                                VariantName = variantName,
-                                QuantityInStock = variantQuantity
-                            } );
-                        }
-                    }
-
-                    if (variants.Count > 0)
-                    {
-                        quantityInStock = variants.Sum( v => v.QuantityInStock );
-                    }
-
-                    if (node.TryGetProperty( "legacyResourceId", out JsonElement legacyIdEl ) &&
-                        legacyIdEl.ValueKind == JsonValueKind.Number &&
-                        legacyIdEl.TryGetInt64( out long legacyId ))
-                    {
-                        productId = legacyId.ToString();
-                    }
-                    else if (node.TryGetProperty( "id", out JsonElement gidEl ) &&
-                             gidEl.ValueKind == JsonValueKind.String)
-                    {
-                        string gid = gidEl.GetString() ?? "";
-                        productId = NormalizeFromShopifyGid( gid );
-                    }
-
-                    if (string.IsNullOrWhiteSpace( productId ))
-                    {
-                        continue;
-                    }
-
-                    suppliersByProductId.TryGetValue( productId, out HashSet<string>? suppliersSet );
-                    List<string> suppliers = (suppliersSet ?? [])
-                        .OrderBy( n => n, StringComparer.OrdinalIgnoreCase )
-                        .ToList();
-                    supplierPricesByProductId.TryGetValue( productId, out List<ProductSupplierPriceItem>? supplierPrices );
-                    lastSyncedSupplierByProductId.TryGetValue( productId, out string? lastSyncedSupplierName );
-                    unsyncedSuppliersByProductId.TryGetValue( productId, out List<ProductUnsyncedSupplierItem>? unsyncedSuppliers );
-                    bool hasSupplyQuantityOverride = unsyncedQuantityByProductId.TryGetValue( productId, out int overrideQuantity );
-                    int effectiveQuantity = hasSupplyQuantityOverride ? overrideQuantity : quantityInStock;
-
-                    result.Add( new ProductWithSuppliersListItem
-                    {
-                        ShopifyProductId = productId,
-                        ProductName = productName,
-                        ProductType = productType,
-                        ProductAdminUrl = $"https://admin.shopify.com/store/{shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase )}/products/{productId}",
-                        MainImageUrl = string.IsNullOrWhiteSpace( mainImageUrl ) ? null : mainImageUrl,
-                        QuantityInStock = effectiveQuantity,
-                        ShopifyQuantityInStock = quantityInStock,
-                        HasSupplyQuantityOverride = hasSupplyQuantityOverride,
-                        LastSyncedSupplierName = lastSyncedSupplierName ?? string.Empty,
-                        Suppliers = suppliers,
-                        UnsyncedSuppliers = unsyncedSuppliers ?? new List<ProductUnsyncedSupplierItem>(),
-                        Variants = variants,
-                        SupplierPrices = supplierPrices ?? new List<ProductSupplierPriceItem>()
-                    } );
-                }
-
-                JsonElement pageInfo = products.GetProperty( "pageInfo" );
-                hasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean();
-                afterCursor = pageInfo.GetProperty( "endCursor" ).GetString();
-            } while (hasNextPage && !string.IsNullOrWhiteSpace( afterCursor ));
-
-            return result
-                .OrderBy( p => p.ProductName, StringComparer.OrdinalIgnoreCase )
-                .ToList();
-        }
-
-        private static long? ParseShopifyNumericProductId( string raw )
-        {
-            if (long.TryParse( raw, out long direct )) return direct;
-            const string prefix = "gid://shopify/Product/";
-            if (raw.StartsWith( prefix, StringComparison.OrdinalIgnoreCase ))
-            {
-                string part = raw[prefix.Length..];
-                return long.TryParse( part, out long gidId ) ? gidId : null;
-            }
-            return null;
-        }
-
-        private static async Task<string> ReadContentAsync( HttpResponseMessage response )
-        {
-            return await response.Content.ReadAsStringAsync();
-        }
-
-        private async Task<(int previous, int next)> ApplySingleInventoryDeltaToShopifyAsync(
-            string shop,
-            string accessToken,
-            string shopifyProductId,
-            int delta
-        )
-        {
-            using HttpClient client = new();
-            client.DefaultRequestHeaders.Add( "X-Shopify-Access-Token", accessToken );
-
-            long locationId = await GetDefaultLocationIdAsync( client, shop );
-            long? productId = ParseShopifyNumericProductId( shopifyProductId );
-            if (!productId.HasValue)
-            {
-                throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
-            }
-
-            long inventoryItemId = await GetInventoryItemIdByProductAsync( client, shop, productId.Value );
-            int current = await GetCurrentInventoryAsync( client, shop, inventoryItemId, locationId );
-            int next = Math.Max( 0, current + delta );
-            await SetInventoryAsync( client, shop, inventoryItemId, locationId, next );
-
-            return (current, next);
-        }
-
-        private async Task UpdateProductPriceInShopifyAsync(
-            string shop,
-            string accessToken,
-            string shopifyProductId,
-            decimal salePrice
-        )
-        {
-            using HttpClient client = new();
-            client.DefaultRequestHeaders.Add( "X-Shopify-Access-Token", accessToken );
-
-            long? productId = ParseShopifyNumericProductId( shopifyProductId );
-            if (!productId.HasValue)
-            {
-                throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
-            }
-
-            long variantId = await GetPrimaryVariantIdByProductAsync( client, shop, productId.Value );
-            string priceString = salePrice.ToString( "0.00", CultureInfo.InvariantCulture );
-            string payload = JsonSerializer.Serialize( new
-            {
-                variant = new
-                {
-                    id = variantId,
-                    price = priceString
-                }
+                ShopifyProductId = product.ProductId,
+                ProductName = product.Title,
+                ProductType = product.ProductType,
+                ProductAdminUrl = $"https://admin.shopify.com/store/{storeSlug}/products/{product.ProductId}",
+                MainImageUrl = product.ImageUrl,
+                QuantityInStock = effectiveQuantity,
+                ShopifyQuantityInStock = product.TotalInventory,
+                HasSupplyQuantityOverride = hasSupplyQuantityOverride,
+                LastSyncedSupplierName = lastSyncedSupplierName ?? string.Empty,
+                Suppliers = suppliers,
+                UnsyncedSuppliers = unsyncedSuppliers ?? [],
+                Variants = product.Variants,
+                SupplierPrices = supplierPrices ?? []
             } );
-
-            using HttpContent content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
-            using HttpResponseMessage response = await client.PutAsync(
-                $"https://{shop}/admin/api/2024-10/variants/{variantId}.json",
-                content
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося абнавіць цану ў Shopify: {body}" );
-            }
         }
 
-        private async Task<long> GetDefaultLocationIdAsync( HttpClient client, string shop )
+        return result;
+    }
+
+    public async Task<ProductSyncResult> SyncUnsyncedSupplierRowAsync( string shopifyProductId, int supplierId )
+    {
+        if (string.IsNullOrWhiteSpace( shopifyProductId ))
         {
-            using HttpResponseMessage response = await client.GetAsync(
-                $"https://{shop}/admin/api/2024-10/locations.json?limit=1"
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося атрымаць лакацыю Shopify: {body}" );
-            }
-
-            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
-            JsonElement locations = json.RootElement.GetProperty( "locations" );
-            if (locations.GetArrayLength() == 0)
-            {
-                throw new InvalidOperationException( "У Shopify не знойдзены склад (location)." );
-            }
-            return locations[0].GetProperty( "id" ).GetInt64();
+            throw new InvalidOperationException( "Не зададзены Shopify ID прадукту." );
         }
-
-        private async Task<long> GetInventoryItemIdByProductAsync( HttpClient client, string shop, long productId )
+        if (supplierId <= 0)
         {
-            using HttpResponseMessage response = await client.GetAsync(
-                $"https://{shop}/admin/api/2024-10/products/{productId}.json"
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося атрымаць прадукт {productId} з Shopify: {body}" );
-            }
-
-            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
-            JsonElement product = json.RootElement.GetProperty( "product" );
-            JsonElement variants = product.GetProperty( "variants" );
-            if (variants.GetArrayLength() == 0)
-            {
-                throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
-            }
-            return variants[0].GetProperty( "inventory_item_id" ).GetInt64();
+            throw new InvalidOperationException( "Не зададзены пастаўшчык." );
         }
 
-        private async Task<long> GetPrimaryVariantIdByProductAsync( HttpClient client, string shop, long productId )
+        ShopifySession session = ShopifySessionReader.Require(
+            _httpContextAccessor,
+            "Няма Shopify-кантэксту для сінхранізацыі."
+        );
+
+        string normalizedId = ShopifyIds.NormalizeProductId( shopifyProductId.Trim() );
+
+        List<SupplyProduct> candidateRows = await _db.SupplyProducts
+            .Include( sp => sp.Supply )
+            .Where( sp => !sp.SyncWithShopify && sp.Supply.SupplierId == supplierId )
+            .ToListAsync();
+
+        List<SupplyProduct> rowsToSync = candidateRows
+            .Where( sp => ShopifyIds.NormalizeProductId( sp.ShopifyProductId ) == normalizedId )
+            .ToList();
+
+        if (rowsToSync.Count == 0)
         {
-            using HttpResponseMessage response = await client.GetAsync(
-                $"https://{shop}/admin/api/2024-10/products/{productId}.json"
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося атрымаць прадукт {productId} з Shopify: {body}" );
-            }
-
-            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
-            JsonElement product = json.RootElement.GetProperty( "product" );
-            JsonElement variants = product.GetProperty( "variants" );
-            if (variants.GetArrayLength() == 0)
-            {
-                throw new InvalidOperationException( $"Для прадукту {productId} няма варыянтаў." );
-            }
-            return variants[0].GetProperty( "id" ).GetInt64();
+            throw new InvalidOperationException( "Не знойдзены несінхранізаваныя радкі для гэтага прадукту і пастаўшчыка." );
         }
 
-        private async Task<int> GetCurrentInventoryAsync(
-            HttpClient client,
-            string shop,
-            long inventoryItemId,
-            long locationId
-        )
+        int delta = rowsToSync.Sum( r => r.Quantity );
+        if (delta <= 0)
         {
-            using HttpResponseMessage response = await client.GetAsync(
-                $"https://{shop}/admin/api/2024-10/inventory_levels.json?inventory_item_ids={inventoryItemId}&location_ids={locationId}"
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося атрымаць inventory level: {body}" );
-            }
-
-            using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
-            JsonElement levels = json.RootElement.GetProperty( "inventory_levels" );
-            if (levels.GetArrayLength() == 0) return 0;
-            JsonElement availableEl = levels[0].GetProperty( "available" );
-            return availableEl.ValueKind == JsonValueKind.Number ? availableEl.GetInt32() : 0;
+            throw new InvalidOperationException( "Няма колькасці для сінхранізацыі." );
         }
 
-        private async Task SetInventoryAsync(
-            HttpClient client,
-            string shop,
-            long inventoryItemId,
-            long locationId,
-            int available
-        )
+        decimal salePriceToSync = rowsToSync
+            .OrderByDescending( r => r.Supply.Date )
+            .ThenByDescending( r => r.Supply.Id )
+            .Select( r => r.SalePrice )
+            .FirstOrDefault();
+
+        if (salePriceToSync < 0)
         {
-            string payload = JsonSerializer.Serialize( new
-            {
-                location_id = locationId,
-                inventory_item_id = inventoryItemId,
-                available
-            } );
-
-            using HttpContent content = new StringContent( payload, System.Text.Encoding.UTF8, "application/json" );
-            using HttpResponseMessage response = await client.PostAsync(
-                $"https://{shop}/admin/api/2024-10/inventory_levels/set.json",
-                content
-            );
-            if (!response.IsSuccessStatusCode)
-            {
-                string body = await ReadContentAsync( response );
-                throw new InvalidOperationException( $"Не ўдалося ўсталяваць inventory level: {body}" );
-            }
+            throw new InvalidOperationException( "Цана продажу не можа быць адмоўнай." );
         }
+
+        (int previous, int next) = await _inventory.ApplyInventoryDeltaByProductKeyAsync(
+            session.Shop,
+            session.AccessToken,
+            normalizedId,
+            delta
+        );
+        if (salePriceToSync > 0)
+        {
+            await _inventory.SetVariantPriceByProductKeyAsync(
+                session.Shop,
+                session.AccessToken,
+                normalizedId,
+                salePriceToSync
+            );
+        }
+
+        foreach (SupplyProduct row in rowsToSync)
+        {
+            row.SyncWithShopify = true;
+        }
+        await _db.SaveChangesAsync();
+
+        return new ProductSyncResult
+        {
+            ShopifyProductId = normalizedId,
+            SupplierId = supplierId,
+            SyncedQuantity = delta,
+            PreviousAvailable = previous,
+            NewAvailable = next
+        };
     }
 }

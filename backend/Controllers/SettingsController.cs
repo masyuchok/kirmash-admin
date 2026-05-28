@@ -180,7 +180,6 @@ namespace backend.Controllers
         {
             await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
             ExpenseInvoiceType? row = await _db.ExpenseInvoiceTypes
-                .Include( x => x.Expenses )
                 .FirstOrDefaultAsync( x => x.Id == id );
             if (row is null)
             {
@@ -190,7 +189,9 @@ namespace backend.Controllers
             {
                 return BadRequest( new { error = "Сістэмны тып нельга выдаліць." } );
             }
-            if (row.Expenses.Count > 0)
+            bool hasExpenses = await _db.VatReportExpenses
+                .AnyAsync( e => e.ExpenseInvoiceTypeId == id );
+            if (hasExpenses)
             {
                 return BadRequest( new { error = "Нельга выдаліць тып, які ўжо выкарыстоўваецца ў расходах." } );
             }

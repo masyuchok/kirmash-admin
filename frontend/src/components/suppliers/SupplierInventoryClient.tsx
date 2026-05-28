@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FiArrowLeft, FiChevronDown, FiRefreshCw } from 'react-icons/fi';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import { usePortalMenu } from '@/hooks/usePortalMenu';
 import { fetchSupplierInventory } from '@/lib/api/suppliers';
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
 
@@ -37,33 +38,11 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
   const [searchQuery, setSearchQuery] = useState('');
   const [salesSyncedAtUtc, setSalesSyncedAtUtc] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [supplierFilterOpen, setSupplierFilterOpen] = useState(false);
   const [selectedSupplierIds, setSelectedSupplierIds] = useState<Set<number>>(() => new Set());
-  const [menuMounted, setMenuMounted] = useState(false);
-  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const [sort, setSort] = useState<{ column: SortColumn; direction: 'asc' | 'desc' } | null>(null);
-  const supplierFilterTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const supplierFilterMenuRef = useRef<HTMLDivElement | null>(null);
+  const supplierFilterMenu = usePortalMenu({ menuWidth: 224 });
 
   const showSupplierColumn = !supplierId;
-
-  const updateSupplierFilterMenuPosition = () => {
-    if (!supplierFilterTriggerRef.current) return;
-    const rect = supplierFilterTriggerRef.current.getBoundingClientRect();
-    const viewportPadding = 8;
-    const menuWidth = 224; // w-56
-    const estimatedMenuHeight = 280;
-
-    const maxLeft = window.innerWidth - menuWidth - viewportPadding;
-    const left = Math.max(viewportPadding, Math.min(rect.left, maxLeft));
-
-    let top = rect.bottom + 8;
-    if (top + estimatedMenuHeight > window.innerHeight - viewportPadding) {
-      top = Math.max(viewportPadding, rect.top - estimatedMenuHeight - 8);
-    }
-
-    setMenuPosition({ top, left });
-  };
 
   const supplierOptions = useMemo(() => {
     const map = new Map<number, string>();
@@ -79,40 +58,12 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
     setSelectedSupplierIds(new Set(supplierOptions.map(([id]) => id)));
   }, [supplierOptions]);
 
-  useEffect(() => {
-    setMenuMounted(true);
-  }, []);
-
-  useEffect(() => {
-    if (!supplierFilterOpen) return;
-    updateSupplierFilterMenuPosition();
-
-    const onDocClick = (event: MouseEvent) => {
-      const target = event.target as Node;
-      const clickedMenu = supplierFilterMenuRef.current?.contains(target);
-      const clickedTrigger = supplierFilterTriggerRef.current?.contains(target);
-      if (!clickedMenu && !clickedTrigger) {
-        setSupplierFilterOpen(false);
-      }
-    };
-    const onViewportChange = () => updateSupplierFilterMenuPosition();
-
-    document.addEventListener('mousedown', onDocClick);
-    window.addEventListener('resize', onViewportChange);
-    window.addEventListener('scroll', onViewportChange, true);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      window.removeEventListener('resize', onViewportChange);
-      window.removeEventListener('scroll', onViewportChange, true);
-    };
-  }, [supplierFilterOpen]);
-
   const isSupplierFilterCustomized =
     showSupplierColumn &&
     supplierOptions.length > 0 &&
     selectedSupplierIds.size < supplierOptions.length;
 
-  const loadInventory = (refresh = false) => {
+  const loadInventory = useCallback((refresh = false) => {
     setLoading(true);
     setError(null);
     return fetchSupplierInventory(supplierId ?? undefined, { refresh })
@@ -127,11 +78,11 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
         setLoading(false);
         setRefreshing(false);
       });
-  };
+  }, [supplierId]);
 
   useEffect(() => {
     void loadInventory();
-  }, [supplierId]);
+  }, [loadInventory]);
 
   const handleRefreshSales = () => {
     setRefreshing(true);
@@ -262,14 +213,8 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                       <span>Пастаўшчык</span>
                       <button
                         type="button"
-                        ref={supplierFilterTriggerRef}
-                        onClick={() => {
-                          setSupplierFilterOpen((prev) => {
-                            const next = !prev;
-                            if (next) updateSupplierFilterMenuPosition();
-                            return next;
-                          });
-                        }}
+                        ref={supplierFilterMenu.triggerRef}
+                        onClick={supplierFilterMenu.toggle}
                         className={`relative inline-flex items-center justify-center rounded-md border bg-white p-1 transition ${
                           isSupplierFilterCustomized
                             ? 'border-primary/50 text-primary'
@@ -364,13 +309,16 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
           </table>
         </div>
       </div>
-      {menuMounted &&
-        supplierFilterOpen &&
+      {supplierFilterMenu.mounted &&
+        supplierFilterMenu.open &&
         createPortal(
           <div
-            ref={supplierFilterMenuRef}
+            ref={supplierFilterMenu.menuRef}
             className="fixed z-[70] w-56 rounded-lg border border-gray-200 bg-white p-2 shadow-lg"
-            style={{ top: `${menuPosition.top}px`, left: `${menuPosition.left}px` }}
+            style={{
+              top: `${supplierFilterMenu.position.top}px`,
+              left: `${supplierFilterMenu.position.left}px`,
+            }}
           >
             <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
               {supplierOptions.map(([id, name]) => (

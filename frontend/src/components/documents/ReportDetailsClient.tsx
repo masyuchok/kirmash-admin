@@ -10,6 +10,7 @@ import {
   deleteVatReportRow,
   downloadVatReportExpenseInvoice,
   downloadVatReportRowInvoice,
+  fetchVatReportCombinedDetails,
   fetchVatReportDetails,
   fetchVatReports,
   fetchVatReportSourceOrders,
@@ -205,62 +206,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     >
   >({});
 
-  const loadCombinedDetails = async (
-    baseReportId: number
-  ): Promise<{
-    details: VatReportDetails;
-    foreignRows: VatReportDetails['rows'];
-  }> => {
-    const res = await fetchVatReportDetails(baseReportId);
-    const siblingType = res.rows.some((r) => r.type === 'poland') ? 'foreign' : 'poland';
-    const baseType = res.rows.some((r) => r.type === 'poland') ? 'poland' : 'foreign';
-    try {
-      const allReports = await fetchVatReports();
-      const sibling = allReports.find(
-        (r) => r.periodYear === res.periodYear && r.periodMonth === res.periodMonth && r.type === siblingType
-      );
-      if (!sibling) {
-        return {
-          details: res,
-          foreignRows: res.rows.filter((r) => r.type === 'foreign'),
-        };
-      }
-      const siblingDetails = await fetchVatReportDetails(sibling.id);
-      const polandDetails = baseType === 'poland' ? res : siblingDetails;
-      const foreignDetails = baseType === 'foreign' ? res : siblingDetails;
-      const polandSummaryRows = polandDetails.rows.filter((r) => r.type === 'poland');
-      const expenseSummaryRows = polandDetails.rows.filter((r) => r.type === 'expense');
-      const foreignRows = foreignDetails.rows.filter((r) => r.type === 'foreign');
-      const foreignSummaryVat = foreignRows.reduce((sum, row) => sum + row.vat, 0);
-      const foreignSummaryNet = foreignRows.reduce((sum, row) => sum + (row.netAmount ?? 0), 0);
-      const foreignSummaryGross = foreignRows.reduce((sum, row) => sum + (row.grossAmount ?? 0), 0);
-      return {
-        foreignRows,
-        details: {
-          ...polandDetails,
-          vat: round2(polandDetails.vat + foreignDetails.vat),
-          rows: [
-            ...polandSummaryRows,
-            {
-              type: 'foreign' as const,
-              name: 'Замежжа',
-              shopifyOrderId: 'foreign-summary',
-              vat: round2(foreignSummaryVat),
-              netAmount: round2(foreignSummaryNet),
-              grossAmount: round2(foreignSummaryGross),
-              polandRows: [],
-            },
-            ...expenseSummaryRows,
-          ],
-        },
-      };
-    } catch {
-      return {
-        details: res,
-        foreignRows: res.rows.filter((r) => r.type === 'foreign'),
-      };
-    }
-  };
+  const loadCombinedDetails = (baseReportId: number) => fetchVatReportCombinedDetails(baseReportId);
 
   useEffect(() => {
     const monthYearTitle = data ? formatMonthYearBe(data.periodMonth, data.periodYear) : 'Справаздача';
@@ -2684,7 +2630,7 @@ ${xmlItems}
                 {visibleExpenseRows.length === 0 && (
                   <tr>
                     <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
-                      {(expandedRow.expenseRows?.length ?? 0) === 0
+                      {(expandedRow?.expenseRows?.length ?? 0) === 0
                         ? 'Расходаў пакуль няма.'
                         : 'Няма радкоў па выбраным пошуку.'}
                     </td>

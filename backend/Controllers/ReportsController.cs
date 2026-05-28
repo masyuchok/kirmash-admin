@@ -53,6 +53,24 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet( "{id:int}/combined-details" )]
+        public async Task<ActionResult<VatReportCombinedDetailsResponse>> GetCombinedDetails( int id )
+        {
+            try
+            {
+                VatReportCombinedDetailsResponse details = await _service.GetCombinedDetailsAsync( id );
+                return Ok( details );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання злучанай справаздачы", details = ex.Message } );
+            }
+        }
+
         [HttpGet( "{id:int}" )]
         public async Task<ActionResult<VatReportDetailsResponse>> GetDetails( int id )
         {

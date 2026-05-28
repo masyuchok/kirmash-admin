@@ -1,29 +1,7 @@
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import { readInt, readNumber, readStringArray } from '@/lib/api/json';
 import type { VatReport } from '@/types/report';
 import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
-
-function readInt(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.trunc(n) : 0;
-  }
-  return 0;
-}
-
-function readNumber(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
-function readStringArray(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-}
 
 export async function fetchVatReports(): Promise<VatReport[]> {
   const res = await fetch(`${getApiBaseUrl()}/Reports`, {
@@ -97,25 +75,9 @@ export async function generateVatReport(
   };
 }
 
-export async function fetchVatReportDetails(id: number): Promise<VatReportDetails> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/${id}`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць дэталі справаздачы');
-    throw new Error(msg);
-  }
-  const row = (await res.json()) as Record<string, unknown>;
-  const rowsRaw = row.rows ?? row.Rows;
-  return {
-    id: readInt(row.id ?? row.Id),
-    periodYear: readInt(row.periodYear ?? row.PeriodYear),
-    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
-    vat: readNumber(row.vat ?? row.Vat),
-    rows: Array.isArray(rowsRaw)
-      ? rowsRaw.map((item) => {
+function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
+  if (!Array.isArray(rowsRaw)) return [];
+  return rowsRaw.map((item) => {
           const r = item as Record<string, unknown>;
           const polandRowsRaw = r.polandRows ?? r.PolandRows;
           const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
@@ -214,8 +176,52 @@ export async function fetchVatReportDetails(id: number): Promise<VatReportDetail
                 })
               : [],
           };
-        })
-      : [],
+        });
+}
+
+function mapVatReportDetails(row: Record<string, unknown>): VatReportDetails {
+  const rowsRaw = row.rows ?? row.Rows;
+  return {
+    id: readInt(row.id ?? row.Id),
+    periodYear: readInt(row.periodYear ?? row.PeriodYear),
+    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
+    vat: readNumber(row.vat ?? row.Vat),
+    rows: mapSummaryRows(rowsRaw),
+  };
+}
+
+export async function fetchVatReportDetails(id: number): Promise<VatReportDetails> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${id}`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць дэталі справаздачы');
+    throw new Error(msg);
+  }
+  const row = (await res.json()) as Record<string, unknown>;
+  return mapVatReportDetails(row);
+}
+
+export async function fetchVatReportCombinedDetails(
+  id: number
+): Promise<{ details: VatReportDetails; foreignRows: VatReportDetails['rows'] }> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${id}/combined-details`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць злучаную справаздачу');
+    throw new Error(msg);
+  }
+  const payload = (await res.json()) as Record<string, unknown>;
+  const detailsRaw = (payload.details ?? payload.Details) as Record<string, unknown>;
+  const foreignRowsRaw = payload.foreignRows ?? payload.ForeignRows;
+  return {
+    details: mapVatReportDetails(detailsRaw),
+    foreignRows: mapSummaryRows(foreignRowsRaw),
   };
 }
 
