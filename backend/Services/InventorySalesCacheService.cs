@@ -62,11 +62,28 @@ namespace backend.Services
         public async Task<Dictionary<string, int>> GetSoldByProductAsync()
         {
             List<InventoryProductSale> rows = await _db.InventoryProductSales.AsNoTracking().ToListAsync();
-            return rows.ToDictionary(
+            Dictionary<string, int> soldByProduct = rows.ToDictionary(
                 x => x.ShopifyProductId,
                 x => x.SoldQuantity,
                 StringComparer.OrdinalIgnoreCase
             );
+
+            List<(string ProductId, int Quantity)> cashSales = await _db.VatReportCashSales
+                .AsNoTracking()
+                .Select( x => new ValueTuple<string, int>(
+                    x.ShopifyProductId,
+                    x.Quantity
+                ) )
+                .ToListAsync();
+
+            foreach ((string productId, int quantity) in cashSales)
+            {
+                if (string.IsNullOrWhiteSpace( productId ) || quantity <= 0) continue;
+                string normalized = ShopifyIds.NormalizeProductId( productId );
+                soldByProduct[normalized] = soldByProduct.GetValueOrDefault( normalized ) + quantity;
+            }
+
+            return soldByProduct;
         }
 
         private async Task RunFullSyncAsync( InventorySalesSyncState state )

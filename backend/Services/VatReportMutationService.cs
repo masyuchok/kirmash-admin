@@ -8,10 +8,17 @@ namespace backend.Services;
 public class VatReportMutationService
 {
     private readonly AppDbContext _db;
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly ShopifyInventoryService _shopifyInventory;
 
-    public VatReportMutationService(AppDbContext db)
+    public VatReportMutationService(
+        AppDbContext db,
+        IHttpContextAccessor httpContextAccessor,
+        ShopifyInventoryService shopifyInventory )
     {
         _db = db;
+        _httpContextAccessor = httpContextAccessor;
+        _shopifyInventory = shopifyInventory;
     }
 
     public async Task MoveRowToForeignAsync( int rowId, string deliveryName, string deliveryAddress )
@@ -612,6 +619,87 @@ public class VatReportMutationService
                 row.InvoiceData
             );
         }
+
+    public async Task<int> AddCashSaleAsync( int reportId, VatReportCashSaleCreateRequest request )
+    {
+        if (string.IsNullOrWhiteSpace( request.ShopifyProductId ))
+        {
+            throw new InvalidOperationException( "Выберыце тавар." );
+        }
+        if (request.Quantity <= 0)
+        {
+            throw new InvalidOperationException( "Колькасць павінна быць больш за 0." );
+        }
+        if (request.UnitPrice < 0m)
+        {
+            throw new InvalidOperationException( "Цана не можа быць адмоўнай." );
+        }
+
+        VatReport? report = await _db.VatReports.FirstOrDefaultAsync( r => r.Id == reportId );
+        if (report is null)
+        {
+            throw new InvalidOperationException( "Справаздача не знойдзена." );
+        }
+        if (!string.Equals( report.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+        {
+            throw new InvalidOperationException( "Наяўныя продажы даступныя толькі ў польскай справаздачы." );
+        }
+
+        ShopifySession session = ShopifySessionReader.Require(
+            _httpContextAccessor,
+            "Няма Shopify-кантэксту для абнаўлення склада."
+        );
+
+        string productId = ShopifyIds.NormalizeProductId( request.ShopifyProductId.Trim() );
+        string title = string.IsNullOrWhiteSpace( request.ProductTitle ) ? productId : request.ProductTitle.Trim();
+        decimal unitPrice = VatReportHelpers.Round2( request.UnitPrice );
+        decimal gross = VatReportHelpers.Round2( unitPrice * request.Quantity );
+
+        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+            session.Shop,
+            session.AccessToken,
+            productId,
+            -request.Quantity
+        );
+
+        VatReportCashSale sale = new()
+        {
+            VatReportId = reportId,
+            ShopifyProductId = productId,
+            ProductTitle = title,
+            Quantity = request.Quantity,
+            UnitPrice = unitPrice,
+            GrossAmount = gross,
+            CreatedAtUtc = DateTime.UtcNow
+        };
+        _db.VatReportCashSales.Add( sale );
+        await _db.SaveChangesAsync();
+        return sale.Id;
+    }
+
+    public async Task DeleteCashSaleAsync( int cashSaleId )
+    {
+        VatReportCashSale? sale = await _db.VatReportCashSales.FirstOrDefaultAsync( x => x.Id == cashSaleId );
+        if (sale is null)
+        {
+            throw new InvalidOperationException( "Запіс наяўнай продажы не знойдзены." );
+        }
+
+        ShopifySession session = ShopifySessionReader.Require(
+            _httpContextAccessor,
+            "Няма Shopify-кантэксту для абнаўлення склада."
+        );
+
+        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+            session.Shop,
+            session.AccessToken,
+            sale.ShopifyProductId,
+            sale.Quantity
+        );
+
+        _db.VatReportCashSales.Remove( sale );
+        await _db.SaveChangesAsync();
+    }
 
     private async Task RecalculateReportTotalsAsync( int reportId )
         {

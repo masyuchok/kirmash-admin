@@ -222,6 +222,42 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPost( "{id:int}/cash-sales" )]
+        public async Task<IActionResult> AddCashSale( int id, [FromBody] VatReportCashSaleCreateRequest request )
+        {
+            try
+            {
+                int cashSaleId = await _service.AddCashSaleAsync( id, request );
+                return Ok( new { id = cashSaleId } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка дадання наяўнай продажы", details = ex.Message } );
+            }
+        }
+
+        [HttpDelete( "cash-sales/{cashSaleId:int}" )]
+        public async Task<IActionResult> DeleteCashSale( int cashSaleId )
+        {
+            try
+            {
+                await _service.DeleteCashSaleAsync( cashSaleId );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка выдалення наяўнай продажы", details = ex.Message } );
+            }
+        }
+
         [HttpDelete( "expenses/{expenseId:int}" )]
         public async Task<IActionResult> DeleteExpense( int expenseId )
         {

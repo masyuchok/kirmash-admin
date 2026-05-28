@@ -64,6 +64,11 @@ public class VatReportService
 
     public Task DeleteExpenseAsync( int expenseId ) => _mutations.DeleteExpenseAsync( expenseId );
 
+    public Task<int> AddCashSaleAsync( int reportId, VatReportCashSaleCreateRequest request ) =>
+        _mutations.AddCashSaleAsync( reportId, request );
+
+    public Task DeleteCashSaleAsync( int cashSaleId ) => _mutations.DeleteCashSaleAsync( cashSaleId );
+
     public Task UploadRowInvoiceAsync( int rowId, string fileName, string contentType, byte[] data ) =>
         _mutations.UploadRowInvoiceAsync( rowId, fileName, contentType, data );
 

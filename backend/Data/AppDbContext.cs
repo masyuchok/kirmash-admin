@@ -17,6 +17,7 @@ namespace backend.Data
         public DbSet<VatReportRowItem> VatReportRowItems { get; set; } = default!;
         public DbSet<VatReportExpense> VatReportExpenses { get; set; } = default!;
         public DbSet<VatReportExpenseProduct> VatReportExpenseProducts { get; set; } = default!;
+        public DbSet<VatReportCashSale> VatReportCashSales { get; set; } = default!;
         public DbSet<InvoiceSettings> InvoiceSettings { get; set; } = default!;
         public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
         public DbSet<InventoryProductSale> InventoryProductSales { get; set; } = default!;
@@ -133,6 +134,29 @@ namespace backend.Data
                     .IsRequired()
                     .HasMaxLength( 512 );
                 entity.Property( x => x.Quantity )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<VatReportCashSale>( entity =>
+            {
+                entity.HasOne( x => x.VatReport )
+                    .WithMany( r => r.CashSales )
+                    .HasForeignKey( x => x.VatReportId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ProductTitle )
+                    .IsRequired()
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.Quantity )
+                    .IsRequired();
+                entity.Property( x => x.UnitPrice )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.GrossAmount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.CreatedAtUtc )
                     .IsRequired();
             } );
 

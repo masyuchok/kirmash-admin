@@ -2,10 +2,13 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import ProductSearchSelect from '@/components/ui/ProductSearchSelect';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import {
+  createVatReportCashSale,
   createVatReportExpense,
   createVatReportRow,
+  deleteVatReportCashSale,
   deleteVatReportExpense,
   deleteVatReportRow,
   downloadVatReportExpenseInvoice,
@@ -178,6 +181,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [orderSearch, setOrderSearch] = useState('');
   const [foreignOrderSearch, setForeignOrderSearch] = useState('');
   const [expenseSearch, setExpenseSearch] = useState('');
+  const [cashModalOpen, setCashModalOpen] = useState(false);
+  const [cashSaving, setCashSaving] = useState(false);
+  const [deletingCashSaleId, setDeletingCashSaleId] = useState<number | null>(null);
+  const [cashProducts, setCashProducts] = useState<ProductWithSuppliers[]>([]);
+  const [newCashSale, setNewCashSale] = useState({
+    shopifyProductId: '',
+    productTitle: '',
+    quantity: 1,
+    unitPrice: 0,
+  });
   const [vatFilterOpen, setVatFilterOpen] = useState(false);
   const [vatFilter5, setVatFilter5] = useState(true);
   const [vatFilter23, setVatFilter23] = useState(true);
@@ -308,6 +321,21 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     };
   }, [isSupplierPaymentExpense, expenseSupplierId]);
 
+  useEffect(() => {
+    if (!cashModalOpen) return;
+    let cancelled = false;
+    fetchProductsWithSuppliers()
+      .then((rows) => {
+        if (!cancelled) setCashProducts(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setCashProducts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cashModalOpen]);
+
   const visibleSupplierProducts = useMemo(() => {
     const search = expenseProductSearch.trim().toLowerCase();
     const sorted = [...supplierProducts].sort((a, b) => a.productName.localeCompare(b.productName, 'be'));
@@ -326,16 +354,22 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     [data]
   );
 
-  const activeDetailsPanel = useMemo<'poland' | 'foreign' | 'expense' | null>(() => {
+  const activeDetailsPanel = useMemo<'poland' | 'foreign' | 'expense' | 'cash' | null>(() => {
     if (isForeignReportOnly) {
       return expandedOrderId ? 'foreign' : null;
     }
     if (!expandedRow) return null;
     if (expandedRow.type === 'poland') return 'poland';
     if (expandedRow.type === 'foreign' && foreignOrderRows.length > 0) return 'foreign';
+    if (expandedRow.type === 'cash') return 'cash';
     if (expandedRow.type === 'expense') return 'expense';
     return null;
   }, [expandedRow, expandedOrderId, foreignOrderRows.length, isForeignReportOnly]);
+
+  const visibleCashRows = useMemo(() => {
+    if (!expandedRow || expandedRow.type !== 'cash') return [];
+    return expandedRow.cashSaleRows ?? [];
+  }, [expandedRow]);
 
   const displayTotalVat = useMemo(() => {
     if (!data) return 0;
@@ -641,6 +675,66 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       URL.revokeObjectURL(url);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Памылка загрузкі фактуры');
+    }
+  };
+
+  const resetNewCashSaleForm = () => {
+    setNewCashSale({
+      shopifyProductId: '',
+      productTitle: '',
+      quantity: 1,
+      unitPrice: 0,
+    });
+  };
+
+  const submitCashSale = async () => {
+    if (!newCashSale.shopifyProductId) {
+      setError('Выберыце тавар.');
+      return;
+    }
+    if (newCashSale.quantity <= 0) {
+      setError('Колькасць павінна быць больш за 0.');
+      return;
+    }
+    if (newCashSale.unitPrice < 0) {
+      setError('Цана не можа быць адмоўнай.');
+      return;
+    }
+    const targetReportId = data?.id ?? reportId;
+    setCashSaving(true);
+    setError(null);
+    try {
+      await createVatReportCashSale(targetReportId, {
+        shopifyProductId: newCashSale.shopifyProductId,
+        productTitle: newCashSale.productTitle,
+        quantity: newCashSale.quantity,
+        unitPrice: newCashSale.unitPrice,
+      });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+      setCashModalOpen(false);
+      resetNewCashSaleForm();
+      setExpandedOrderId('cash-summary');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка дадання наяўнай продажы');
+    } finally {
+      setCashSaving(false);
+    }
+  };
+
+  const removeCashSale = async (cashSaleId: number) => {
+    setDeletingCashSaleId(cashSaleId);
+    setError(null);
+    try {
+      await deleteVatReportCashSale(cashSaleId);
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка выдалення наяўнай продажы');
+    } finally {
+      setDeletingCashSaleId(null);
     }
   };
 
@@ -1392,7 +1486,7 @@ ${xmlItems}
                 <Fragment key={`${row.type}-${row.shopifyOrderId}`}>
                   <tr
                     className={`transition ${
-                      row.type === 'poland' || row.type === 'foreign' || row.type === 'expense'
+                      row.type === 'poland' || row.type === 'foreign' || row.type === 'expense' || row.type === 'cash'
                         ? 'cursor-pointer hover:bg-primary/10'
                         : ''
                     } ${
@@ -1403,7 +1497,7 @@ ${xmlItems}
                         : ''
                     }`}
                     onClick={() => {
-                      if (row.type === 'poland' || row.type === 'foreign' || row.type === 'expense') {
+                      if (row.type === 'poland' || row.type === 'foreign' || row.type === 'expense' || row.type === 'cash') {
                         setExpandedOrderId((prev) => {
                           const next = prev === row.shopifyOrderId ? null : row.shopifyOrderId;
                           if (next !== null) {
@@ -1493,14 +1587,26 @@ ${xmlItems}
                     ) : (
                       <>
                   <td className="px-4 py-3">
-                    {row.type === 'poland' ? 'Польшча' : row.type === 'foreign' ? 'Замежжа' : 'Расход'}
+                    {row.type === 'poland'
+                      ? 'Польшча'
+                      : row.type === 'foreign'
+                        ? 'Замежжа'
+                        : row.type === 'cash'
+                          ? 'Наяўнымі'
+                          : 'Расход'}
                   </td>
                   <td className="px-4 py-3">
-                    {row.type === 'poland' ? 'Польшча' : row.type === 'foreign' ? 'Замежжа' : 'Расход'}
+                    {row.type === 'poland'
+                      ? 'Польшча'
+                      : row.type === 'foreign'
+                        ? row.name
+                        : row.type === 'cash'
+                          ? 'Наяўнымі'
+                          : 'Расход'}
                   </td>
                         <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
                         <td className="px-4 py-3 text-right">
-                          {row.type !== 'expense' && (
+                          {row.type !== 'expense' && row.type !== 'cash' && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -2504,6 +2610,70 @@ ${xmlItems}
         </div>
       )}
 
+      {activeDetailsPanel === 'cash' && (
+        <div className="w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+            <h3 className="shrink-0 text-sm font-semibold text-gray-900">Наяўнымі</h3>
+            <button
+              type="button"
+              onClick={() => {
+                resetNewCashSaleForm();
+                setCashModalOpen(true);
+              }}
+              className="inline-flex size-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-900 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary active:scale-[0.99]"
+              aria-label="Дадаць наяўную продажу"
+              title="Дадаць наяўную продажу"
+            >
+              <FiPlus className="size-4" aria-hidden />
+            </button>
+          </div>
+          <table className="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                <th className="px-4 py-2.5">Тавар</th>
+                <th className="px-4 py-2.5 text-right">Колькасць</th>
+                <th className="px-4 py-2.5 text-right">Цана</th>
+                <th className="px-4 py-2.5 text-right">Сума</th>
+                <th className="px-4 py-2.5 text-right">Дзеянне</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {visibleCashRows.map((sale) => (
+                <tr key={`cash-${sale.id}`}>
+                  <td className="px-4 py-3">{sale.productTitle}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">{sale.quantity}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">{formatAmount(sale.unitPrice)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">{formatAmount(sale.grossAmount)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => void removeCashSale(sale.id)}
+                      disabled={deletingCashSaleId === sale.id}
+                      className="inline-flex size-8 items-center justify-center rounded-full border border-red-200 bg-white text-red-600 shadow-sm transition hover:bg-red-50 disabled:opacity-60"
+                      aria-label="Выдаліць"
+                      title="Выдаліць"
+                    >
+                      {deletingCashSaleId === sale.id ? (
+                        <span className="size-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" />
+                      ) : (
+                        <FiTrash2 className="size-4" aria-hidden />
+                      )}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {visibleCashRows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-500">
+                    Наяўных продаж пакуль няма.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {activeDetailsPanel === 'expense' && (
         <div className="w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
@@ -2819,6 +2989,99 @@ ${xmlItems}
                 ) : (
                   'Дадаць'
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cashModalOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => {
+            if (cashSaving) return;
+            setCashModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-base font-semibold text-gray-900">Дадаць наяўную продажу</div>
+            <div className="mt-4 space-y-3">
+              <label className="block space-y-1.5">
+                <span className="text-sm font-medium text-gray-700">Тавар</span>
+                <ProductSearchSelect
+                  products={cashProducts}
+                  value={newCashSale.shopifyProductId}
+                  onChange={(product) =>
+                    setNewCashSale({
+                      shopifyProductId: product?.shopifyProductId ?? '',
+                      productTitle: product?.productName ?? '',
+                      quantity: newCashSale.quantity,
+                      unitPrice: newCashSale.unitPrice,
+                    })
+                  }
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block space-y-1.5">
+                  <span className="text-sm font-medium text-gray-700">Колькасць</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newCashSale.quantity}
+                    onChange={(e) =>
+                      setNewCashSale((prev) => ({
+                        ...prev,
+                        quantity: Math.max(1, Number(e.currentTarget.value) || 1),
+                      }))
+                    }
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                  />
+                </label>
+                <label className="block space-y-1.5">
+                  <span className="text-sm font-medium text-gray-700">Цана</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newCashSale.unitPrice || ''}
+                    onChange={(e) =>
+                      setNewCashSale((prev) => ({
+                        ...prev,
+                        unitPrice: Number(e.currentTarget.value) || 0,
+                      }))
+                    }
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                  />
+                </label>
+              </div>
+              {newCashSale.shopifyProductId && newCashSale.quantity > 0 && newCashSale.unitPrice > 0 && (
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                  Сума:{' '}
+                  <span className="font-semibold tabular-nums">
+                    {formatAmount(round2(newCashSale.quantity * newCashSale.unitPrice))}
+                  </span>
+                </div>
+              )}
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setCashModalOpen(false)}
+                disabled={cashSaving}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                Скасаваць
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitCashSale()}
+                disabled={cashSaving}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+              >
+                {cashSaving ? 'Захаванне...' : 'Дадаць'}
               </button>
             </div>
           </div>

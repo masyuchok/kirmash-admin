@@ -24,6 +24,18 @@ namespace backend.Models
         public decimal NetAmount { get; set; }
         public List<VatReportDetailsPolandRow> PolandRows { get; set; } = new();
         public List<VatReportExpenseRow> ExpenseRows { get; set; } = new();
+        public List<VatReportCashSaleRow> CashSaleRows { get; set; } = new();
+    }
+
+    public class VatReportCashSaleRow
+    {
+        public int Id { get; set; }
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal GrossAmount { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
     }
 
     public class VatReportDetailsPolandRow

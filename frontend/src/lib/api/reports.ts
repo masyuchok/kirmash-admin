@@ -81,11 +81,13 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
           const r = item as Record<string, unknown>;
           const polandRowsRaw = r.polandRows ?? r.PolandRows;
           const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
+          const cashSaleRowsRaw = r.cashSaleRows ?? r.CashSaleRows;
           return {
-            type: ((): 'poland' | 'foreign' | 'expense' => {
+            type: ((): 'poland' | 'foreign' | 'expense' | 'cash' => {
               const normalized = String(r.type ?? r.Type ?? 'poland').toLowerCase();
               if (normalized === 'foreign') return 'foreign';
               if (normalized === 'expense') return 'expense';
+              if (normalized === 'cash') return 'cash';
               return 'poland';
             })(),
             name: String(r.name ?? r.Name ?? ''),
@@ -137,6 +139,20 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                         };
                       });
                     })(),
+                  };
+                })
+              : [],
+            cashSaleRows: Array.isArray(cashSaleRowsRaw)
+              ? cashSaleRowsRaw.map((x: unknown) => {
+                  const c = x as Record<string, unknown>;
+                  return {
+                    id: readInt(c.id ?? c.Id),
+                    shopifyProductId: String(c.shopifyProductId ?? c.ShopifyProductId ?? ''),
+                    productTitle: String(c.productTitle ?? c.ProductTitle ?? ''),
+                    quantity: readInt(c.quantity ?? c.Quantity),
+                    unitPrice: readNumber(c.unitPrice ?? c.UnitPrice),
+                    grossAmount: readNumber(c.grossAmount ?? c.GrossAmount),
+                    createdAtUtc: String(c.createdAtUtc ?? c.CreatedAtUtc ?? ''),
                   };
                 })
               : [],
@@ -223,6 +239,40 @@ export async function fetchVatReportCombinedDetails(
     details: mapVatReportDetails(detailsRaw),
     foreignRows: mapSummaryRows(foreignRowsRaw),
   };
+}
+
+export async function createVatReportCashSale(
+  reportId: number,
+  payload: {
+    shopifyProductId: string;
+    productTitle: string;
+    quantity: number;
+    unitPrice: number;
+  }
+): Promise<number> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/cash-sales`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося дадаць наяўную продажу');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  return readInt(data.id ?? data.Id);
+}
+
+export async function deleteVatReportCashSale(cashSaleId: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/cash-sales/${cashSaleId}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць наяўную продажу');
+    throw new Error(msg);
+  }
 }
 
 export async function createVatReportExpense(

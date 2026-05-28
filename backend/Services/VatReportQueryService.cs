@@ -54,12 +54,13 @@ public class VatReportQueryService
 
         List<ReportRowData> reportRows = await LoadReportRowsAsync( id );
         List<ReportExpenseData> expenses = await LoadReportExpensesAsync( id );
+        List<ReportCashSaleData> cashSales = await LoadReportCashSalesAsync( id );
 
         List<VatReportDetailsSummaryRow> rows = string.Equals(
             header.Type,
             VatReportType.Poland,
             StringComparison.OrdinalIgnoreCase )
-            ? BuildPolandSummaryRows( reportRows, expenses )
+            ? BuildPolandSummaryRows( reportRows, cashSales, expenses )
             : await BuildForeignSummaryRowsAsync( header.Type, reportRows );
 
         return new VatReportDetailsResponse
@@ -105,6 +106,9 @@ public class VatReportQueryService
         List<VatReportDetailsSummaryRow> polandSummaryRows = polandDetails.Rows
             .Where( r => r.Type == VatReportType.Poland )
             .ToList();
+        List<VatReportDetailsSummaryRow> cashSummaryRows = polandDetails.Rows
+            .Where( r => r.Type == VatReportType.Cash )
+            .ToList();
         List<VatReportDetailsSummaryRow> expenseSummaryRows = polandDetails.Rows
             .Where( r => r.Type == VatReportType.Expense )
             .ToList();
@@ -138,6 +142,7 @@ public class VatReportQueryService
                         GrossAmount = VatReportHelpers.Round2( foreignSummaryGross ),
                         PolandRows = []
                     },
+                    ..cashSummaryRows,
                     ..expenseSummaryRows
                 ]
             }
@@ -212,8 +217,27 @@ public class VatReportQueryService
             .ToListAsync();
     }
 
+    private async Task<List<ReportCashSaleData>> LoadReportCashSalesAsync( int reportId )
+    {
+        return await _db.VatReportCashSales
+            .AsNoTracking()
+            .Where( x => x.VatReportId == reportId )
+            .Select( x => new ReportCashSaleData
+            {
+                Id = x.Id,
+                ShopifyProductId = x.ShopifyProductId,
+                ProductTitle = x.ProductTitle,
+                Quantity = x.Quantity,
+                UnitPrice = x.UnitPrice,
+                GrossAmount = x.GrossAmount,
+                CreatedAtUtc = x.CreatedAtUtc
+            } )
+            .ToListAsync();
+    }
+
     private static List<VatReportDetailsSummaryRow> BuildPolandSummaryRows(
         List<ReportRowData> reportRows,
+        List<ReportCashSaleData> cashSales,
         List<ReportExpenseData> expenses )
     {
         List<VatReportDetailsSummaryRow> rows =
@@ -230,7 +254,8 @@ public class VatReportQueryService
                     .ThenBy( x => x.VatRatePercent )
                     .Select( MapPolandRow )
                     .ToList()
-            }
+            },
+            BuildCashSummaryRow( cashSales )
         ];
 
         if (expenses.Count == 0) return rows;
@@ -239,7 +264,7 @@ public class VatReportQueryService
         decimal expenseGross = VatReportHelpers.Round2( expenses.Sum( x => x.GrossAmount ) );
         rows.Add( new VatReportDetailsSummaryRow
         {
-            Type = "expense",
+            Type = VatReportType.Expense,
             Name = "Расход",
             ShopifyOrderId = "expense-summary",
             Vat = expenseVat,
@@ -253,6 +278,36 @@ public class VatReportQueryService
 
         return rows;
     }
+
+    private static VatReportDetailsSummaryRow BuildCashSummaryRow( List<ReportCashSaleData> cashSales )
+    {
+        decimal gross = VatReportHelpers.Round2( cashSales.Sum( x => x.GrossAmount ) );
+        return new VatReportDetailsSummaryRow
+        {
+            Type = VatReportType.Cash,
+            Name = "Наяўнымі",
+            ShopifyOrderId = "cash-summary",
+            Vat = 0m,
+            GrossAmount = gross,
+            NetAmount = gross,
+            CashSaleRows = cashSales
+                .OrderByDescending( x => x.CreatedAtUtc )
+                .Select( MapCashSaleRow )
+                .ToList()
+        };
+    }
+
+    private static VatReportCashSaleRow MapCashSaleRow( ReportCashSaleData sale ) =>
+        new()
+        {
+            Id = sale.Id,
+            ShopifyProductId = sale.ShopifyProductId,
+            ProductTitle = sale.ProductTitle,
+            Quantity = sale.Quantity,
+            UnitPrice = sale.UnitPrice,
+            GrossAmount = sale.GrossAmount,
+            CreatedAtUtc = sale.CreatedAtUtc
+        };
 
     private async Task<List<VatReportDetailsSummaryRow>> BuildForeignSummaryRowsAsync(
         string reportType,
@@ -425,5 +480,16 @@ public class VatReportQueryService
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
+    }
+
+    private sealed class ReportCashSaleData
+    {
+        public int Id { get; set; }
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal GrossAmount { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
     }
 }

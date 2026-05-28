@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using backend.Data;
@@ -11,9 +12,11 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260528193742_AddVatReportCashSales")]
+    partial class AddVatReportCashSales
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -43,7 +46,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("ExpenseInvoiceTypes", (string)null);
+                    b.ToTable("ExpenseInvoiceTypes");
                 });
 
             modelBuilder.Entity("backend.Models.InventoryProductSale", b =>
@@ -70,7 +73,7 @@ namespace backend.Migrations
                     b.HasIndex("ShopifyProductId")
                         .IsUnique();
 
-                    b.ToTable("InventoryProductSales", (string)null);
+                    b.ToTable("InventoryProductSales");
                 });
 
             modelBuilder.Entity("backend.Models.InventorySalesSyncState", b =>
@@ -92,7 +95,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("InventorySalesSyncStates", (string)null);
+                    b.ToTable("InventorySalesSyncStates");
                 });
 
             modelBuilder.Entity("backend.Models.InvoiceSettings", b =>
@@ -138,7 +141,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("InvoiceSettings", (string)null);
+                    b.ToTable("InvoiceSettings");
                 });
 
             modelBuilder.Entity("backend.Models.Product", b =>
@@ -160,7 +163,7 @@ namespace backend.Migrations
 
                     b.HasIndex("SupplierId");
 
-                    b.ToTable("Products", (string)null);
+                    b.ToTable("Products");
                 });
 
             modelBuilder.Entity("backend.Models.Supplier", b =>
@@ -211,7 +214,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Suppliers", (string)null);
+                    b.ToTable("Suppliers");
                 });
 
             modelBuilder.Entity("backend.Models.Supply", b =>
@@ -232,7 +235,7 @@ namespace backend.Migrations
 
                     b.HasIndex("SupplierId");
 
-                    b.ToTable("Supplies", (string)null);
+                    b.ToTable("Supplies");
                 });
 
             modelBuilder.Entity("backend.Models.SupplyProduct", b =>
@@ -278,7 +281,7 @@ namespace backend.Migrations
                     b.HasIndex("SupplyId", "ShopifyProductId")
                         .IsUnique();
 
-                    b.ToTable("SupplyProducts", (string)null);
+                    b.ToTable("SupplyProducts");
                 });
 
             modelBuilder.Entity("backend.Models.VatReport", b =>
@@ -331,7 +334,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("VatReports", (string)null);
+                    b.ToTable("VatReports");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportCashSale", b =>
@@ -371,7 +374,7 @@ namespace backend.Migrations
 
                     b.HasIndex("VatReportId");
 
-                    b.ToTable("VatReportCashSales", (string)null);
+                    b.ToTable("VatReportCashSales");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportExpense", b =>
@@ -434,7 +437,7 @@ namespace backend.Migrations
 
                     b.HasIndex("VatReportId");
 
-                    b.ToTable("VatReportExpenses", (string)null);
+                    b.ToTable("VatReportExpenses");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportExpenseProduct", b =>
@@ -465,7 +468,7 @@ namespace backend.Migrations
 
                     b.HasIndex("VatReportExpenseId");
 
-                    b.ToTable("VatReportExpenseProducts", (string)null);
+                    b.ToTable("VatReportExpenseProducts");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportRow", b =>
@@ -527,7 +530,7 @@ namespace backend.Migrations
 
                     b.HasIndex("VatReportId");
 
-                    b.ToTable("VatReportRows", (string)null);
+                    b.ToTable("VatReportRows");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportRowItem", b =>
@@ -577,7 +580,7 @@ namespace backend.Migrations
 
                     b.HasIndex("VatReportRowId");
 
-                    b.ToTable("VatReportRowItems", (string)null);
+                    b.ToTable("VatReportRowItems");
                 });
 
             modelBuilder.Entity("backend.Models.Product", b =>
