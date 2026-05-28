@@ -13,10 +13,19 @@ namespace backend.Controllers
         private readonly IConfiguration _config;
         private readonly SupplierService _service;
 
-        public SuppliersController(IConfiguration config, SupplierService service )
+        private readonly SupplierInventoryService _inventoryService;
+        private readonly InventorySalesCacheService _salesCacheService;
+
+        public SuppliersController(
+            IConfiguration config,
+            SupplierService service,
+            SupplierInventoryService inventoryService,
+            InventorySalesCacheService salesCacheService )
         {
             _config = config;
             _service = service;
+            _inventoryService = inventoryService;
+            _salesCacheService = salesCacheService;
         }
 
         [HttpPost( "add" )]
@@ -35,6 +44,44 @@ namespace backend.Controllers
             catch ( Exception ex )
             {
                 return StatusCode( 500, new { error = "Памылка дадавання пастаўшчыка", details = ex.Message } );
+            }
+        }
+
+        [HttpGet( "inventory" )]
+        public async Task<ActionResult<SupplierInventoryResponse>> GetInventory(
+            [FromQuery] int? supplierId,
+            [FromQuery] bool refresh = false )
+        {
+            try
+            {
+                SupplierInventoryResponse response = await _inventoryService.GetInventoryAsync( supplierId, refresh );
+                return Ok( response );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання інвентарызацыі", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "inventory/refresh" )]
+        public async Task<IActionResult> RefreshInventorySales()
+        {
+            try
+            {
+                DateTime? syncedAt = await _salesCacheService.EnsureFreshAsync( force: true );
+                return Ok( new { salesSyncedAtUtc = syncedAt } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка абнаўлення продажаў", details = ex.Message } );
             }
         }
 

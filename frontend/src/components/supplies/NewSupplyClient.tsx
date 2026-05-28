@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { FiArrowLeft, FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
+import { fetchSupplierOptions } from '@/lib/api/suppliers';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
 import { deleteSupply, fetchSupplyById } from '@/lib/api/supplies';
@@ -250,23 +250,9 @@ export default function NewSupplyClient({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials })
-      .then((res) => res.json())
-      .then((data: unknown) => {
-        if (cancelled || !Array.isArray(data)) return;
-        const rows = data
-          .map((row) => {
-            const r = row as Record<string, unknown>;
-            const id = typeof r.id === 'number' ? r.id : Number(r.id);
-            const name = typeof r.name === 'string' ? r.name : '';
-            const isVatPayer = Boolean(
-              r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false
-            );
-            if (!Number.isFinite(id) || !name.trim()) return null;
-            return { id, name, isVatPayer };
-          })
-          .filter((row): row is SupplierOption => row !== null);
-        setSuppliers(rows);
+    fetchSupplierOptions()
+      .then((rows) => {
+        if (!cancelled) setSuppliers(rows);
       })
       .catch(() => {
         if (!cancelled) setSuppliers([]);

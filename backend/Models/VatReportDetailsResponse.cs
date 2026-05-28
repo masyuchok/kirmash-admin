@@ -23,6 +23,19 @@ namespace backend.Models
         public decimal Vat { get; set; }
         public decimal NetAmount { get; set; }
         public List<VatReportDetailsPolandRow> PolandRows { get; set; } = new();
+        public List<VatReportExpenseRow> ExpenseRows { get; set; } = new();
+        public List<VatReportCashSaleRow> CashSaleRows { get; set; } = new();
+    }
+
+    public class VatReportCashSaleRow
+    {
+        public int Id { get; set; }
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal GrossAmount { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
     }
 
     public class VatReportDetailsPolandRow
@@ -50,5 +63,31 @@ namespace backend.Models
         public decimal GrossAmount { get; set; }
         public decimal AssignedVatRatePercent { get; set; }
         public string AssignmentReason { get; set; } = string.Empty;
+    }
+
+    public class VatReportExpenseRow
+    {
+        public int Id { get; set; }
+        public decimal GrossAmount { get; set; }
+        public decimal VatAmount { get; set; }
+        public decimal NetAmount { get; set; }
+        public DateTime ExpenseDateUtc { get; set; }
+        public string Comment { get; set; } = string.Empty;
+        public bool IsPaid { get; set; }
+        public int ExpenseInvoiceTypeId { get; set; }
+        public string ExpenseInvoiceTypeName { get; set; } = string.Empty;
+        public string InvoiceFileName { get; set; } = string.Empty;
+        public DateTime CreatedAtUtc { get; set; }
+        public int? SupplierId { get; set; }
+        public string SupplierName { get; set; } = string.Empty;
+        public List<VatReportExpenseProductRow> Products { get; set; } = new();
+    }
+
+    public class VatReportExpenseProductRow
+    {
+        public int Id { get; set; }
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
     }
 }

@@ -2,6 +2,7 @@ using System.Net.Mail;
 using System.Linq;
 using backend.Data;
 using backend.Models;
+using backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -94,6 +95,108 @@ namespace backend.Controllers
             settings.Currency = currency;
             settings.UpdatedAtUtc = DateTime.UtcNow;
 
+            await _db.SaveChangesAsync();
+            return Ok();
+        }
+
+        [HttpGet( "invoice-expense-types" )]
+        public async Task<ActionResult<List<ExpenseInvoiceTypeDto>>> GetExpenseInvoiceTypes()
+        {
+            await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
+            List<ExpenseInvoiceTypeDto> rows = await _db.ExpenseInvoiceTypes
+                .AsNoTracking()
+                .OrderBy( x => x.IsSystem ? 0 : 1 )
+                .ThenBy( x => x.Name )
+                .Select( x => new ExpenseInvoiceTypeDto
+                {
+                    Id = x.Id,
+                    Name = x.Name,
+                    IsSystem = x.IsSystem
+                } )
+                .ToListAsync();
+            return Ok( rows );
+        }
+
+        [HttpPost( "invoice-expense-types" )]
+        public async Task<ActionResult<ExpenseInvoiceTypeDto>> CreateExpenseInvoiceType( [FromBody] ExpenseInvoiceTypeCreateRequest request )
+        {
+            string name = (request.Name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace( name ))
+            {
+                return BadRequest( new { error = "Назва абавязковая." } );
+            }
+
+            await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
+            bool exists = await _db.ExpenseInvoiceTypes.AnyAsync( x => x.Name.ToLower() == name.ToLower() );
+            if (exists)
+            {
+                return BadRequest( new { error = "Такі тып ужо існуе." } );
+            }
+
+            ExpenseInvoiceType row = new()
+            {
+                Name = name,
+                IsSystem = false,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+            _db.ExpenseInvoiceTypes.Add( row );
+            await _db.SaveChangesAsync();
+            return Ok( new ExpenseInvoiceTypeDto { Id = row.Id, Name = row.Name, IsSystem = row.IsSystem } );
+        }
+
+        [HttpPut( "invoice-expense-types/{id:int}" )]
+        public async Task<ActionResult<ExpenseInvoiceTypeDto>> UpdateExpenseInvoiceType( int id, [FromBody] ExpenseInvoiceTypeUpdateRequest request )
+        {
+            string name = (request.Name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace( name ))
+            {
+                return BadRequest( new { error = "Назва абавязковая." } );
+            }
+
+            await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
+            ExpenseInvoiceType? row = await _db.ExpenseInvoiceTypes.FirstOrDefaultAsync( x => x.Id == id );
+            if (row is null)
+            {
+                return NotFound( new { error = "Тып не знойдзены." } );
+            }
+            if (row.IsSystem)
+            {
+                return BadRequest( new { error = "Сістэмны тып нельга рэдагаваць." } );
+            }
+
+            bool exists = await _db.ExpenseInvoiceTypes.AnyAsync( x => x.Id != id && x.Name.ToLower() == name.ToLower() );
+            if (exists)
+            {
+                return BadRequest( new { error = "Такі тып ужо існуе." } );
+            }
+
+            row.Name = name;
+            await _db.SaveChangesAsync();
+            return Ok( new ExpenseInvoiceTypeDto { Id = row.Id, Name = row.Name, IsSystem = row.IsSystem } );
+        }
+
+        [HttpDelete( "invoice-expense-types/{id:int}" )]
+        public async Task<IActionResult> DeleteExpenseInvoiceType( int id )
+        {
+            await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
+            ExpenseInvoiceType? row = await _db.ExpenseInvoiceTypes
+                .FirstOrDefaultAsync( x => x.Id == id );
+            if (row is null)
+            {
+                return NotFound( new { error = "Тып не знойдзены." } );
+            }
+            if (row.IsSystem)
+            {
+                return BadRequest( new { error = "Сістэмны тып нельга выдаліць." } );
+            }
+            bool hasExpenses = await _db.VatReportExpenses
+                .AnyAsync( e => e.ExpenseInvoiceTypeId == id );
+            if (hasExpenses)
+            {
+                return BadRequest( new { error = "Нельга выдаліць тып, які ўжо выкарыстоўваецца ў расходах." } );
+            }
+
+            _db.ExpenseInvoiceTypes.Remove( row );
             await _db.SaveChangesAsync();
             return Ok();
         }

@@ -53,6 +53,24 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet( "{id:int}/combined-details" )]
+        public async Task<ActionResult<VatReportCombinedDetailsResponse>> GetCombinedDetails( int id )
+        {
+            try
+            {
+                VatReportCombinedDetailsResponse details = await _service.GetCombinedDetailsAsync( id );
+                return Ok( details );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання злучанай справаздачы", details = ex.Message } );
+            }
+        }
+
         [HttpGet( "{id:int}" )]
         public async Task<ActionResult<VatReportDetailsResponse>> GetDetails( int id )
         {
@@ -186,6 +204,78 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPost( "{id:int}/expenses" )]
+        public async Task<IActionResult> AddExpense( int id, [FromBody] VatReportExpenseCreateRequest request )
+        {
+            try
+            {
+                int expenseId = await _service.AddExpenseAsync( id, request );
+                return Ok( new { id = expenseId } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка дадання расходу", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "{id:int}/cash-sales" )]
+        public async Task<IActionResult> AddCashSale( int id, [FromBody] VatReportCashSaleCreateRequest request )
+        {
+            try
+            {
+                int cashSaleId = await _service.AddCashSaleAsync( id, request );
+                return Ok( new { id = cashSaleId } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка дадання наяўнай продажы", details = ex.Message } );
+            }
+        }
+
+        [HttpDelete( "cash-sales/{cashSaleId:int}" )]
+        public async Task<IActionResult> DeleteCashSale( int cashSaleId )
+        {
+            try
+            {
+                await _service.DeleteCashSaleAsync( cashSaleId );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка выдалення наяўнай продажы", details = ex.Message } );
+            }
+        }
+
+        [HttpDelete( "expenses/{expenseId:int}" )]
+        public async Task<IActionResult> DeleteExpense( int expenseId )
+        {
+            try
+            {
+                await _service.DeleteExpenseAsync( expenseId );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка выдалення расходу", details = ex.Message } );
+            }
+        }
+
         [HttpPost( "rows/{rowId:int}/move-to-foreign" )]
         public async Task<IActionResult> MoveRowToForeign( int rowId, [FromBody] MoveVatReportRowToForeignRequest request )
         {
@@ -220,6 +310,51 @@ namespace backend.Controllers
                 await file.CopyToAsync( ms );
                 await _service.UploadRowInvoiceAsync( rowId, file.FileName, contentType, ms.ToArray() );
                 return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка загрузкі фактуры", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "expenses/{expenseId:int}/invoice" )]
+        [RequestSizeLimit( 10 * 1024 * 1024 )]
+        public async Task<IActionResult> UploadExpenseInvoice( int expenseId, [FromForm] VatReportInvoiceUploadRequest request )
+        {
+            try
+            {
+                IFormFile? file = request.File;
+                if (file is null || file.Length == 0)
+                {
+                    return BadRequest( new { error = "Файл не абраны." } );
+                }
+                string contentType = string.IsNullOrWhiteSpace( file.ContentType ) ? "application/octet-stream" : file.ContentType;
+                await using MemoryStream ms = new();
+                await file.CopyToAsync( ms );
+                await _service.UploadExpenseInvoiceAsync( expenseId, file.FileName, contentType, ms.ToArray() );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка загрузкі фактуры", details = ex.Message } );
+            }
+        }
+
+        [HttpGet( "expenses/{expenseId:int}/invoice" )]
+        public async Task<IActionResult> DownloadExpenseInvoice( int expenseId )
+        {
+            try
+            {
+                (string fileName, string contentType, byte[] data) = await _service.GetExpenseInvoiceAsync( expenseId );
+                return File( data, contentType, fileName );
             }
             catch (InvalidOperationException ex)
             {

@@ -15,5 +15,7 @@ namespace backend.Models
         public string[] ShopifyOrderIds { get; set; } = [];
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public List<VatReportRow> Rows { get; set; } = new();
+        public List<VatReportExpense> Expenses { get; set; } = new();
+        public List<VatReportCashSale> CashSales { get; set; } = new();
     }
 }

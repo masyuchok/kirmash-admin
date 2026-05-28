@@ -9,6 +9,12 @@ export type InvoiceSettingsPayload = {
   currency: string;
 };
 
+export type ExpenseInvoiceType = {
+  id: number;
+  name: string;
+  isSystem: boolean;
+};
+
 export async function fetchInvoiceSettings(): Promise<InvoiceSettingsPayload> {
   const res = await fetch(`${getApiBaseUrl()}/Settings/invoice`, {
     method: 'GET',
@@ -41,6 +47,65 @@ export async function saveInvoiceSettings(payload: InvoiceSettingsPayload): Prom
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося захаваць налады фактур');
+    throw new Error(msg);
+  }
+}
+
+export async function fetchExpenseInvoiceTypes(): Promise<ExpenseInvoiceType[]> {
+  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць тыпы расходных фактур');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data.map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      id: Number(item.id ?? item.Id ?? 0) || 0,
+      name: String(item.name ?? item.Name ?? ''),
+      isSystem: Boolean(item.isSystem ?? item.IsSystem ?? false),
+    };
+  });
+}
+
+export async function createExpenseInvoiceType(name: string): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося дадаць тып расходнай фактуры');
+    throw new Error(msg);
+  }
+}
+
+export async function updateExpenseInvoiceType(id: number, name: string): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося абнавіць тып расходнай фактуры');
+    throw new Error(msg);
+  }
+}
+
+export async function deleteExpenseInvoiceType(id: number): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`, {
+    method: 'DELETE',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць тып расходнай фактуры');
     throw new Error(msg);
   }
 }

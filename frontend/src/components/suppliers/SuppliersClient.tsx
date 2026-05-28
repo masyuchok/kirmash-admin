@@ -5,10 +5,11 @@ import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { Supplier } from '@/types/supplier';
 import { FiPlus, FiPackage } from 'react-icons/fi';
-import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
+import { fetchSuppliers } from '@/lib/api/suppliers';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
 import SuppliersTable from './SuppliersTable';
+import SupplierInventoryClient from './SupplierInventoryClient';
 
 enum ViewMode {
   Default = 'default',
@@ -23,7 +24,10 @@ const SuppliersClient = () => {
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(null);
+  const [inventorySupplierName, setInventorySupplierName] = useState('');
 
   const filteredSuppliers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -43,7 +47,10 @@ const SuppliersClient = () => {
         setTopbarButtons([]);
         return clear;
       case ViewMode.Inventory:
-        setTopbarPage({ title: 'Інвентарызацыя' });
+        setTopbarPage({
+          title: 'Інвентарызацыя',
+          subtitle: inventorySupplierName ? inventorySupplierName : 'Усе пастаўшчыкі',
+        });
         setTopbarButtons([]);
         return clear;
       default:
@@ -63,7 +70,11 @@ const SuppliersClient = () => {
           {
             label: 'Інвентарызацыя',
             icon: <FiPackage />,
-            onClick: () => setMode(ViewMode.Inventory),
+            onClick: () => {
+              setInventorySupplierId(null);
+              setInventorySupplierName('');
+              setMode(ViewMode.Inventory);
+            },
             variant: 'secondary',
           },
         ]);
@@ -77,37 +88,41 @@ const SuppliersClient = () => {
     filteredSuppliers.length,
     setTopbarButtons,
     setTopbarPage,
+    inventorySupplierName,
   ]);
 
+  const openInventory = (supplier?: Supplier) => {
+    setInventorySupplierId(supplier?.id ?? null);
+    setInventorySupplierName(supplier?.name ?? '');
+    setMode(ViewMode.Inventory);
+  };
+
+  const closeInventory = () => {
+    setInventorySupplierId(null);
+    setInventorySupplierName('');
+    setMode(ViewMode.Default);
+  };
+
   useEffect(() => {
-    fetch(`${getApiBaseUrl()}/suppliers`, {
-      credentials: apiCredentials,
-    })
-      .then((res) => res.json())
-      .then((data: unknown) => {
-        const rows = Array.isArray(data)
-          ? data.map((row) => {
-              const r = row as Record<string, unknown>;
-              return {
-                id: Number(r.id ?? r.Id ?? 0),
-                name: String(r.name ?? r.Name ?? ''),
-                telegram: String(
-                  r.telegram ?? r.Telegram ?? r.tgContact ?? r.tGContact ?? r.TGContact ?? ''
-                ),
-                website: String(r.website ?? r.Website ?? ''),
-                country: String(r.country ?? r.Country ?? ''),
-                city: String(r.city ?? r.City ?? ''),
-                isVatPayer: Boolean(r.isVatPayer ?? r.isVATPayer ?? r.IsVatPayer ?? r.IsVATPayer ?? false),
-              } satisfies Supplier;
-            })
-          : [];
+    let cancelled = false;
+    setLoading(true);
+    fetchSuppliers()
+      .then((rows) => {
+        if (cancelled) return;
         setSuppliers(rows);
-        setLoading(false);
+        setLoadError(null);
       })
-      .catch((err) => {
-        console.error('Памылка загрузкі пастаўшчыкоў:', err);
-        setLoading(false);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў');
+        setSuppliers([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
@@ -124,13 +139,20 @@ const SuppliersClient = () => {
       );
     case ViewMode.Inventory:
       return (
-        <div className="mx-auto max-w-6xl rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-          <p className="text-sm text-gray-500">📦 Тут будзе інвентарызацыя</p>
-        </div>
+        <SupplierInventoryClient
+          supplierId={inventorySupplierId}
+          supplierName={inventorySupplierName}
+          onBack={closeInventory}
+        />
       );
     default: {
       return (
         <div className="mx-auto w-full max-w-6xl space-y-6">
+          {loadError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {loadError}
+            </div>
+          )}
           <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-100 p-5 sm:p-6">
               <SupplierNameSearch
@@ -143,6 +165,7 @@ const SuppliersClient = () => {
               suppliers={filteredSuppliers}
               hasActiveFilter={Boolean(searchQuery.trim())}
               onEdit={(s) => router.push(`/suppliers/${s.id}/edit`)}
+              onInventory={(s) => openInventory(s)}
             />
           </div>
         </div>

@@ -28,7 +28,7 @@ export default function RootLayout({
             <Sidebar />
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <Topbar />
-              <main className="min-h-0 flex-1 overflow-auto bg-gray-50/80 p-6">
+              <main className="min-h-0 flex-1 overflow-auto bg-gray-50/80 p-6 [scrollbar-gutter:stable]">
                 {children}
               </main>
             </div>

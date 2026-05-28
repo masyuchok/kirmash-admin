@@ -23,8 +23,18 @@ export type VatReportPolandDetailItem = {
   assignmentReason: string;
 };
 
+export type VatReportCashSaleRow = {
+  id: number;
+  shopifyProductId: string;
+  productTitle: string;
+  quantity: number;
+  unitPrice: number;
+  grossAmount: number;
+  createdAtUtc: string;
+};
+
 export type VatReportSummaryRow = {
-  type: 'poland' | 'foreign';
+  type: 'poland' | 'foreign' | 'expense' | 'cash';
   name: string;
   shopifyOrderId: string;
   orderDateUtc?: string | null;
@@ -36,6 +46,32 @@ export type VatReportSummaryRow = {
   vat: number;
   netAmount?: number;
   polandRows: VatReportPolandDetailRow[];
+  expenseRows?: VatReportExpenseRow[];
+  cashSaleRows?: VatReportCashSaleRow[];
+};
+
+export type VatReportExpenseProductRow = {
+  id: number;
+  shopifyProductId: string;
+  productTitle: string;
+  quantity: number;
+};
+
+export type VatReportExpenseRow = {
+  id: number;
+  grossAmount: number;
+  vatAmount: number;
+  netAmount: number;
+  expenseDateUtc: string;
+  comment: string;
+  isPaid: boolean;
+  expenseInvoiceTypeId: number;
+  expenseInvoiceTypeName: string;
+  invoiceFileName: string;
+  createdAtUtc: string;
+  supplierId?: number | null;
+  supplierName: string;
+  products: VatReportExpenseProductRow[];
 };
 
 export type VatReportDetails = {
