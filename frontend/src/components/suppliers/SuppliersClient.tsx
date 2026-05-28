@@ -9,6 +9,7 @@ import { apiCredentials, getApiBaseUrl } from '@/lib/api/common';
 import AddSupplierForm from './AddSupplierForm';
 import SupplierNameSearch from './SupplierNameSearch';
 import SuppliersTable from './SuppliersTable';
+import SupplierInventoryClient from './SupplierInventoryClient';
 
 enum ViewMode {
   Default = 'default',
@@ -24,6 +25,8 @@ const SuppliersClient = () => {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(null);
+  const [inventorySupplierName, setInventorySupplierName] = useState('');
 
   const filteredSuppliers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -43,7 +46,10 @@ const SuppliersClient = () => {
         setTopbarButtons([]);
         return clear;
       case ViewMode.Inventory:
-        setTopbarPage({ title: 'Інвентарызацыя' });
+        setTopbarPage({
+          title: 'Інвентарызацыя',
+          subtitle: inventorySupplierName ? inventorySupplierName : 'Усе пастаўшчыкі',
+        });
         setTopbarButtons([]);
         return clear;
       default:
@@ -63,7 +69,11 @@ const SuppliersClient = () => {
           {
             label: 'Інвентарызацыя',
             icon: <FiPackage />,
-            onClick: () => setMode(ViewMode.Inventory),
+            onClick: () => {
+              setInventorySupplierId(null);
+              setInventorySupplierName('');
+              setMode(ViewMode.Inventory);
+            },
             variant: 'secondary',
           },
         ]);
@@ -77,7 +87,20 @@ const SuppliersClient = () => {
     filteredSuppliers.length,
     setTopbarButtons,
     setTopbarPage,
+    inventorySupplierName,
   ]);
+
+  const openInventory = (supplier?: Supplier) => {
+    setInventorySupplierId(supplier?.id ?? null);
+    setInventorySupplierName(supplier?.name ?? '');
+    setMode(ViewMode.Inventory);
+  };
+
+  const closeInventory = () => {
+    setInventorySupplierId(null);
+    setInventorySupplierName('');
+    setMode(ViewMode.Default);
+  };
 
   useEffect(() => {
     fetch(`${getApiBaseUrl()}/suppliers`, {
@@ -124,9 +147,11 @@ const SuppliersClient = () => {
       );
     case ViewMode.Inventory:
       return (
-        <div className="mx-auto max-w-6xl rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-          <p className="text-sm text-gray-500">📦 Тут будзе інвентарызацыя</p>
-        </div>
+        <SupplierInventoryClient
+          supplierId={inventorySupplierId}
+          supplierName={inventorySupplierName}
+          onBack={closeInventory}
+        />
       );
     default: {
       return (
@@ -143,6 +168,7 @@ const SuppliersClient = () => {
               suppliers={filteredSuppliers}
               hasActiveFilter={Boolean(searchQuery.trim())}
               onEdit={(s) => router.push(`/suppliers/${s.id}/edit`)}
+              onInventory={(s) => openInventory(s)}
             />
           </div>
         </div>

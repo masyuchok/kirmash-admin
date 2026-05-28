@@ -62,6 +62,8 @@ builder.Services.AddControllers( );
 
 builder.Services.AddScoped<JwtService>( );
 builder.Services.AddScoped<SupplierService>( );
+builder.Services.AddScoped<SupplierInventoryService>( );
+builder.Services.AddScoped<InventorySalesCacheService>( );
 builder.Services.AddScoped<SupplyService>();
 builder.Services.AddScoped<ProductService>();
 builder.Services.AddScoped<VatReportService>();

@@ -5,6 +5,7 @@ namespace backend.Models
         public int Id { get; set; }
         public int VatReportRowId { get; set; }
         public VatReportRow VatReportRow { get; set; } = default!;
+        public string ShopifyProductId { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public int Quantity { get; set; }

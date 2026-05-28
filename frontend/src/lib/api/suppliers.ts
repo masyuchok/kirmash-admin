@@ -11,6 +11,88 @@ import {
   mapListSupplierToFormValues,
 } from '@/lib/suppliers/supplierFormTypes';
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import type { SupplierInventoryResult, SupplierInventoryRow } from '@/types/supplier-inventory';
+
+function readInt(v: unknown): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : 0;
+  }
+  return 0;
+}
+
+function readNumber(v: unknown): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
+  return {
+    supplierId: readInt(row.supplierId ?? row.SupplierId),
+    supplierName: String(row.supplierName ?? row.SupplierName ?? ''),
+    shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
+    productName: String(row.productName ?? row.ProductName ?? ''),
+    supplierPrice: readNumber(row.supplierPrice ?? row.SupplierPrice),
+    quantityInStock: readInt(row.quantityInStock ?? row.QuantityInStock),
+    soldQuantity: readInt(row.soldQuantity ?? row.SoldQuantity),
+    paidQuantity: readInt(row.paidQuantity ?? row.PaidQuantity),
+    quantityToPay: readInt(row.quantityToPay ?? row.QuantityToPay),
+  };
+}
+
+export async function fetchSupplierInventory(
+  supplierId?: number,
+  options?: { refresh?: boolean }
+): Promise<SupplierInventoryResult> {
+  const params = new URLSearchParams();
+  if (supplierId) params.set('supplierId', String(supplierId));
+  if (options?.refresh) params.set('refresh', 'true');
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/inventory${query}`, {
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць інвентарызацыю');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (Array.isArray(data)) {
+    return {
+      rows: data.map((item) => mapInventoryRow(item as Record<string, unknown>)),
+      salesSyncedAtUtc: null,
+    };
+  }
+  const payload = data as Record<string, unknown>;
+  const rowsRaw = payload.rows ?? payload.Rows;
+  return {
+    rows: Array.isArray(rowsRaw)
+      ? rowsRaw.map((item) => mapInventoryRow(item as Record<string, unknown>))
+      : [],
+    salesSyncedAtUtc: (payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
+      ? String(payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
+      : null,
+  };
+}
+
+export async function refreshSupplierInventorySales(): Promise<string | null> {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/inventory/refresh`, {
+    method: 'POST',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося абнавіць продажы');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  const synced = data.salesSyncedAtUtc ?? data.SalesSyncedAtUtc;
+  return synced ? String(synced) : null;
+}
 
 export async function fetchSuppliers(): Promise<import('@/types/supplier').Supplier[]> {
   const res = await fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials });

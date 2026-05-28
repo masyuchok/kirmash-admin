@@ -19,6 +19,8 @@ namespace backend.Data
         public DbSet<VatReportExpenseProduct> VatReportExpenseProducts { get; set; } = default!;
         public DbSet<InvoiceSettings> InvoiceSettings { get; set; } = default!;
         public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
+        public DbSet<InventoryProductSale> InventoryProductSales { get; set; } = default!;
+        public DbSet<InventorySalesSyncState> InventorySalesSyncStates { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -176,6 +178,9 @@ namespace backend.Data
                     .HasForeignKey( i => i.VatReportRowId )
                     .OnDelete( DeleteBehavior.Cascade );
 
+                entity.Property( i => i.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
                 entity.Property( i => i.ProductTitle )
                     .IsRequired()
                     .HasMaxLength( 512 );
@@ -226,6 +231,25 @@ namespace backend.Data
                 entity.Property( x => x.IsSystem )
                     .IsRequired();
                 entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<InventoryProductSale>( entity =>
+            {
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+                entity.HasIndex( x => x.ShopifyProductId )
+                    .IsUnique();
+            } );
+
+            modelBuilder.Entity<InventorySalesSyncState>( entity =>
+            {
+                entity.Property( x => x.FullSyncCompleted )
+                    .IsRequired();
+                entity.Property( x => x.UpdatedAtUtc )
                     .IsRequired();
             } );
         }

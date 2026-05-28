@@ -404,6 +404,7 @@ namespace backend.Services
                 InvoiceData = sourceRow.InvoiceData,
                 Items = sourceRow.Items.Select( i => new VatReportRowItem
                 {
+                    ShopifyProductId = i.ShopifyProductId,
                     ProductTitle = i.ProductTitle,
                     ProductType = i.ProductType,
                     Quantity = i.Quantity,
@@ -973,6 +974,88 @@ namespace backend.Services
             await _db.SaveChangesAsync();
         }
 
+        /// <summary>
+        /// Aggregates sold quantities from live Shopify orders using the same Poland/Foreign
+        /// inclusion rules as VAT report generation (not from persisted report rows).
+        /// </summary>
+        public async Task<Dictionary<string, int>> GetSoldQuantitiesByProductFromShopifyAsync()
+        {
+            DateOnly? earliestSupplyDate = await _db.Supplies
+                .AsNoTracking()
+                .MinAsync( s => (DateOnly?)s.Date );
+            if (!earliestSupplyDate.HasValue)
+            {
+                return new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+            }
+
+            DateOnly startMonth = new( earliestSupplyDate.Value.Year, earliestSupplyDate.Value.Month, 1 );
+            DateOnly endMonth = DateOnly.FromDateTime( DateTime.UtcNow );
+            Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+
+            for (DateOnly monthCursor = startMonth; monthCursor <= endMonth; monthCursor = monthCursor.AddMonths( 1 ))
+            {
+                List<ShopifyOrderDto> polandOrders = await FetchOrdersForPolandAsync( monthCursor.Year, monthCursor.Month );
+                List<ShopifyOrderDto> foreignOrders = await FetchOrdersForForeignAsync( monthCursor.Year, monthCursor.Month );
+                AddOrderItemsToSoldMap( polandOrders, soldByProduct );
+                AddOrderItemsToSoldMap( foreignOrders, soldByProduct );
+            }
+
+            return soldByProduct;
+        }
+
+        public async Task<Dictionary<string, int>> GetSoldQuantitiesFromShopifySinceAsync( DateTime sinceUtc )
+        {
+            DateTime toUtc = DateTime.UtcNow;
+            if (sinceUtc >= toUtc)
+            {
+                return new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+            }
+
+            DateOnly startMonth = DateOnly.FromDateTime( sinceUtc );
+            DateOnly endMonth = DateOnly.FromDateTime( toUtc );
+            Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+
+            for (DateOnly monthCursor = new DateOnly( startMonth.Year, startMonth.Month, 1 );
+                 monthCursor <= endMonth;
+                 monthCursor = monthCursor.AddMonths( 1 ))
+            {
+                List<ShopifyOrderDto> polandOrders = await FetchOrdersForPolandAsync( monthCursor.Year, monthCursor.Month );
+                List<ShopifyOrderDto> foreignOrders = await FetchOrdersForForeignAsync( monthCursor.Year, monthCursor.Month );
+                AddOrdersToSoldMapSince( polandOrders, sinceUtc, soldByProduct );
+                AddOrdersToSoldMapSince( foreignOrders, sinceUtc, soldByProduct );
+            }
+
+            return soldByProduct;
+        }
+
+        private static void AddOrdersToSoldMapSince(
+            List<ShopifyOrderDto> orders,
+            DateTime sinceUtc,
+            Dictionary<string, int> soldByProduct )
+        {
+            foreach (ShopifyOrderDto order in orders)
+            {
+                if (order.CreatedAtUtc <= sinceUtc) continue;
+                AddOrderItemsToSoldMap( new List<ShopifyOrderDto> { order }, soldByProduct );
+            }
+        }
+
+        private static void AddOrderItemsToSoldMap(
+            List<ShopifyOrderDto> orders,
+            Dictionary<string, int> soldByProduct )
+        {
+            foreach (ShopifyOrderDto order in orders)
+            {
+                foreach (ShopifyLineItemDto item in order.Items)
+                {
+                    if (item.Quantity <= 0) continue;
+                    string productId = NormalizeFromShopifyGid( item.ShopifyProductId, "gid://shopify/Product/" ).Trim();
+                    if (string.IsNullOrWhiteSpace( productId )) continue;
+                    soldByProduct[productId] = soldByProduct.GetValueOrDefault( productId ) + item.Quantity;
+                }
+            }
+        }
+
         private async Task<List<VatReportRow>> BuildPolandRowsAsync( int year, int month )
         {
             List<ShopifyOrderDto> orders = await FetchOrdersForPolandAsync( year, month );
@@ -997,6 +1080,7 @@ namespace backend.Services
                     );
                     ShopifyClassifiedItemDto classified = new()
                     {
+                        ShopifyProductId = NormalizeFromShopifyGid( item.ShopifyProductId, "gid://shopify/Product/" ).Trim(),
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
                         Quantity = item.Quantity,
@@ -1097,6 +1181,7 @@ namespace backend.Services
                     grossByRate[assignedRate] += lineGross;
                     itemsByRate[assignedRate].Add( new ShopifyClassifiedItemDto
                     {
+                        ShopifyProductId = NormalizeFromShopifyGid( item.ShopifyProductId, "gid://shopify/Product/" ).Trim(),
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
                         Quantity = item.Quantity,
@@ -1159,6 +1244,7 @@ namespace backend.Services
                 Items = items
                     .Select( x => new VatReportRowItem
                     {
+                        ShopifyProductId = string.IsNullOrWhiteSpace( x.ShopifyProductId ) ? string.Empty : x.ShopifyProductId,
                         ProductTitle = string.IsNullOrWhiteSpace( x.ProductTitle ) ? "—" : x.ProductTitle,
                         ProductType = x.ProductType ?? string.Empty,
                         Quantity = x.Quantity,
@@ -2099,6 +2185,7 @@ namespace backend.Services
 
         private sealed class ShopifyClassifiedItemDto
         {
+            public string ShopifyProductId { get; set; } = string.Empty;
             public string ProductTitle { get; set; } = string.Empty;
             public string ProductType { get; set; } = string.Empty;
             public int Quantity { get; set; }

@@ -7,6 +7,7 @@ import { TiDocumentText } from 'react-icons/ti';
 interface Props {
   suppliers: Supplier[];
   onEdit: (supplier: Supplier) => void;
+  onInventory: (supplier: Supplier) => void;
   /** When true and the list is empty, copy assumes an active search filter. */
   hasActiveFilter?: boolean;
 }
@@ -14,7 +15,7 @@ interface Props {
 const ghostBtn =
   'inline-flex size-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30';
 
-const SuppliersTable = ({ suppliers, onEdit, hasActiveFilter }: Props) => {
+const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Props) => {
   if (suppliers.length === 0) {
     return (
       <div className="px-6 py-16 text-center">
@@ -86,7 +87,13 @@ const SuppliersTable = ({ suppliers, onEdit, hasActiveFilter }: Props) => {
                   <button type="button" className={ghostBtn} aria-label="Архіў">
                     <HiMiniArchiveBoxXMark className="size-4" />
                   </button>
-                  <button type="button" className={ghostBtn} aria-label="Кнігі">
+                  <button
+                    type="button"
+                    className={ghostBtn}
+                    aria-label="Інвентарызацыя"
+                    title="Інвентарызацыя"
+                    onClick={() => onInventory(s)}
+                  >
                     <ImBooks className="size-4" />
                   </button>
                   <button type="button" className={ghostBtn} aria-label="Дакументы">
