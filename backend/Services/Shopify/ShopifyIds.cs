@@ -14,6 +14,8 @@ public static class ShopifyIds
 
     public static string NormalizeProductId( string id ) => NormalizeGid( id, "gid://shopify/Product/" );
 
+    public static string NormalizeVariantId( string id ) => NormalizeGid( id, "gid://shopify/ProductVariant/" );
+
     public static long? TryParseNumericProductId( string raw )
     {
         if (string.IsNullOrWhiteSpace( raw )) return null;
@@ -27,5 +29,20 @@ public static class ShopifyIds
         }
 
         return null;
+    }
+
+    public static long? TryParseNumericVariantId( string raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw )) return null;
+        if (long.TryParse( raw, out long direct )) return direct;
+
+        const string prefix = "gid://shopify/ProductVariant/";
+        if (raw.StartsWith( prefix, StringComparison.OrdinalIgnoreCase ))
+        {
+            string part = raw[prefix.Length..];
+            return long.TryParse( part, out long gidId ) ? gidId : null;
+        }
+
+        return TryParseNumericProductId( raw );
     }
 }

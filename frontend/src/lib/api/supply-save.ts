@@ -2,6 +2,7 @@ import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/commo
 
 export type SupplyProductSavePayload = {
   shopifyProductId: string;
+  shopifyVariantId?: string;
   quantity: number;
   supplierPrice: number;
   vatRatePercent: number;

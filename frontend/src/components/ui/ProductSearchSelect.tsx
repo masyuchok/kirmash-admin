@@ -95,7 +95,7 @@ export default function ProductSearchSelect({
         placeholder={placeholder}
         value={displayValue}
         onChange={(e) => {
-          const next = e.currentTarget.value;
+          const next = e.target.value;
           setQuery(next);
           setOpen(true);
           if (value) onChange(null);

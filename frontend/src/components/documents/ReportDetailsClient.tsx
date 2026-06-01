@@ -371,9 +371,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     return expandedRow.cashSaleRows ?? [];
   }, [expandedRow]);
 
+  const baseTotalVat = useMemo(() => {
+    if (!data?.rows.length) return data?.vat ?? 0;
+    const vatOf = (type: 'poland' | 'foreign' | 'expense') =>
+      data.rows.find((r) => r.type === type)?.vat ?? 0;
+    return round2(vatOf('poland') + vatOf('foreign') - vatOf('expense'));
+  }, [data]);
+
   const displayTotalVat = useMemo(() => {
     if (!data) return 0;
-    if (!expandedRow) return data.vat;
+    if (expandedRow?.type !== 'poland') return baseTotalVat;
 
     let delta = 0;
     expandedRow.polandRows.forEach((row) => {
@@ -382,8 +389,28 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       if (!edited) return;
       delta += edited.vatAmount - row.vatAmount;
     });
-    return round2(data.vat + delta);
-  }, [data, expandedRow, editedRows]);
+    return round2(baseTotalVat + delta);
+  }, [data, expandedRow, editedRows, baseTotalVat]);
+
+  const displayProfit = useMemo(() => {
+    if (!data) return 0;
+    const grossOf = (type: 'poland' | 'foreign' | 'cash' | 'expense') =>
+      data.rows.find((r) => r.type === type)?.grossAmount ?? 0;
+    let polandGross = grossOf('poland');
+    if (expandedRow?.type === 'poland') {
+      let grossDelta = 0;
+      expandedRow.polandRows.forEach((row) => {
+        const edited = editedRows[String(row.id)];
+        if (!edited) return;
+        grossDelta += edited.grossAmount - row.grossAmount;
+      });
+      polandGross = round2(polandGross + grossDelta);
+    }
+    if (!data.rows.length) return data.profit;
+    return round2(
+      polandGross + grossOf('foreign') + grossOf('cash') - displayTotalVat - grossOf('expense')
+    );
+  }, [data, displayTotalVat, expandedRow, editedRows]);
 
   const visiblePolandRows = useMemo(() => {
     if (!expandedRow) return [];
@@ -1454,8 +1481,15 @@ ${xmlItems}
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="border-b border-gray-100 px-6 py-4 text-sm text-gray-600">
-          Усяго VAT: <span className="font-semibold text-gray-900">{formatAmount(displayTotalVat)}</span>
+        <div className="flex flex-wrap gap-x-8 gap-y-1 border-b border-gray-100 px-6 py-4 text-sm text-gray-600">
+          <div>
+            Усяго VAT:{' '}
+            <span className="font-semibold text-gray-900">{formatAmount(displayTotalVat)}</span>
+          </div>
+          <div>
+            Усяго прыбытак:{' '}
+            <span className="font-semibold text-gray-900">{formatAmount(displayProfit)}</span>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full border-collapse text-left text-sm">
@@ -1474,7 +1508,7 @@ ${xmlItems}
                 ) : (
                   <>
                     <th className="px-4 py-2.5">Тып</th>
-                    <th className="px-4 py-2.5">Назва</th>
+                    <th className="px-4 py-2.5 text-right">Сума</th>
                     <th className="px-4 py-2.5 text-right">VAT</th>
                     <th className="px-4 py-2.5 text-right">Дзеянне</th>
                   </>
@@ -1595,14 +1629,8 @@ ${xmlItems}
                           ? 'Наяўнымі'
                           : 'Расход'}
                   </td>
-                  <td className="px-4 py-3">
-                    {row.type === 'poland'
-                      ? 'Польшча'
-                      : row.type === 'foreign'
-                        ? row.name
-                        : row.type === 'cash'
-                          ? 'Наяўнымі'
-                          : 'Расход'}
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatAmount(row.grossAmount ?? 0)}
                   </td>
                         <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
                         <td className="px-4 py-3 text-right">
@@ -3031,12 +3059,10 @@ ${xmlItems}
                     type="number"
                     min="1"
                     value={newCashSale.quantity}
-                    onChange={(e) =>
-                      setNewCashSale((prev) => ({
-                        ...prev,
-                        quantity: Math.max(1, Number(e.currentTarget.value) || 1),
-                      }))
-                    }
+                    onChange={(e) => {
+                      const quantity = Math.max(1, Number(e.target.value) || 1);
+                      setNewCashSale((prev) => ({ ...prev, quantity }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>
@@ -3047,12 +3073,10 @@ ${xmlItems}
                     min="0"
                     step="0.01"
                     value={newCashSale.unitPrice || ''}
-                    onChange={(e) =>
-                      setNewCashSale((prev) => ({
-                        ...prev,
-                        unitPrice: Number(e.currentTarget.value) || 0,
-                      }))
-                    }
+                    onChange={(e) => {
+                      const unitPrice = Number(e.target.value) || 0;
+                      setNewCashSale((prev) => ({ ...prev, unitPrice }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>

@@ -13,6 +13,7 @@ export type SupplyListItem = {
 
 export type SupplyDetailsProduct = {
   shopifyProductId: string;
+  shopifyVariantId: string;
   quantity: number;
   supplierPrice: number;
   vatRatePercent: number;

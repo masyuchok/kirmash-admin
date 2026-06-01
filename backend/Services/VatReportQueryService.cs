@@ -68,7 +68,8 @@ public class VatReportQueryService
             Id = header.Id,
             PeriodYear = header.PeriodYear,
             PeriodMonth = header.PeriodMonth,
-            Vat = header.Vat,
+            Vat = ComputeTotalVatFromSummaryRows( rows ),
+            Profit = ComputeProfitFromSummaryRows( rows ),
             Rows = rows
         };
     }
@@ -120,6 +121,23 @@ public class VatReportQueryService
         decimal foreignSummaryNet = foreignRows.Sum( row => row.NetAmount );
         decimal foreignSummaryGross = foreignRows.Sum( row => row.GrossAmount );
 
+        List<VatReportDetailsSummaryRow> combinedRows =
+        [
+            ..polandSummaryRows,
+            new VatReportDetailsSummaryRow
+            {
+                Type = VatReportType.Foreign,
+                Name = "Замежжа",
+                ShopifyOrderId = "foreign-summary",
+                Vat = VatReportHelpers.Round2( foreignSummaryVat ),
+                NetAmount = VatReportHelpers.Round2( foreignSummaryNet ),
+                GrossAmount = VatReportHelpers.Round2( foreignSummaryGross ),
+                PolandRows = []
+            },
+            ..cashSummaryRows,
+            ..expenseSummaryRows
+        ];
+
         return new VatReportCombinedDetailsResponse
         {
             ForeignRows = foreignRows,
@@ -128,23 +146,8 @@ public class VatReportQueryService
                 Id = polandDetails.Id,
                 PeriodYear = polandDetails.PeriodYear,
                 PeriodMonth = polandDetails.PeriodMonth,
-                Vat = VatReportHelpers.Round2( polandDetails.Vat + foreignDetails.Vat ),
-                Rows =
-                [
-                    ..polandSummaryRows,
-                    new VatReportDetailsSummaryRow
-                    {
-                        Type = VatReportType.Foreign,
-                        Name = "Замежжа",
-                        ShopifyOrderId = "foreign-summary",
-                        Vat = VatReportHelpers.Round2( foreignSummaryVat ),
-                        NetAmount = VatReportHelpers.Round2( foreignSummaryNet ),
-                        GrossAmount = VatReportHelpers.Round2( foreignSummaryGross ),
-                        PolandRows = []
-                    },
-                    ..cashSummaryRows,
-                    ..expenseSummaryRows
-                ]
+                Vat = ComputeTotalVatFromSummaryRows( combinedRows ),
+                Rows = combinedRows
             }
         };
     }
@@ -235,6 +238,24 @@ public class VatReportQueryService
             .ToListAsync();
     }
 
+    private static decimal ComputeTotalVatFromSummaryRows( IEnumerable<VatReportDetailsSummaryRow> rows )
+    {
+        decimal polandVat = rows.Where( r => r.Type == VatReportType.Poland ).Sum( r => r.Vat );
+        decimal foreignVat = rows.Where( r => r.Type == VatReportType.Foreign ).Sum( r => r.Vat );
+        decimal expenseVat = rows.Where( r => r.Type == VatReportType.Expense ).Sum( r => r.Vat );
+        return VatReportHelpers.Round2( polandVat + foreignVat - expenseVat );
+    }
+
+    private static decimal ComputeProfitFromSummaryRows( IEnumerable<VatReportDetailsSummaryRow> rows )
+    {
+        decimal polandGross = rows.Where( r => r.Type == VatReportType.Poland ).Sum( r => r.GrossAmount );
+        decimal foreignGross = rows.Where( r => r.Type == VatReportType.Foreign ).Sum( r => r.GrossAmount );
+        decimal cashGross = rows.Where( r => r.Type == VatReportType.Cash ).Sum( r => r.GrossAmount );
+        decimal expenseGross = rows.Where( r => r.Type == VatReportType.Expense ).Sum( r => r.GrossAmount );
+        decimal totalVat = ComputeTotalVatFromSummaryRows( rows );
+        return VatReportHelpers.Round2( polandGross + foreignGross + cashGross - totalVat - expenseGross );
+    }
+
     private static List<VatReportDetailsSummaryRow> BuildPolandSummaryRows(
         List<ReportRowData> reportRows,
         List<ReportCashSaleData> cashSales,
@@ -247,6 +268,8 @@ public class VatReportQueryService
                 Type = VatReportType.Poland,
                 Name = "Польшча",
                 ShopifyOrderId = "poland",
+                GrossAmount = VatReportHelpers.Round2( reportRows.Sum( x => x.GrossAmount ) ),
+                NetAmount = VatReportHelpers.Round2( reportRows.Sum( x => x.NetAmount ) ),
                 Vat = VatReportHelpers.Round2( reportRows.Sum( x => x.VatAmount ) ),
                 PolandRows = reportRows
                     .OrderByDescending( x => x.OrderDateUtc )
@@ -255,14 +278,18 @@ public class VatReportQueryService
                     .Select( MapPolandRow )
                     .ToList()
             },
-            BuildCashSummaryRow( cashSales )
+            BuildCashSummaryRow( cashSales ),
+            BuildExpenseSummaryRow( expenses )
         ];
 
-        if (expenses.Count == 0) return rows;
+        return rows;
+    }
 
+    private static VatReportDetailsSummaryRow BuildExpenseSummaryRow( List<ReportExpenseData> expenses )
+    {
         decimal expenseVat = VatReportHelpers.Round2( expenses.Sum( x => x.VatAmount ) );
         decimal expenseGross = VatReportHelpers.Round2( expenses.Sum( x => x.GrossAmount ) );
-        rows.Add( new VatReportDetailsSummaryRow
+        return new VatReportDetailsSummaryRow
         {
             Type = VatReportType.Expense,
             Name = "Расход",
@@ -274,9 +301,7 @@ public class VatReportQueryService
                 .OrderByDescending( x => x.CreatedAtUtc )
                 .Select( MapExpenseRow )
                 .ToList()
-        } );
-
-        return rows;
+        };
     }
 
     private static VatReportDetailsSummaryRow BuildCashSummaryRow( List<ReportCashSaleData> cashSales )

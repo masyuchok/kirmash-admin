@@ -96,7 +96,12 @@ export async function fetchSuppliers(): Promise<import('@/types/supplier').Suppl
     return {
       id: readInt(row.id ?? row.Id),
       name: readString(row.name ?? row.Name),
-      telegram: readString(row.tGContact ?? row.TGContact ?? row.telegram),
+      telegram: readString(
+        row.telegram ??
+          row.tgContact ??
+          row.tGContact ??
+          row.TGContact
+      ),
       website: readString(row.website ?? row.Website),
       country: readString(row.country ?? row.Country),
       city: readString(row.city ?? row.City),

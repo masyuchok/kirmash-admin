@@ -79,6 +79,7 @@ export type VatReportDetails = {
   periodYear: number;
   periodMonth: number;
   vat: number;
+  profit: number;
   rows: VatReportSummaryRow[];
 };
 

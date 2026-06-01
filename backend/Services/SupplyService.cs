@@ -59,6 +59,7 @@ public class SupplyService
                         .Select( p => new SupplyDetailsProductItem
                         {
                             ShopifyProductId = p.ShopifyProductId,
+                            ShopifyVariantId = p.ShopifyVariantId,
                             Quantity = p.Quantity,
                             SupplierPrice = p.SupplierPrice,
                             VatRatePercent = p.VatRatePercent,
@@ -136,7 +137,7 @@ public class SupplyService
 
                 previousQuantities = supply.SupplyProducts
                     .Where( p => p.SyncWithShopify )
-                    .GroupBy( p => p.ShopifyProductId.Trim(), StringComparer.OrdinalIgnoreCase )
+                    .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                     .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
                 supply.SupplierId = request.SupplierId;
@@ -155,12 +156,12 @@ public class SupplyService
 
             Dictionary<string, int> newQuantities = requestProducts
                 .Where( p => p.SyncWithShopify )
-                .GroupBy( p => p.ShopifyProductId.Trim(), StringComparer.OrdinalIgnoreCase )
+                .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                 .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
             Dictionary<string, decimal> syncedSalePrices = requestProducts
                 .Where( p => p.SyncWithShopify )
-                .GroupBy( p => p.ShopifyProductId.Trim(), StringComparer.OrdinalIgnoreCase )
+                .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                 .ToDictionary(
                     g => g.Key,
                     g => g.Last().SalePrice,
@@ -211,6 +212,7 @@ public class SupplyService
                 supply.SupplyProducts.Add( new SupplyProduct
                 {
                     ShopifyProductId = item.ShopifyProductId.Trim(),
+                    ShopifyVariantId = (item.ShopifyVariantId ?? string.Empty).Trim(),
                     Quantity = item.Quantity,
                     SupplierPrice = item.SupplierPrice,
                     VatRatePercent = item.VatRatePercent,
@@ -228,5 +230,12 @@ public class SupplyService
             Warning = syncWarning,
             InventoryUpdates = updates
         };
+    }
+
+    private static string BuildShopifySyncKey( string shopifyProductId, string? shopifyVariantId )
+    {
+        string productId = shopifyProductId.Trim();
+        string variantId = (shopifyVariantId ?? string.Empty).Trim();
+        return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
     }
 }

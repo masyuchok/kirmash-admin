@@ -37,6 +37,10 @@ namespace backend.Data
                 entity.Property( sp => sp.ShopifyProductId )
                     .IsRequired()
                     .HasMaxLength( 64 );
+                entity.Property( sp => sp.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 )
+                    .HasDefaultValue( string.Empty );
                 entity.Property( sp => sp.Quantity )
                     .IsRequired();
                 entity.Property( sp => sp.SupplierPrice )
@@ -51,7 +55,7 @@ namespace backend.Data
                 entity.Property( sp => sp.SyncWithShopify )
                     .HasDefaultValue( true );
 
-                entity.HasIndex( sp => new { sp.SupplyId, sp.ShopifyProductId } )
+                entity.HasIndex( sp => new { sp.SupplyId, sp.ShopifyProductId, sp.ShopifyVariantId } )
                     .IsUnique();
             } );
 

@@ -61,15 +61,19 @@ public class ShopifyInventoryService
 
         foreach (string key in allKeys)
         {
-            long? productId = ShopifyIds.TryParseNumericProductId( key.Trim() );
-            if (!productId.HasValue) continue;
+            if (!TryParseSyncKey( key, out long productId, out long? variantId ))
+            {
+                continue;
+            }
 
             int delta = deltas.TryGetValue( key, out int d ) ? d : 0;
             decimal salePrice = syncedSalePrices.TryGetValue( key, out decimal p ) ? p : 0;
 
             if (delta != 0)
             {
-                long inventoryItemId = await GetInventoryItemIdByProductAsync( client, shop, productId.Value, accessToken );
+                long inventoryItemId = variantId.HasValue
+                    ? await GetInventoryItemIdByVariantAsync( client, shop, variantId.Value, accessToken )
+                    : await GetInventoryItemIdByProductAsync( client, shop, productId, accessToken );
                 int current = await GetAvailableQuantityAsync( client, shop, inventoryItemId, locationId, accessToken );
                 int next = Math.Max( 0, current + delta );
                 await SetAvailableQuantityAsync( client, shop, inventoryItemId, locationId, next, accessToken );
@@ -84,8 +88,9 @@ public class ShopifyInventoryService
 
             if (salePrice > 0)
             {
-                long variantId = await GetPrimaryVariantIdByProductAsync( client, shop, productId.Value, accessToken );
-                await SetVariantPriceAsync( client, shop, variantId, salePrice, accessToken );
+                long resolvedVariantId = variantId
+                    ?? await GetPrimaryVariantIdByProductAsync( client, shop, productId, accessToken );
+                await SetVariantPriceAsync( client, shop, resolvedVariantId, salePrice, accessToken );
             }
         }
 
@@ -131,6 +136,68 @@ public class ShopifyInventoryService
         }
 
         return locations[0].GetProperty( "id" ).GetInt64();
+    }
+
+    private static bool TryParseSyncKey( string key, out long productId, out long? variantId )
+    {
+        productId = 0;
+        variantId = null;
+        string trimmed = key.Trim();
+        if (string.IsNullOrEmpty( trimmed ))
+        {
+            return false;
+        }
+
+        string productPart = trimmed;
+        string? variantPart = null;
+        int sep = trimmed.IndexOf( "::", StringComparison.Ordinal );
+        if (sep >= 0)
+        {
+            productPart = trimmed[..sep];
+            variantPart = trimmed[(sep + 2)..];
+        }
+
+        long? parsedProductId = ShopifyIds.TryParseNumericProductId( productPart );
+        if (!parsedProductId.HasValue)
+        {
+            return false;
+        }
+
+        productId = parsedProductId.Value;
+        if (!string.IsNullOrWhiteSpace( variantPart ))
+        {
+            long? parsedVariantId = ShopifyIds.TryParseNumericVariantId( variantPart );
+            if (!parsedVariantId.HasValue)
+            {
+                return false;
+            }
+
+            variantId = parsedVariantId.Value;
+        }
+
+        return true;
+    }
+
+    private static async Task<long> GetInventoryItemIdByVariantAsync(
+        HttpClient client,
+        string shop,
+        long variantId,
+        string accessToken )
+    {
+        using HttpResponseMessage response = await ShopifyAuthorizedHttp.SendAsync(
+            client,
+            accessToken,
+            HttpMethod.Get,
+            ShopifyApi.RestUrl( shop, $"variants/{variantId}.json" )
+        );
+        if (!response.IsSuccessStatusCode)
+        {
+            string body = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException( $"Не ўдалося атрымаць варыянт {variantId} з Shopify: {body}" );
+        }
+
+        using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
+        return json.RootElement.GetProperty( "variant" ).GetProperty( "inventory_item_id" ).GetInt64();
     }
 
     private static async Task<long> GetInventoryItemIdByProductAsync(

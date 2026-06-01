@@ -1,3 +1,5 @@
+# Из корня: docker compose --env-file .env.local up -d
+# Прод:     docker compose --env-file .env.production up -d
 services:
   backend:
     build:
@@ -13,6 +15,7 @@ services:
       - Shopify__ApiSecret=${SHOPIFY_API_SECRET}
       - BaseUrl=${API_URL}
       - ClientUrl=${APP_URL}
+      - Auth__CookieName=${AUTH_COOKIE_NAME}
     depends_on:
       db:
         condition: service_healthy
@@ -21,12 +24,12 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SHOP_DOMAIN: ${SHOP_DOMAIN}
     ports:
       - "${BIND_IP}:${FRONTEND_PORT}:3000"
     environment:
       - AUTH_COOKIE_NAME=${AUTH_COOKIE_NAME}
-      - NEXT_PUBLIC_API_URL=${API_URL}
-      - NEXT_PUBLIC_SHOP_DOMAIN=${SHOP_DOMAIN}
     depends_on:
       - backend
 

@@ -11,6 +11,8 @@ public static class ShopifyGraphqlQueries
                 id
                 name
                 createdAt
+                cancelledAt
+                displayFinancialStatus
                 currentTotalPriceSet {
                   shopMoney { amount }
                 }

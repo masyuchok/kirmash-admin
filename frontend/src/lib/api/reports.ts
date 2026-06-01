@@ -202,6 +202,7 @@ function mapVatReportDetails(row: Record<string, unknown>): VatReportDetails {
     periodYear: readInt(row.periodYear ?? row.PeriodYear),
     periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
     vat: readNumber(row.vat ?? row.Vat),
+    profit: readNumber(row.profit ?? row.Profit),
     rows: mapSummaryRows(rowsRaw),
   };
 }

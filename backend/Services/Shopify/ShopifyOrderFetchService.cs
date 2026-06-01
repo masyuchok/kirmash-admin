@@ -227,6 +227,8 @@ public class ShopifyOrderFetchService
                     : string.Empty;
                 if (string.IsNullOrWhiteSpace( orderId )) continue;
 
+                if (ShouldExcludeOrderFromReports( node )) continue;
+
                 string orderNumber = node.TryGetProperty( "name", out JsonElement nameEl ) && nameEl.ValueKind == JsonValueKind.String
                     ? (nameEl.GetString() ?? orderId)
                     : orderId;
@@ -329,6 +331,47 @@ public class ShopifyOrderFetchService
         );
     }
 
+    private static string ReadCountryCodeFromAddress( JsonElement addressEl )
+    {
+        if (addressEl.TryGetProperty( "countryCode", out JsonElement countryCodeEl ) &&
+            countryCodeEl.ValueKind == JsonValueKind.String)
+        {
+            string code = countryCodeEl.GetString() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace( code )) return code;
+        }
+
+        if (addressEl.TryGetProperty( "countryCodeV2", out JsonElement countryCodeV2El ) &&
+            countryCodeV2El.ValueKind == JsonValueKind.String)
+        {
+            return countryCodeV2El.GetString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool ShouldExcludeOrderFromReports( JsonElement node )
+    {
+        if (node.TryGetProperty( "cancelledAt", out JsonElement cancelledAtEl ) &&
+            cancelledAtEl.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace( cancelledAtEl.GetString() ))
+        {
+            return true;
+        }
+
+        if (node.TryGetProperty( "displayFinancialStatus", out JsonElement statusEl ) &&
+            statusEl.ValueKind == JsonValueKind.String)
+        {
+            string status = statusEl.GetString() ?? string.Empty;
+            if (string.Equals( status, "REFUNDED", StringComparison.OrdinalIgnoreCase ) ||
+                string.Equals( status, "VOIDED", StringComparison.OrdinalIgnoreCase ))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsPolandDelivery( OrderShippingContext shipping ) =>
         string.Equals( shipping.ShippingCountryCode, "PL", StringComparison.OrdinalIgnoreCase ) ||
         (string.IsNullOrWhiteSpace( shipping.ShippingCountryCode ) &&
@@ -343,9 +386,12 @@ public class ShopifyOrderFetchService
     private static bool IsPickupShippingTitle( string shippingTitleLower ) =>
         shippingTitleLower.Contains( "pickup" ) ||
         shippingTitleLower.Contains( "pick up" ) ||
+        shippingTitleLower.Contains( "pick-up" ) ||
         shippingTitleLower.Contains( "odbiór" ) ||
         shippingTitleLower.Contains( "odbior" ) ||
-        shippingTitleLower.Contains( "самовывоз" );
+        shippingTitleLower.Contains( "odbiór w sklepie" ) ||
+        shippingTitleLower.Contains( "самовывоз" ) ||
+        shippingTitleLower.Contains( "самовивіз" );
 
     private static bool IsInRequestedMonth(
         int year,
@@ -561,14 +607,12 @@ public class ShopifyOrderFetchService
     private static string ReadCountryCode( JsonElement node, string addressProperty )
     {
         if (!node.TryGetProperty( addressProperty, out JsonElement addressEl ) ||
-            addressEl.ValueKind != JsonValueKind.Object ||
-            !addressEl.TryGetProperty( "countryCodeV2", out JsonElement countryCodeEl ) ||
-            countryCodeEl.ValueKind != JsonValueKind.String)
+            addressEl.ValueKind != JsonValueKind.Object)
         {
             return string.Empty;
         }
 
-        return countryCodeEl.GetString() ?? string.Empty;
+        return ReadCountryCodeFromAddress( addressEl );
     }
 
     private static void AddOrdersToSoldMapSince(

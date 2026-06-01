@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
@@ -28,6 +28,12 @@ const SuppliersClient = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(null);
   const [inventorySupplierName, setInventorySupplierName] = useState('');
+
+  const reloadSuppliers = useCallback(async () => {
+    const rows = await fetchSuppliers();
+    setSuppliers(rows);
+    setLoadError(null);
+  }, []);
 
   const filteredSuppliers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -106,12 +112,7 @@ const SuppliersClient = () => {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchSuppliers()
-      .then((rows) => {
-        if (cancelled) return;
-        setSuppliers(rows);
-        setLoadError(null);
-      })
+    reloadSuppliers()
       .catch((err: unknown) => {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў');
@@ -123,7 +124,7 @@ const SuppliersClient = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadSuppliers]);
 
   if (loading) {
     return <LoadingSpinner label="Загрузка пастаўшчыкоў..." />;
@@ -133,7 +134,10 @@ const SuppliersClient = () => {
     case ViewMode.AddSupplier:
       return (
         <AddSupplierForm
-          onSuccess={() => setMode(ViewMode.Default)}
+          onSuccess={async () => {
+            await reloadSuppliers();
+            setMode(ViewMode.Default);
+          }}
           onCancel={() => setMode(ViewMode.Default)}
         />
       );

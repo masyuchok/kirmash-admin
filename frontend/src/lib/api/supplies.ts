@@ -119,6 +119,7 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
         const r = row as Record<string, unknown>;
         return {
           shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
+          shopifyVariantId: String(r.shopifyVariantId ?? r.ShopifyVariantId ?? ''),
           quantity: readInt(r.quantity ?? r.Quantity),
           supplierPrice: readNumber(r.supplierPrice ?? r.SupplierPrice),
           vatRatePercent: readNumber(r.vatRatePercent ?? r.VatRatePercent ?? 23),

@@ -7,7 +7,42 @@ import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
-import type { ProductWithSuppliers } from '@/types/product';
+import { readFieldValue } from '@/lib/supply-draft';
+import { makeSupplyLineKey } from '@/lib/supply-line-key';
+import type { ProductWithSuppliers, ProductVariant } from '@/types/product';
+
+function visibleVariants(product: ProductWithSuppliers): ProductVariant[] {
+  return (product.variants ?? []).filter(
+    (v) => (v.variantId?.trim() || v.variantName?.trim()) && v.variantName !== 'Default Title'
+  );
+}
+
+type PickerLine = {
+  product: ProductWithSuppliers;
+  variant: ProductVariant | null;
+  lineKey: string;
+};
+
+function expandPickerLines(products: ProductWithSuppliers[]): PickerLine[] {
+  return products.flatMap((product) => {
+    const variants = visibleVariants(product);
+    if (variants.length > 1) {
+      return variants.map((variant) => ({
+        product,
+        variant,
+        lineKey: makeSupplyLineKey(product.shopifyProductId, variant.variantId),
+      }));
+    }
+    const only = variants[0] ?? null;
+    return [
+      {
+        product,
+        variant: only,
+        lineKey: makeSupplyLineKey(product.shopifyProductId, only?.variantId),
+      },
+    ];
+  });
+}
 
 type Props = {
   supplyId?: string;
@@ -88,12 +123,14 @@ export default function SupplyProductPickerClient({
     return q ? byType.filter((r) => r.productName.toLowerCase().includes(q)) : byType;
   }, [rows, selectedTypes, searchQuery]);
 
-  const totalPages = Math.max(1, Math.ceil(visibleRows.length / pageSize));
-  const pagedRows = useMemo(() => {
+  const pickerLines = useMemo(() => expandPickerLines(visibleRows), [visibleRows]);
+
+  const totalPages = Math.max(1, Math.ceil(pickerLines.length / pageSize));
+  const pagedLines = useMemo(() => {
     const safePage = Math.min(page, totalPages);
     const start = (safePage - 1) * pageSize;
-    return visibleRows.slice(start, start + pageSize);
-  }, [visibleRows, page, totalPages]);
+    return pickerLines.slice(start, start + pageSize);
+  }, [pickerLines, page, totalPages]);
 
   useEffect(() => {
     setPage(1);
@@ -149,18 +186,18 @@ export default function SupplyProductPickerClient({
     };
   }, [typeMenuOpen, typeTriggerEl, typeMenuEl]);
 
-  const toggleProduct = (id: string) => {
+  const toggleLine = (lineKey: string) => {
     setSelectedIds((prev) => {
-      if (prev.includes(id)) {
-        return prev.filter((x) => x !== id);
+      if (prev.includes(lineKey)) {
+        return prev.filter((x) => x !== lineKey);
       }
-      setDraftQuantities((q) => (q[id] ? q : { ...q, [id]: '1' }));
-      return [...prev, id];
+      setDraftQuantities((q) => (q[lineKey] ? q : { ...q, [lineKey]: '1' }));
+      return [...prev, lineKey];
     });
   };
 
-  const updateQuantity = (id: string, value: string) => {
-    setDraftQuantities((prev) => ({ ...prev, [id]: value }));
+  const updateQuantity = (lineKey: string, value: string) => {
+    setDraftQuantities((prev) => ({ ...prev, [lineKey]: value }));
   };
 
   const returnToSupply = () => {
@@ -199,14 +236,14 @@ export default function SupplyProductPickerClient({
         <button
           type="button"
           onClick={openShopifyCreate}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover"
+          className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
         >
           Дадаць новы тавар
         </button>
         <button
           type="button"
           onClick={returnToSupply}
-          className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-primary-hover"
         >
           Дадаць выбраныя ({selectedIds.length})
         </button>
@@ -222,7 +259,7 @@ export default function SupplyProductPickerClient({
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.currentTarget.value)}
+                onChange={(e) => setSearchQuery(readFieldValue(e))}
                 placeholder="Пошук па назве..."
                 className="w-full border-0 bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none"
               />
@@ -265,14 +302,14 @@ export default function SupplyProductPickerClient({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {pagedRows.map((row) => (
-                  <tr key={row.shopifyProductId} className="transition hover:bg-gray-50/80">
+                {pagedLines.map(({ product: row, variant, lineKey }) => (
+                  <tr key={lineKey} className="transition hover:bg-gray-50/80">
                     <td className="px-4 py-3.5">
                       <input
                         type="checkbox"
                         className="size-4 rounded border-gray-300 accent-primary focus:ring-primary"
-                        checked={selectedIds.includes(row.shopifyProductId)}
-                        onChange={() => toggleProduct(row.shopifyProductId)}
+                        checked={selectedIds.includes(lineKey)}
+                        onChange={() => toggleLine(lineKey)}
                       />
                     </td>
                     <td className="px-6 py-3.5 font-medium text-gray-900">
@@ -286,15 +323,11 @@ export default function SupplyProductPickerClient({
                         )}
                         <div className="space-y-1">
                           <a href={row.productAdminUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline">
-                            {row.productName}
+                            {variant?.variantName ? row.productName : row.productName}
                             <FiExternalLink className="size-3.5 text-gray-500" />
                           </a>
-                          {row.variants.length > 0 && (
-                            <div className="space-y-0.5 text-xs font-normal text-gray-500">
-                              {row.variants.map((variant) => (
-                                <p key={variant.variantId || variant.variantName}>- {variant.variantName}</p>
-                              ))}
-                            </div>
+                          {variant?.variantName && (
+                            <p className="text-xs font-normal text-gray-500">{variant.variantName}</p>
                           )}
                         </div>
                       </div>
@@ -304,28 +337,30 @@ export default function SupplyProductPickerClient({
                         type="number"
                         min="0"
                         step="1"
-                        value={draftQuantities[row.shopifyProductId] ?? ''}
-                        onChange={(e) => updateQuantity(row.shopifyProductId, e.currentTarget.value)}
+                        value={draftQuantities[lineKey] ?? ''}
+                        onChange={(e) => updateQuantity(lineKey, readFieldValue(e))}
                         onFocus={() => {
-                          if (!selectedIds.includes(row.shopifyProductId)) {
-                            setSelectedIds((prev) => [...prev, row.shopifyProductId]);
+                          if (!selectedIds.includes(lineKey)) {
+                            setSelectedIds((prev) => [...prev, lineKey]);
                           }
                           setDraftQuantities((prev) =>
-                            prev[row.shopifyProductId] ? prev : { ...prev, [row.shopifyProductId]: '1' }
+                            prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
                           );
                         }}
                         className="mx-auto w-20 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
                         placeholder="0"
                       />
                     </td>
-                    <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">{row.shopifyQuantityInStock}</td>
+                    <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">
+                      {variant ? variant.quantityInStock : row.shopifyQuantityInStock}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        {visibleRows.length > 0 && (
+        {pickerLines.length > 0 && (
           <div className="flex items-center justify-between border-t border-gray-100 px-6 py-3">
             <p className="text-sm text-gray-500">
               Старонка {Math.min(page, totalPages)} з {totalPages}

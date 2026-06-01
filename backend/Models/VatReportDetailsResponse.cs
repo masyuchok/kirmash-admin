@@ -6,6 +6,7 @@ namespace backend.Models
         public int PeriodYear { get; set; }
         public int PeriodMonth { get; set; }
         public decimal Vat { get; set; }
+        public decimal Profit { get; set; }
         public List<VatReportDetailsSummaryRow> Rows { get; set; } = new();
     }
 

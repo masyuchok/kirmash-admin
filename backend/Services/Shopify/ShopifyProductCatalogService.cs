@@ -89,7 +89,7 @@ public class ShopifyProductCatalogService
 
                 string variantId = variantNode.TryGetProperty( "id", out JsonElement variantIdEl ) &&
                                    variantIdEl.ValueKind == JsonValueKind.String
-                    ? ShopifyIds.NormalizeProductId( variantIdEl.GetString() ?? string.Empty )
+                    ? ShopifyIds.NormalizeVariantId( variantIdEl.GetString() ?? string.Empty )
                     : string.Empty;
                 string variantName = variantNode.TryGetProperty( "title", out JsonElement variantTitleEl ) &&
                                      variantTitleEl.ValueKind == JsonValueKind.String

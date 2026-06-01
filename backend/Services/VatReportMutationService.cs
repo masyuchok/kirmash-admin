@@ -7,6 +7,9 @@ namespace backend.Services;
 
 public class VatReportMutationService
 {
+    /// <summary>Temporarily skip Shopify inventory changes for cash sales (read_locations scope pending).</summary>
+    private const bool SyncCashSaleInventoryWithShopify = false;
+
     private readonly AppDbContext _db;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ShopifyInventoryService _shopifyInventory;
@@ -645,22 +648,24 @@ public class VatReportMutationService
             throw new InvalidOperationException( "Наяўныя продажы даступныя толькі ў польскай справаздачы." );
         }
 
-        ShopifySession session = ShopifySessionReader.Require(
-            _httpContextAccessor,
-            "Няма Shopify-кантэксту для абнаўлення склада."
-        );
-
         string productId = ShopifyIds.NormalizeProductId( request.ShopifyProductId.Trim() );
         string title = string.IsNullOrWhiteSpace( request.ProductTitle ) ? productId : request.ProductTitle.Trim();
         decimal unitPrice = VatReportHelpers.Round2( request.UnitPrice );
         decimal gross = VatReportHelpers.Round2( unitPrice * request.Quantity );
 
-        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
-            session.Shop,
-            session.AccessToken,
-            productId,
-            -request.Quantity
-        );
+        if (SyncCashSaleInventoryWithShopify)
+        {
+            ShopifySession session = ShopifySessionReader.Require(
+                _httpContextAccessor,
+                "Няма Shopify-кантэксту для абнаўлення склада."
+            );
+            await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+                session.Shop,
+                session.AccessToken,
+                productId,
+                -request.Quantity
+            );
+        }
 
         VatReportCashSale sale = new()
         {
@@ -685,17 +690,19 @@ public class VatReportMutationService
             throw new InvalidOperationException( "Запіс наяўнай продажы не знойдзены." );
         }
 
-        ShopifySession session = ShopifySessionReader.Require(
-            _httpContextAccessor,
-            "Няма Shopify-кантэксту для абнаўлення склада."
-        );
-
-        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
-            session.Shop,
-            session.AccessToken,
-            sale.ShopifyProductId,
-            sale.Quantity
-        );
+        if (SyncCashSaleInventoryWithShopify)
+        {
+            ShopifySession session = ShopifySessionReader.Require(
+                _httpContextAccessor,
+                "Няма Shopify-кантэксту для абнаўлення склада."
+            );
+            await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+                session.Shop,
+                session.AccessToken,
+                sale.ShopifyProductId,
+                sale.Quantity
+            );
+        }
 
         _db.VatReportCashSales.Remove( sale );
         await _db.SaveChangesAsync();

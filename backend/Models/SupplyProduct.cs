@@ -8,6 +8,8 @@ namespace backend.Models
         public Supply Supply { get; set; } = default!;
 
         public string ShopifyProductId { get; set; } = string.Empty;
+        /// <summary>Empty when the line applies to the product default (legacy) or single implicit variant.</summary>
+        public string ShopifyVariantId { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public decimal SupplierPrice { get; set; }
         public decimal VatRatePercent { get; set; } = 23m;
