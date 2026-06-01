@@ -22,6 +22,10 @@ namespace backend.Data
         public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
         public DbSet<InventoryProductSale> InventoryProductSales { get; set; } = default!;
         public DbSet<InventorySalesSyncState> InventorySalesSyncStates { get; set; } = default!;
+        public DbSet<FinancePerson> FinancePersons { get; set; } = default!;
+        public DbSet<FinanceMovement> FinanceMovements { get; set; } = default!;
+        public DbSet<FinanceRecurringExpense> FinanceRecurringExpenses { get; set; } = default!;
+        public DbSet<FinanceRecurringApplication> FinanceRecurringApplications { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -279,6 +283,87 @@ namespace backend.Data
                     .IsRequired();
                 entity.Property( x => x.UpdatedAtUtc )
                     .IsRequired();
+            } );
+
+            modelBuilder.Entity<FinancePerson>( entity =>
+            {
+                entity.Property( x => x.Name )
+                    .IsRequired()
+                    .HasMaxLength( 128 );
+                entity.Property( x => x.SortOrder )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+                entity.HasIndex( x => x.Name )
+                    .IsUnique();
+            } );
+
+            modelBuilder.Entity<FinanceMovement>( entity =>
+            {
+                entity.HasOne( x => x.Person )
+                    .WithMany( p => p.Movements )
+                    .HasForeignKey( x => x.PersonId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.HasOne( x => x.RecurringExpense )
+                    .WithMany( r => r.GeneratedMovements )
+                    .HasForeignKey( x => x.RecurringExpenseId )
+                    .OnDelete( DeleteBehavior.SetNull );
+
+                entity.Property( x => x.Kind )
+                    .IsRequired();
+                entity.Property( x => x.Amount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.Description )
+                    .IsRequired()
+                    .HasMaxLength( 1024 );
+                entity.Property( x => x.MovementDate )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<FinanceRecurringExpense>( entity =>
+            {
+                entity.HasOne( x => x.Person )
+                    .WithMany( p => p.RecurringExpenses )
+                    .HasForeignKey( x => x.PersonId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.Property( x => x.Kind )
+                    .IsRequired();
+                entity.Property( x => x.Amount )
+                    .HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.Description )
+                    .IsRequired()
+                    .HasMaxLength( 1024 );
+                entity.Property( x => x.DayOfMonth )
+                    .IsRequired();
+                entity.Property( x => x.IsActive )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<FinanceRecurringApplication>( entity =>
+            {
+                entity.HasOne( x => x.RecurringExpense )
+                    .WithMany( r => r.Applications )
+                    .HasForeignKey( x => x.RecurringExpenseId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.HasOne( x => x.Movement )
+                    .WithMany()
+                    .HasForeignKey( x => x.MovementId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.Property( x => x.AppliedAtUtc )
+                    .IsRequired();
+
+                entity.HasIndex( x => new { x.RecurringExpenseId, x.Year, x.Month } )
+                    .IsUnique();
             } );
         }
     }

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   FiBarChart2,
+  FiDollarSign,
   FiFileText,
   FiPackage,
   FiSettings,
@@ -20,6 +21,7 @@ const nav = [
   { href: '/products', label: 'Прадукты', icon: FiShoppingBag },
   { href: '/sales', label: 'Продажы', icon: FiTrendingUp },
   { href: '/documents', label: 'Дакументы', icon: FiFileText },
+  { href: '/finances', label: 'Фінансы', icon: FiDollarSign },
   { href: '/settings', label: 'Налады', icon: FiSettings },
 ] as const;
 

@@ -28,18 +28,40 @@ namespace backend.Controllers
             _httpClientFactory = httpClientFactory;
         }
 
+        /// <summary>Development-only: shows OAuth redirect_uri to add in Shopify Partners.</summary>
+        [HttpGet( "setup-info" )]
+        public IActionResult SetupInfo()
+        {
+            if (!_env.IsDevelopment( ))
+            {
+                return NotFound( );
+            }
+
+            string? redirectUri = TryGetOAuthRedirectUri( out string? error );
+            if (redirectUri is null)
+            {
+                return BadRequest( new { error } );
+            }
+
+            return Ok( new
+            {
+                redirectUri,
+                baseUrl = GetOAuthBaseUrl( ),
+                clientUrl = GetRequiredPublicUrl( "ClientUrl" ),
+                hint = "Add redirectUri to Shopify app → Allowed redirection URL(s).",
+            } );
+        }
+
         [HttpGet( "login" )]
         public IActionResult Login( [FromQuery] string shop )
         {
             string? clientId = _config["Shopify:ApiKey"];
             string? scopes = _config["Shopify:Scopes"];
-            string? baseUrl = GetRequiredPublicUrl( "BaseUrl" );
-            if (baseUrl is null)
+            string? redirectUri = TryGetOAuthRedirectUri( out string? configError );
+            if (redirectUri is null)
             {
-                return StatusCode( 500, "BaseUrl is not configured." );
+                return StatusCode( 500, configError ?? "OAuth redirect URI is not configured." );
             }
-
-            string redirectUri = $"{baseUrl}/auth/callback";
 
             string shopifyUrl = $"https://{shop}/admin/oauth/authorize" +
                              $"?client_id={clientId}" +
@@ -83,11 +105,13 @@ namespace backend.Controllers
             string jwt = _jwt.GenerateJwtToken( shop, tokenResponse.access_token );
 
             string cookieName = _config["Auth:CookieName"] ?? "jwt_token";
+            bool useSecureCookie = Request.IsHttps
+                || (!_env.IsDevelopment( ) && !IsLocalhostRequest( ));
             CookieOptions cookieOptions = new CookieOptions
             {
                 HttpOnly = true,
-                Secure = true,
-                SameSite = SameSiteMode.None,
+                Secure = useSecureCookie,
+                SameSite = useSecureCookie ? SameSiteMode.None : SameSiteMode.Lax,
                 Path = "/",
             };
 
@@ -106,6 +130,41 @@ namespace backend.Controllers
 
             return Redirect( $"{clientUrl}/" );
         }
+
+        /// <summary>
+        /// Public API base for OAuth callback. In local dev with Next.js proxy, always {ClientUrl}/api
+        /// so redirect_uri matches http://localhost:3000/api/auth/callback (not legacy :7183).
+        /// </summary>
+        private string? GetOAuthBaseUrl()
+        {
+            string? clientUrl = GetRequiredPublicUrl( "ClientUrl" );
+            if (_env.IsDevelopment( )
+                && clientUrl is not null
+                && (clientUrl.Contains( "localhost", StringComparison.OrdinalIgnoreCase )
+                    || clientUrl.Contains( "127.0.0.1", StringComparison.OrdinalIgnoreCase )))
+            {
+                return $"{clientUrl}/api";
+            }
+
+            return GetRequiredPublicUrl( "BaseUrl" );
+        }
+
+        private string? TryGetOAuthRedirectUri( out string? error )
+        {
+            error = null;
+            string? baseUrl = GetOAuthBaseUrl( );
+            if (baseUrl is null)
+            {
+                error = "BaseUrl / ClientUrl is not configured.";
+                return null;
+            }
+
+            return $"{baseUrl}/auth/callback";
+        }
+
+        private bool IsLocalhostRequest() =>
+            Request.Host.Host.Contains( "localhost", StringComparison.OrdinalIgnoreCase )
+            || Request.Host.Host is "127.0.0.1";
 
         private string? GetRequiredPublicUrl( string key )
         {

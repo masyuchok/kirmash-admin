@@ -76,6 +76,7 @@ builder.Services.AddScoped<VatReportQueryService>();
 builder.Services.AddScoped<VatReportGenerationService>();
 builder.Services.AddScoped<VatReportMutationService>();
 builder.Services.AddScoped<VatReportService>();
+builder.Services.AddScoped<FinanceService>();
 builder.Services.AddHttpContextAccessor();
 
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
