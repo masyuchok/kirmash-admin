@@ -22,11 +22,14 @@ public static class ShopifyGraphqlQueries
                   nodes {
                     title
                     originalPriceSet { shopMoney { amount } }
+                    discountedPriceSet { shopMoney { amount } }
+                    currentDiscountedPriceSet { shopMoney { amount } }
                   }
                 }
                 lineItems(first: 250) {
                   nodes {
                     quantity
+                    currentQuantity
                     title
                     originalUnitPriceSet { shopMoney { amount } }
                     originalTotalSet { shopMoney { amount } }
@@ -77,7 +80,24 @@ public static class ShopifyGraphqlQueries
                 legacyResourceId
                 title
                 productType
+                vendor
+                tags
                 totalInventory
+                authorMetafield: metafield(namespace: "custom", key: "author") {
+                  value
+                }
+                autorMetafield: metafield(namespace: "custom", key: "autor") {
+                  value
+                }
+                metafields(first: 25) {
+                  edges {
+                    node {
+                      namespace
+                      key
+                      value
+                    }
+                  }
+                }
                 variants(first: 100) {
                   edges {
                     node {

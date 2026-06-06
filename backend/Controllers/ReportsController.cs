@@ -31,6 +31,20 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet( "periods" )]
+        public async Task<ActionResult<List<VatReportPeriodListItem>>> GetPeriodSummaries()
+        {
+            try
+            {
+                List<VatReportPeriodListItem> periods = await _service.GetPeriodSummariesAsync();
+                return Ok( periods );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання справаздач", details = ex.Message } );
+            }
+        }
+
         [HttpPost( "generate" )]
         public async Task<ActionResult<VatReportListItem>> Generate( [FromBody] VatReportGenerateRequest request )
         {
@@ -104,6 +118,42 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка атрымання замоў за месяц", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "{id:int}/lock" )]
+        public async Task<ActionResult<List<VatReportListItem>>> Lock( int id )
+        {
+            try
+            {
+                List<VatReportListItem> updated = await _service.SetLockedAsync( id, locked: true );
+                return Ok( updated );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка блакавання справаздачы", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "{id:int}/unlock" )]
+        public async Task<ActionResult<List<VatReportListItem>>> Unlock( int id )
+        {
+            try
+            {
+                List<VatReportListItem> updated = await _service.SetLockedAsync( id, locked: false );
+                return Ok( updated );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка разблакавання справаздачы", details = ex.Message } );
             }
         }
 
@@ -258,6 +308,24 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPut( "expenses/{expenseId:int}" )]
+        public async Task<IActionResult> UpdateExpense( int expenseId, [FromBody] VatReportExpenseCreateRequest request )
+        {
+            try
+            {
+                await _service.UpdateExpenseAsync( expenseId, request );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка змянення расходу", details = ex.Message } );
+            }
+        }
+
         [HttpDelete( "expenses/{expenseId:int}" )]
         public async Task<IActionResult> DeleteExpense( int expenseId )
         {
@@ -273,6 +341,24 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка выдалення расходу", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "{id:int}/foreign-rows" )]
+        public async Task<IActionResult> AddForeignRow( int id, [FromBody] VatReportForeignRowCreateRequest request )
+        {
+            try
+            {
+                string shopifyOrderId = await _service.AddForeignRowAsync( id, request );
+                return Ok( new { shopifyOrderId } );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка дадання замежнага радка", details = ex.Message } );
             }
         }
 

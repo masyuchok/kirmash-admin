@@ -7,6 +7,40 @@ internal static class VatReportHelpers
     public static decimal Round2( decimal value ) =>
         Math.Round( value, 2, MidpointRounding.AwayFromZero );
 
+    public static (decimal Gross, decimal Vat, decimal Net) FinalizeSupplierPaymentAmounts(
+        decimal grossAmount,
+        decimal vatAmount )
+    {
+        decimal gross = Round2( grossAmount );
+        decimal vat = Round2( Math.Clamp( vatAmount, 0m, gross ) );
+        decimal net = Round2( gross - vat );
+        return (gross, vat, net);
+    }
+
+    public static decimal ComputeVatFromProductLines(
+        IEnumerable<(decimal LineGross, decimal VatRatePercent)> lines,
+        bool applyVat )
+    {
+        if (!applyVat)
+        {
+            return 0m;
+        }
+
+        decimal total = 0m;
+        foreach ((decimal lineGross, decimal vatRatePercent) in lines)
+        {
+            if (lineGross <= 0m || vatRatePercent <= 0m)
+            {
+                continue;
+            }
+
+            decimal rate = vatRatePercent / 100m;
+            total += lineGross * rate / (1m + rate);
+        }
+
+        return Round2( total );
+    }
+
     public static void ValidatePeriod( int year, int month )
     {
         if (month < 1 || month > 12)

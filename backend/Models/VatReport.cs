@@ -13,6 +13,7 @@ namespace backend.Models
         public decimal VatToPay { get; set; }
         public string[] Documents { get; set; } = [];
         public string[] ShopifyOrderIds { get; set; } = [];
+        public bool IsLocked { get; set; }
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public List<VatReportRow> Rows { get; set; } = new();
         public List<VatReportExpense> Expenses { get; set; } = new();

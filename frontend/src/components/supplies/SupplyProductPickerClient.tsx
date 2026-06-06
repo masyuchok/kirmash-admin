@@ -7,7 +7,7 @@ import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
-import { readFieldValue } from '@/lib/supply-draft';
+import { formatProductNameWithAuthor, readFieldValue } from '@/lib/supply-draft';
 import { makeSupplyLineKey } from '@/lib/supply-line-key';
 import type { ProductWithSuppliers, ProductVariant } from '@/types/product';
 
@@ -315,15 +315,25 @@ export default function SupplyProductPickerClient({
                     <td className="px-6 py-3.5 font-medium text-gray-900">
                       <div className="flex items-start gap-3">
                         {row.mainImageUrl ? (
-                          <a href={row.mainImageUrl} target="_blank" rel="noopener noreferrer">
-                            <img src={row.mainImageUrl} alt={row.productName} className="size-8 rounded-md border border-gray-200 object-cover" />
+                          <a
+                            href={row.mainImageUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex overflow-hidden rounded-md border border-gray-200 bg-white"
+                          >
+                            <img
+                              src={row.mainImageUrl}
+                              alt={row.productName}
+                              className="h-12 w-8 object-cover object-center"
+                              loading="lazy"
+                            />
                           </a>
                         ) : (
-                          <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
+                          <div className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100" />
                         )}
                         <div className="space-y-1">
                           <a href={row.productAdminUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline">
-                            {variant?.variantName ? row.productName : row.productName}
+                            {formatProductNameWithAuthor(row.productName, row.productAuthor)}
                             <FiExternalLink className="size-3.5 text-gray-500" />
                           </a>
                           {variant?.variantName && (

@@ -160,7 +160,9 @@ public class ShopifyOrderFetchService
                 {
                     Name = name,
                     ShippingAddress = FormatAddress( shippingAddr ),
-                    BillingAddress = FormatAddress( billingAddr )
+                    BillingAddress = FormatAddress( billingAddr ),
+                    ShippingCountryCode = ReadCountryCode( shippingAddr ),
+                    BillingCountryCode = ReadCountryCode( billingAddr )
                 };
             }
             }
@@ -251,9 +253,7 @@ public class ShopifyOrderFetchService
                     OrderId = orderId,
                     OrderNumber = orderNumber,
                     CreatedAtUtc = createdAt,
-                    CurrentTotalGross = scope == ShopifyOrderScope.Poland
-                        ? ReadMoney( node, "currentTotalPriceSet" )
-                        : 0m,
+                    CurrentTotalGross = Round2( ReadMoney( node, "currentTotalPriceSet" ) ),
                     ShippingGross = Round2( shippingGross ),
                     Items = items
                 };
@@ -458,12 +458,20 @@ public class ShopifyOrderFetchService
 
         foreach (JsonElement itemNode in itemNodesEl.EnumerateArray())
         {
-            int quantity = itemNode.TryGetProperty( "quantity", out JsonElement qtyEl ) &&
-                           qtyEl.ValueKind == JsonValueKind.Number &&
-                           qtyEl.TryGetInt32( out int parsedQty )
+            int originalQuantity = itemNode.TryGetProperty( "quantity", out JsonElement qtyEl ) &&
+                                   qtyEl.ValueKind == JsonValueKind.Number &&
+                                   qtyEl.TryGetInt32( out int parsedQty )
                 ? parsedQty
                 : 0;
-            if (quantity <= 0) continue;
+            int currentQuantity = originalQuantity;
+            if (itemNode.TryGetProperty( "currentQuantity", out JsonElement currentQtyEl ) &&
+                currentQtyEl.ValueKind == JsonValueKind.Number &&
+                currentQtyEl.TryGetInt32( out int parsedCurrentQty ))
+            {
+                currentQuantity = parsedCurrentQty;
+            }
+
+            if (currentQuantity <= 0) continue;
 
             string title = itemNode.TryGetProperty( "title", out JsonElement titleEl ) &&
                            titleEl.ValueKind == JsonValueKind.String
@@ -474,7 +482,7 @@ public class ShopifyOrderFetchService
             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
             decimal discountedTotal = ReadMoney( itemNode, "discountedTotalSet" );
-            decimal lineTotalGross = originalTotal > 0m ? originalTotal : unitPrice * quantity;
+            decimal lineTotalGross = originalTotal > 0m ? originalTotal : unitPrice * originalQuantity;
             if (lineTotalGross <= 0m && discountedTotal > 0m)
             {
                 lineTotalGross = discountedTotal;
@@ -483,7 +491,7 @@ public class ShopifyOrderFetchService
             if (lineTotalGross <= 0m) continue;
             if (unitPrice <= 0m)
             {
-                unitPrice = quantity > 0 ? Round2( lineTotalGross / quantity ) : 0m;
+                unitPrice = originalQuantity > 0 ? Round2( lineTotalGross / originalQuantity ) : 0m;
             }
 
             decimal allocatedDiscountTotal = SumDiscountAllocations( itemNode );
@@ -496,10 +504,18 @@ public class ShopifyOrderFetchService
                 lineTotalGross = discountedTotal;
             }
 
+            if (originalQuantity > 0 && currentQuantity < originalQuantity)
+            {
+                lineTotalGross = Round2( lineTotalGross * currentQuantity / originalQuantity );
+                unitPrice = Round2( lineTotalGross / currentQuantity );
+            }
+
+            if (lineTotalGross <= 0m) continue;
+
             items.Add( new ShopifyLineItemDto
             {
                 ShopifyProductId = productId,
-                Quantity = quantity,
+                Quantity = currentQuantity,
                 UnitPrice = unitPrice,
                 LineTotalGross = Round2( lineTotalGross ),
                 ProductType = productType,
@@ -598,6 +614,20 @@ public class ShopifyOrderFetchService
 
         foreach (JsonElement shippingNode in shippingNodesEl.EnumerateArray())
         {
+            decimal currentPrice = ReadMoney( shippingNode, "currentDiscountedPriceSet" );
+            if (currentPrice > 0m)
+            {
+                shippingGross += currentPrice;
+                continue;
+            }
+
+            decimal discountedPrice = ReadMoney( shippingNode, "discountedPriceSet" );
+            if (discountedPrice > 0m)
+            {
+                shippingGross += discountedPrice;
+                continue;
+            }
+
             shippingGross += ReadMoney( shippingNode, "originalPriceSet" );
         }
 
@@ -698,14 +728,77 @@ public class ShopifyOrderFetchService
     private static string FormatAddress( JsonElement addr )
     {
         if (addr.ValueKind != JsonValueKind.Object) return string.Empty;
+        string country = ResolveCountryLabel(
+            ReadString( addr, "country" ),
+            ReadString( addr, "countryCodeV2" )
+        );
         return string.Join( ", ", new[]
         {
             ReadString( addr, "address1" ),
             ReadString( addr, "address2" ),
             ReadString( addr, "city" ),
             ReadString( addr, "zip" ),
-            ReadString( addr, "country" )
+            country
         }.Where( x => !string.IsNullOrWhiteSpace( x ) ) );
+    }
+
+    private static string ResolveCountryLabel( string country, string countryCode )
+    {
+        if (!string.IsNullOrWhiteSpace( country ))
+        {
+            return country.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace( countryCode ))
+        {
+            return string.Empty;
+        }
+
+        return CountryCodeToName( countryCode ) ?? countryCode.Trim().ToUpperInvariant();
+    }
+
+    private static string? CountryCodeToName( string countryCode ) =>
+        countryCode.Trim().ToUpperInvariant() switch
+        {
+            "PL" => "Poland",
+            "AT" => "Austria",
+            "DE" => "Germany",
+            "NL" => "Netherlands",
+            "BE" => "Belgium",
+            "LT" => "Lithuania",
+            "LV" => "Latvia",
+            "EE" => "Estonia",
+            "CZ" => "Czechia",
+            "SK" => "Slovakia",
+            "HU" => "Hungary",
+            "RO" => "Romania",
+            "BG" => "Bulgaria",
+            "HR" => "Croatia",
+            "SI" => "Slovenia",
+            "FR" => "France",
+            "IT" => "Italy",
+            "ES" => "Spain",
+            "PT" => "Portugal",
+            "SE" => "Sweden",
+            "NO" => "Norway",
+            "DK" => "Denmark",
+            "FI" => "Finland",
+            "IE" => "Ireland",
+            "GB" => "United Kingdom",
+            "US" => "United States",
+            "CA" => "Canada",
+            "CH" => "Switzerland",
+            "UA" => "Ukraine",
+            "BY" => "Belarus",
+            "GR" => "Greece",
+            _ => null
+        };
+
+    private static string ReadCountryCode( JsonElement addr )
+    {
+        if (addr.ValueKind != JsonValueKind.Object) return string.Empty;
+        string code = ReadString( addr, "countryCodeV2" );
+        return string.IsNullOrWhiteSpace( code ) ? string.Empty : code.Trim().ToUpperInvariant();
     }
 
     private static decimal Round2( decimal value ) => Math.Round( value, 2, MidpointRounding.AwayFromZero );

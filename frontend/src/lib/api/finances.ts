@@ -23,6 +23,8 @@ export type FinanceMovement = {
   movementDate: string;
   isFromRecurring: boolean;
   recurringExpenseId: number | null;
+  isVatAutoPayment: boolean;
+  isVatAmountLocked: boolean;
 };
 
 export type FinanceRecurringExpense = {
@@ -95,6 +97,8 @@ function mapMovement(row: Record<string, unknown>): FinanceMovement {
     isFromRecurring: Boolean(pick(row, 'isFromRecurring', 'IsFromRecurring')),
     recurringExpenseId:
       pick<number | null>(row, 'recurringExpenseId', 'RecurringExpenseId') ?? null,
+    isVatAutoPayment: Boolean(pick(row, 'isVatAutoPayment', 'IsVatAutoPayment')),
+    isVatAmountLocked: Boolean(pick(row, 'isVatAmountLocked', 'IsVatAmountLocked')),
   };
 }
 
@@ -277,6 +281,22 @@ export async function deleteFinanceMovement(id: number): Promise<void> {
   if (!res.ok) {
     throw new Error(await readErrorMessage(res, 'Не ўдалося выдаліць рух'));
   }
+}
+
+export async function setVatPaymentAmountLocked(
+  movementId: number,
+  locked: boolean,
+): Promise<FinanceMovement> {
+  const res = await fetch(`${getApiBaseUrl()}/Finances/movements/${movementId}/vat-lock`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({ locked }),
+  });
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, 'Не ўдалося змяніць фіксацыю VAT'));
+  }
+  return mapMovement((await res.json()) as Record<string, unknown>);
 }
 
 export type FinanceRecurringPayload = {

@@ -111,6 +111,21 @@ namespace backend.Controllers
             return Ok();
         }
 
+        [HttpPut( "movements/{id:int}/vat-lock" )]
+        public async Task<ActionResult<FinanceMovementDto>> SetVatPaymentLock(
+            int id,
+            [FromBody] VatPaymentAmountLockRequest request
+        )
+        {
+            FinanceMovementDto? row = await _finance.SetVatPaymentAmountLockedAsync( id, request.Locked );
+            if (row is null)
+            {
+                return NotFound( new { error = "Аплата VAT не знойдзена." } );
+            }
+
+            return Ok( row );
+        }
+
         [HttpPost( "recurring" )]
         public async Task<ActionResult<FinanceRecurringExpenseDto>> CreateRecurring( [FromBody] FinanceRecurringExpenseCreateRequest request )
         {

@@ -11,7 +11,9 @@ import { saveSupply } from '@/lib/api/supply-save';
 import { deleteSupply, fetchSupplyById } from '@/lib/api/supplies';
 import {
   createDraftLinesForProduct,
+  createDraftRowFromSupplyProduct,
   displayDraftLabel,
+  formatProductNameWithAuthor,
   normalizeSupplyDraftRow,
   readFieldValue,
   type SupplyProductDraft,
@@ -326,24 +328,9 @@ export default function NewSupplyClient({
         const supplierNm = supply.supplierName || '';
         const dateStr = supply.date || '';
 
-        const dbDrafts: SupplyProductDraft[] = supply.products.map((p) => {
-          const match = productMap.get(p.shopifyProductId);
-          const variantMatch = match?.variants.find((v) => v.variantId === p.shopifyVariantId);
-          return normalizeSupplyDraftRow({
-            lineKey: makeSupplyLineKey(p.shopifyProductId, p.shopifyVariantId),
-            productId: p.shopifyProductId,
-            variantId: p.shopifyVariantId,
-            variantName: variantMatch?.variantName ?? '',
-            productName: match?.productName ?? p.shopifyProductId,
-            productType: match?.productType ?? '',
-            syncWithShopify: p.syncWithShopify,
-            quantity: p.quantity > 0 ? String(p.quantity) : '',
-            supplierPrice: p.supplierPrice > 0 ? String(p.supplierPrice) : '',
-            vatRatePercent: String(normalizeVatRateOption(p.vatRatePercent > 0 ? p.vatRatePercent : 23)),
-            marginPercent: p.marginPercent > 0 ? formatPercent(p.marginPercent) : '',
-            salePrice: p.salePrice > 0 ? String(p.salePrice) : '',
-          });
-        });
+        const dbDrafts: SupplyProductDraft[] = supply.products.map((p) =>
+          createDraftRowFromSupplyProduct(p, productMap, normalizeVatRateOption)
+        );
         setBaselineDrafts(cloneDrafts(dbDrafts));
         setBaselineSupplierId(supplierIdStr);
         setBaselineSupplierName(supplierNm);
@@ -355,19 +342,16 @@ export default function NewSupplyClient({
         }
         // Prefer in-memory drafts over DB for the same productId so returning from the picker
         // does not wipe unsaved edits.
-        setProductDrafts((prev) => {
+        setProductDrafts(() => {
           const byId = new Map<string, SupplyProductDraft>();
           if (sessionPayload) {
+            for (const row of dbDrafts) byId.set(row.lineKey, row);
             for (const row of cloneDrafts(sessionPayload.productDrafts)) byId.set(row.lineKey, row);
+            removeDraftSessionIfPresent(supplyId);
           } else {
-            for (const row of prev) byId.set(row.lineKey, row);
+            for (const row of dbDrafts) byId.set(row.lineKey, row);
           }
-          for (const row of dbDrafts) {
-            if (!byId.has(row.lineKey)) byId.set(row.lineKey, row);
-          }
-          const merged = Array.from(byId.values());
-          if (sessionPayload) removeDraftSessionIfPresent(supplyId);
-          return merged;
+          return Array.from(byId.values());
         });
       })
       .catch((err: unknown) => {
@@ -388,6 +372,7 @@ export default function NewSupplyClient({
       setAddingProductsLoading(false);
       return;
     }
+    if (supplyId && initialLoading) return;
     let cancelled = false;
     setAddingProductsLoading(true);
     const selectedKeys = new Set(selectedProductIds);
@@ -430,7 +415,7 @@ export default function NewSupplyClient({
     return () => {
       cancelled = true;
     };
-  }, [selectedProductIds, selectedProductQuantities]);
+  }, [selectedProductIds, selectedProductQuantities, supplyId, initialLoading]);
 
   const updateDraftField = (
     lineKey: string,
@@ -649,16 +634,28 @@ export default function NewSupplyClient({
             : 'Змены захаваныя.'
         );
       }
+      const savedDrafts = cloneDrafts(productDrafts);
+
       if (!supplyId && result.id > 0) {
         const query = new URLSearchParams();
         query.set('supplierId', String(supplierIdNumber));
         if (currentSupplierName) query.set('supplierName', currentSupplierName);
         query.set('date', currentDate);
-        const currentIds = productDrafts.map((p) => p.lineKey);
-        if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
         router.replace(`/supplies/${result.id}?${query.toString()}`);
       } else if (supplyId) {
-        setBaselineDrafts(cloneDrafts(productDrafts));
+        try {
+          const supply = await fetchSupplyById(Number(supplyId));
+          const productMap = new Map(productCatalog.map((p) => [p.shopifyProductId, p]));
+          const dbDrafts = supply.products.map((p) =>
+            createDraftRowFromSupplyProduct(p, productMap, normalizeVatRateOption)
+          );
+          const synced = cloneDrafts(dbDrafts.length > 0 ? dbDrafts : savedDrafts);
+          setProductDrafts(synced);
+          setBaselineDrafts(synced);
+        } catch {
+          setProductDrafts(savedDrafts);
+          setBaselineDrafts(savedDrafts);
+        }
         setBaselineSupplierId(currentSupplierId);
         setBaselineSupplierName(currentSupplierName);
         setBaselineDate(currentDate);
@@ -825,6 +822,7 @@ export default function NewSupplyClient({
           <table className="min-w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-gray-200 bg-gray-50/90 text-xs font-semibold uppercase tracking-wide text-gray-500 backdrop-blur-sm">
+                <th className="whitespace-nowrap px-4 py-3.5 w-14"></th>
                 <th className="whitespace-nowrap px-6 py-3.5">Назва</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Колькасць</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Цана пастаўшчыка</th>
@@ -838,13 +836,13 @@ export default function NewSupplyClient({
             <tbody className="bg-white">
               {addingProductsLoading ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-16 text-center">
+                  <td colSpan={9} className="px-6 py-16 text-center">
                     <LoadingSpinner label="Дадаю выбраныя тавары..." />
                   </td>
                 </tr>
               ) : productDrafts.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-16 text-center">
+                  <td colSpan={9} className="px-6 py-16 text-center">
                     <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
                     <p className="mt-1 text-sm text-gray-500">Націсніце «+» пад датай пастаўкі, каб выбраць прадукты.</p>
                   </td>
@@ -863,6 +861,10 @@ export default function NewSupplyClient({
                     return true;
                   });
                   const hasOtherSupplierStock = otherSupplierPrices.length > 0;
+                  const author = meta?.productAuthor?.trim() ?? '';
+                  const titleLabel = row.variantName.trim()
+                    ? formatProductNameWithAuthor(row.productName, author)
+                    : displayDraftLabel(row, author);
 
                   return (
                   <tr
@@ -871,6 +873,26 @@ export default function NewSupplyClient({
                       hasOtherSupplierStock ? 'bg-purple-100/80' : ''
                     }`}
                   >
+                    <td className="px-4 py-3.5">
+                      {meta?.mainImageUrl ? (
+                        <a
+                          href={meta.mainImageUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex overflow-hidden rounded-md border border-gray-200 bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                          aria-label={`Адкрыць выяву: ${titleLabel}`}
+                        >
+                          <img
+                            src={meta.mainImageUrl}
+                            alt={row.productName}
+                            className="h-12 w-8 object-cover object-center"
+                            loading="lazy"
+                          />
+                        </a>
+                      ) : (
+                        <div className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100" aria-hidden />
+                      )}
+                    </td>
                     <td className="px-6 py-3.5 text-gray-900">
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
@@ -879,7 +901,7 @@ export default function NewSupplyClient({
                               Іншы пастаўшчык
                             </span>
                           )}
-                          <p>{row.variantName.trim() ? row.productName : displayDraftLabel(row)}</p>
+                          <p>{titleLabel}</p>
                         </div>
                         {row.variantName.trim() && (
                           <p className="text-xs text-gray-600">{row.variantName}</p>
@@ -977,7 +999,7 @@ export default function NewSupplyClient({
                         type="button"
                         onClick={() => removeDraft(row.lineKey)}
                         className="inline-flex size-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
-                        aria-label={`Выдаліць ${displayDraftLabel(row)}`}
+                        aria-label={`Выдаліць ${displayDraftLabel(row, author)}`}
                         title="Выдаліць тавар з пастаўкі"
                       >
                         <FiX className="size-4" />

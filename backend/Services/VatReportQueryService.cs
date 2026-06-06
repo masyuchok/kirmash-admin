@@ -9,11 +9,16 @@ public class VatReportQueryService
 {
     private readonly AppDbContext _db;
     private readonly ShopifyOrderFetchService _shopifyOrders;
+    private readonly VatReportProfitService _profitService;
 
-    public VatReportQueryService( AppDbContext db, ShopifyOrderFetchService shopifyOrders )
+    public VatReportQueryService(
+        AppDbContext db,
+        ShopifyOrderFetchService shopifyOrders,
+        VatReportProfitService profitService )
     {
         _db = db;
         _shopifyOrders = shopifyOrders;
+        _profitService = profitService;
     }
 
     public async Task<List<VatReportListItem>> GetAllAsync()
@@ -35,9 +40,52 @@ public class VatReportQueryService
                 VatCredit = r.VatCredit,
                 VatToPay = r.VatToPay,
                 Documents = r.Documents.ToList(),
-                ShopifyOrderIds = r.ShopifyOrderIds.ToList()
+                ShopifyOrderIds = r.ShopifyOrderIds.ToList(),
+                IsLocked = r.IsLocked
             } )
             .ToListAsync();
+    }
+
+    public async Task<List<VatReportPeriodListItem>> GetPeriodSummariesAsync()
+    {
+        List<VatReportListItem> allReports = await GetAllAsync();
+        IEnumerable<IGrouping<(int PeriodYear, int PeriodMonth), VatReportListItem>> periodGroups = allReports
+            .GroupBy( r => (r.PeriodYear, r.PeriodMonth) )
+            .OrderByDescending( g => g.Key.PeriodYear )
+            .ThenByDescending( g => g.Key.PeriodMonth );
+
+        List<VatReportPeriodListItem> result = new();
+        foreach (IGrouping<(int PeriodYear, int PeriodMonth), VatReportListItem> group in periodGroups)
+        {
+            List<VatReportListItem> periodReports = group
+                .OrderByDescending( r => r.Id )
+                .ToList();
+            VatReportListItem? polandReport = periodReports.FirstOrDefault( r =>
+                string.Equals( r.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase )
+            );
+            int baseReportId = polandReport?.Id ?? periodReports[0].Id;
+
+            VatReportCombinedDetailsResponse combined = await GetCombinedDetailsAsync( baseReportId );
+            List<VatReportDetailsSummaryRow> summaryRows = combined.Details.Rows;
+
+            result.Add(
+                new VatReportPeriodListItem
+                {
+                    PeriodYear = group.Key.PeriodYear,
+                    PeriodMonth = group.Key.PeriodMonth,
+                    TotalVat = combined.Details.Vat,
+                    Profit = await _profitService.ComputePeriodProfitAsync(
+                        group.Key.PeriodYear,
+                        group.Key.PeriodMonth,
+                        summaryRows ),
+                    IsLocked = periodReports.Any( r => r.IsLocked ),
+                    PrimaryReportId = baseReportId,
+                    Reports = periodReports
+                }
+            );
+        }
+
+        return result;
     }
 
     public async Task<VatReportDetailsResponse> GetDetailsAsync( int id )
@@ -45,7 +93,7 @@ public class VatReportQueryService
         var header = await _db.VatReports
             .AsNoTracking()
             .Where( r => r.Id == id )
-            .Select( r => new { r.Id, r.PeriodYear, r.PeriodMonth, r.Type, r.Vat } )
+            .Select( r => new { r.Id, r.PeriodYear, r.PeriodMonth, r.Type, r.Vat, r.IsLocked } )
             .FirstOrDefaultAsync();
         if (header is null)
         {
@@ -63,13 +111,25 @@ public class VatReportQueryService
             ? BuildPolandSummaryRows( reportRows, cashSales, expenses )
             : await BuildForeignSummaryRowsAsync( header.Type, reportRows );
 
+        bool periodLocked = await _db.VatReports
+            .AsNoTracking()
+            .AnyAsync( r =>
+                r.PeriodYear == header.PeriodYear &&
+                r.PeriodMonth == header.PeriodMonth &&
+                r.IsLocked
+            );
+
         return new VatReportDetailsResponse
         {
             Id = header.Id,
             PeriodYear = header.PeriodYear,
             PeriodMonth = header.PeriodMonth,
+            IsLocked = periodLocked,
             Vat = ComputeTotalVatFromSummaryRows( rows ),
-            Profit = ComputeProfitFromSummaryRows( rows ),
+            Profit = await _profitService.ComputePeriodProfitAsync(
+                header.PeriodYear,
+                header.PeriodMonth,
+                rows ),
             Rows = rows
         };
     }
@@ -138,6 +198,14 @@ public class VatReportQueryService
             ..expenseSummaryRows
         ];
 
+        bool periodLocked = await _db.VatReports
+            .AsNoTracking()
+            .AnyAsync( r =>
+                r.PeriodYear == polandDetails.PeriodYear &&
+                r.PeriodMonth == polandDetails.PeriodMonth &&
+                r.IsLocked
+            );
+
         return new VatReportCombinedDetailsResponse
         {
             ForeignRows = foreignRows,
@@ -146,7 +214,12 @@ public class VatReportQueryService
                 Id = polandDetails.Id,
                 PeriodYear = polandDetails.PeriodYear,
                 PeriodMonth = polandDetails.PeriodMonth,
+                IsLocked = periodLocked,
                 Vat = ComputeTotalVatFromSummaryRows( combinedRows ),
+                Profit = await _profitService.ComputePeriodProfitAsync(
+                    polandDetails.PeriodYear,
+                    polandDetails.PeriodMonth,
+                    combinedRows ),
                 Rows = combinedRows
             }
         };
@@ -200,7 +273,9 @@ public class VatReportQueryService
                 NetAmount = e.NetAmount,
                 ExpenseDateUtc = e.ExpenseDateUtc,
                 Comment = e.Comment ?? string.Empty,
+                InvoiceNumber = e.InvoiceNumber,
                 IsPaid = e.IsPaid,
+                IsByProsvet = e.IsByProsvet,
                 ExpenseInvoiceTypeId = e.ExpenseInvoiceTypeId,
                 ExpenseInvoiceTypeName = e.ExpenseInvoiceType.Name,
                 InvoiceFileName = e.InvoiceFileName,
@@ -213,7 +288,8 @@ public class VatReportQueryService
                         Id = p.Id,
                         ShopifyProductId = p.ShopifyProductId,
                         ProductTitle = p.ProductTitle,
-                        Quantity = p.Quantity
+                        Quantity = p.Quantity,
+                        UnitGrossPrice = p.UnitGrossPrice
                     } )
                     .ToList()
             } )
@@ -248,12 +324,12 @@ public class VatReportQueryService
 
     private static decimal ComputeProfitFromSummaryRows( IEnumerable<VatReportDetailsSummaryRow> rows )
     {
+        // Legacy fallback; profit is computed asynchronously via VatReportProfitService.
         decimal polandGross = rows.Where( r => r.Type == VatReportType.Poland ).Sum( r => r.GrossAmount );
         decimal foreignGross = rows.Where( r => r.Type == VatReportType.Foreign ).Sum( r => r.GrossAmount );
         decimal cashGross = rows.Where( r => r.Type == VatReportType.Cash ).Sum( r => r.GrossAmount );
         decimal expenseGross = rows.Where( r => r.Type == VatReportType.Expense ).Sum( r => r.GrossAmount );
-        decimal totalVat = ComputeTotalVatFromSummaryRows( rows );
-        return VatReportHelpers.Round2( polandGross + foreignGross + cashGross - totalVat - expenseGross );
+        return VatReportHelpers.Round2( polandGross + foreignGross + cashGross - expenseGross );
     }
 
     private static List<VatReportDetailsSummaryRow> BuildPolandSummaryRows(
@@ -338,26 +414,16 @@ public class VatReportQueryService
         string reportType,
         List<ReportRowData> reportRows )
     {
-        Dictionary<string, ForeignDeliveryInfo>? deliveryByOrderId = null;
-        bool needsShopifyLookup = reportRows
-            .Select( r => r.OrderNumber )
-            .Distinct()
-            .Any( orderNumber =>
-            {
-                (string _, string parsedName, string parsedAddress) =
-                    VatReportHelpers.ParseOrderNumberAndContact( orderNumber );
-                return string.IsNullOrWhiteSpace( parsedName ) && string.IsNullOrWhiteSpace( parsedAddress );
-            } );
+        Dictionary<string, ForeignDeliveryInfo> deliveryByOrderId = new( StringComparer.OrdinalIgnoreCase );
+        List<string> orderIds = reportRows
+            .Select( r => r.ShopifyOrderId )
+            .Where( idValue => !string.IsNullOrWhiteSpace( idValue ) )
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .ToList();
 
-        if (needsShopifyLookup)
+        if (orderIds.Count > 0)
         {
-            deliveryByOrderId = await _shopifyOrders.FetchForeignDeliveryInfoAsync(
-                reportRows
-                    .Select( r => r.ShopifyOrderId )
-                    .Where( idValue => !string.IsNullOrWhiteSpace( idValue ) )
-                    .Distinct()
-                    .ToList()
-            );
+            deliveryByOrderId = await _shopifyOrders.FetchForeignDeliveryInfoAsync( orderIds );
         }
 
         return reportRows
@@ -365,7 +431,7 @@ public class VatReportQueryService
             .Select( g =>
             {
                 ForeignDeliveryInfo? info = null;
-                deliveryByOrderId?.TryGetValue( g.Key, out info );
+                deliveryByOrderId.TryGetValue( g.Key, out info );
                 ReportRowData first = g.First();
                 (string parsedOrderNumber, string parsedDeliveryName, string parsedDeliveryAddress) =
                     VatReportHelpers.ParseOrderNumberAndContact( first.OrderNumber );
@@ -380,11 +446,19 @@ public class VatReportQueryService
                     DeliveryName = !string.IsNullOrWhiteSpace( parsedDeliveryName )
                         ? parsedDeliveryName
                         : (info?.Name ?? string.Empty),
-                    DeliveryAddress = !string.IsNullOrWhiteSpace( parsedDeliveryAddress )
-                        ? parsedDeliveryAddress
-                        : (info?.ShippingAddress ?? info?.BillingAddress ?? string.Empty),
-                    ShippingAddress = info?.ShippingAddress ?? parsedDeliveryAddress,
-                    BillingAddress = info?.BillingAddress ?? string.Empty,
+                    DeliveryAddress = !string.IsNullOrWhiteSpace( info?.ShippingAddress )
+                        ? info!.ShippingAddress
+                        : (!string.IsNullOrWhiteSpace( parsedDeliveryAddress )
+                            ? parsedDeliveryAddress
+                            : (info?.BillingAddress ?? string.Empty)),
+                    ShippingAddress = !string.IsNullOrWhiteSpace( info?.ShippingAddress )
+                        ? info!.ShippingAddress
+                        : parsedDeliveryAddress,
+                    BillingAddress = !string.IsNullOrWhiteSpace( info?.BillingAddress )
+                        ? info!.BillingAddress
+                        : string.Empty,
+                    ShippingCountryCode = info?.ShippingCountryCode ?? string.Empty,
+                    BillingCountryCode = info?.BillingCountryCode ?? string.Empty,
                     GrossAmount = VatReportHelpers.Round2( g.Sum( x => x.GrossAmount ) ),
                     Vat = VatReportHelpers.Round2( g.Sum( x => x.VatAmount ) ),
                     NetAmount = VatReportHelpers.Round2( g.Sum( x => x.NetAmount ) ),
@@ -435,7 +509,9 @@ public class VatReportQueryService
             NetAmount = expense.NetAmount,
             ExpenseDateUtc = expense.ExpenseDateUtc,
             Comment = expense.Comment,
+            InvoiceNumber = expense.InvoiceNumber,
             IsPaid = expense.IsPaid,
+            IsByProsvet = expense.IsByProsvet,
             ExpenseInvoiceTypeId = expense.ExpenseInvoiceTypeId,
             ExpenseInvoiceTypeName = expense.ExpenseInvoiceTypeName,
             InvoiceFileName = expense.InvoiceFileName,
@@ -448,7 +524,8 @@ public class VatReportQueryService
                     Id = p.Id,
                     ShopifyProductId = p.ShopifyProductId,
                     ProductTitle = p.ProductTitle,
-                    Quantity = p.Quantity
+                    Quantity = p.Quantity,
+                    UnitGrossPrice = p.UnitGrossPrice
                 } )
                 .ToList()
         };
@@ -489,7 +566,9 @@ public class VatReportQueryService
         public decimal NetAmount { get; set; }
         public DateTime ExpenseDateUtc { get; set; }
         public string Comment { get; set; } = string.Empty;
+        public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
+        public bool IsByProsvet { get; set; }
         public int ExpenseInvoiceTypeId { get; set; }
         public string ExpenseInvoiceTypeName { get; set; } = string.Empty;
         public string InvoiceFileName { get; set; } = string.Empty;
@@ -505,6 +584,7 @@ public class VatReportQueryService
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
+        public decimal UnitGrossPrice { get; set; }
     }
 
     private sealed class ReportCashSaleData

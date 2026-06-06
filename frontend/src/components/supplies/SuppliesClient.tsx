@@ -217,6 +217,7 @@ export default function SuppliesClient() {
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
         <SuppliesTable
           supplies={visibleRows}
+          filterActive={selectedSuppliers.length > 0 && visibleRows.length === 0}
           sortDirection={dateSortDirection}
           supplierFilters={supplierFilters}
           selectedSuppliers={selectedSuppliers}

@@ -3,14 +3,18 @@
 import { useEffect, useState } from 'react';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import { fetchFinancePersons, type FinancePerson } from '@/lib/api/finances';
 import {
   createExpenseInvoiceType,
   deleteExpenseInvoiceType,
   fetchExpenseInvoiceTypes,
   fetchInvoiceSettings,
+  fetchVatAutoFinanceSettings,
   saveInvoiceSettings,
+  saveVatAutoFinanceSettings,
   updateExpenseInvoiceType,
   type ExpenseInvoiceType,
+  type VatAutoFinanceSettings,
 } from '@/lib/api/settings';
 import { FiEdit2, FiPlus, FiTrash2, FiX } from 'react-icons/fi';
 
@@ -51,6 +55,16 @@ export default function SettingsClient() {
   const [editingTypeId, setEditingTypeId] = useState<number | null>(null);
   const [editingTypeName, setEditingTypeName] = useState('');
   const [typeSaving, setTypeSaving] = useState(false);
+  const [financePersons, setFinancePersons] = useState<FinancePerson[]>([]);
+  const [vatAutoFinance, setVatAutoFinance] = useState<VatAutoFinanceSettings>({
+    isEnabled: false,
+    financePersonId: null,
+  });
+  const [savedVatAutoFinance, setSavedVatAutoFinance] = useState<VatAutoFinanceSettings>({
+    isEnabled: false,
+    financePersonId: null,
+  });
+  const [vatAutoSaving, setVatAutoSaving] = useState(false);
 
   useEffect(() => {
     setTopbarPage({
@@ -68,12 +82,20 @@ export default function SettingsClient() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    Promise.all([fetchInvoiceSettings(), fetchExpenseInvoiceTypes()])
-      .then(([data, types]) => {
+    Promise.all([
+      fetchInvoiceSettings(),
+      fetchExpenseInvoiceTypes(),
+      fetchVatAutoFinanceSettings(),
+      fetchFinancePersons(),
+    ])
+      .then(([data, types, vatAuto, persons]) => {
         if (cancelled) return;
         setSavedInvoiceSettings(data);
         setInvoiceSettings(data);
         setExpenseInvoiceTypes(types);
+        setVatAutoFinance(vatAuto);
+        setSavedVatAutoFinance(vatAuto);
+        setFinancePersons(persons);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -336,6 +358,11 @@ export default function SettingsClient() {
                 {error}
               </div>
             )}
+            {success && (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                {success}
+              </div>
+            )}
               <div className="space-y-2">
                 {expenseInvoiceTypes.map((item) => (
                   <div
@@ -454,6 +481,96 @@ export default function SettingsClient() {
                 >
                   <FiPlus className="size-4" />
                 </button>
+              </div>
+
+              <div className="mt-8 border-t border-gray-200 pt-6">
+                <h3 className="text-base font-semibold text-gray-900">Аўтарасход для VAT</h3>
+                <p className="mt-1 text-sm text-gray-600">
+                  Пры генерацыі або змене справаздачы аўтаматычна дадаецца аплата выбранай асобе з сумай «Усяго
+                  VAT».
+                </p>
+                <div className="mt-4 space-y-4">
+                  <label className="flex cursor-pointer items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={vatAutoFinance.isEnabled}
+                      onChange={(e) => {
+                        const enabled = e.currentTarget.checked;
+                        setVatAutoFinance((prev) => ({
+                          ...prev,
+                          isEnabled: enabled,
+                          financePersonId: enabled ? prev.financePersonId : null,
+                        }));
+                      }}
+                      className="size-4 rounded border-gray-300 text-primary focus:ring-primary/30"
+                    />
+                    <span className="text-sm font-medium text-gray-800">Уключыць аўтарасход</span>
+                  </label>
+                  {vatAutoFinance.isEnabled && (
+                    <label className="block max-w-md space-y-1.5">
+                      <span className="text-sm font-medium text-gray-700">Асоба (Фінансы)</span>
+                      <select
+                        value={vatAutoFinance.financePersonId ?? ''}
+                        onChange={(e) => {
+                          const value = Number(e.currentTarget.value);
+                          setVatAutoFinance((prev) => ({
+                            ...prev,
+                            financePersonId: value > 0 ? value : null,
+                          }));
+                        }}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                      >
+                        <option value="">— выберыце асобу —</option>
+                        {financePersons.map((person) => (
+                          <option key={person.id} value={person.id}>
+                            {person.name}
+                          </option>
+                        ))}
+                      </select>
+                      {financePersons.length === 0 && (
+                        <p className="text-xs text-amber-700">
+                          Спачатку дадайце асобу на старонцы «Фінансы».
+                        </p>
+                      )}
+                    </label>
+                  )}
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setVatAutoFinance(savedVatAutoFinance)}
+                      disabled={vatAutoSaving}
+                      className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-60"
+                    >
+                      Скінуць
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        vatAutoSaving ||
+                        (vatAutoFinance.isEnabled && !vatAutoFinance.financePersonId)
+                      }
+                      onClick={async () => {
+                        setVatAutoSaving(true);
+                        setError(null);
+                        setSuccess(null);
+                        try {
+                          await saveVatAutoFinanceSettings(vatAutoFinance);
+                          setSavedVatAutoFinance(vatAutoFinance);
+                          setSuccess('Налады аўтарасходу VAT захаваны.');
+                        } catch (err: unknown) {
+                          setError(
+                            err instanceof Error ? err.message : 'Памылка захавання аўтарасходу VAT'
+                          );
+                        } finally {
+                          setVatAutoSaving(false);
+                        }
+                      }}
+                      className="rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
+                    >
+                      {vatAutoSaving ? 'Захаванне…' : 'Захаваць'}
+                    </button>
+                  </div>
+                </div>
               </div>
               </>
             )}

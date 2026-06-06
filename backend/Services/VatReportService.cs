@@ -7,18 +7,23 @@ public class VatReportService
     private readonly VatReportQueryService _query;
     private readonly VatReportGenerationService _generation;
     private readonly VatReportMutationService _mutations;
+    private readonly VatReportLockService _locks;
 
     public VatReportService(
         VatReportQueryService query,
         VatReportGenerationService generation,
-        VatReportMutationService mutations )
+        VatReportMutationService mutations,
+        VatReportLockService locks )
     {
         _query = query;
         _generation = generation;
         _mutations = mutations;
+        _locks = locks;
     }
 
     public Task<List<VatReportListItem>> GetAllAsync() => _query.GetAllAsync();
+
+    public Task<List<VatReportPeriodListItem>> GetPeriodSummariesAsync() => _query.GetPeriodSummariesAsync();
 
     public Task<VatReportDetailsResponse> GetDetailsAsync( int id ) => _query.GetDetailsAsync( id );
 
@@ -29,6 +34,9 @@ public class VatReportService
         _generation.GenerateAsync( periodYear, periodMonth, reportType );
 
     public Task<VatReportListItem> RegenerateAsync( int id ) => _generation.RegenerateAsync( id );
+
+    public Task<List<VatReportListItem>> SetLockedAsync( int reportId, bool locked ) =>
+        _locks.SetLockedAsync( reportId, locked );
 
     public Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId ) =>
         _generation.GetSourceOrderOptionsAsync( reportId );
@@ -56,6 +64,9 @@ public class VatReportService
     public Task<int> AddExpenseAsync( int reportId, VatReportExpenseCreateRequest request ) =>
         _mutations.AddExpenseAsync( reportId, request );
 
+    public Task UpdateExpenseAsync( int expenseId, VatReportExpenseCreateRequest request ) =>
+        _mutations.UpdateExpenseAsync( expenseId, request );
+
     public Task UploadExpenseInvoiceAsync( int expenseId, string fileName, string contentType, byte[] data ) =>
         _mutations.UploadExpenseInvoiceAsync( expenseId, fileName, contentType, data );
 
@@ -68,6 +79,9 @@ public class VatReportService
         _mutations.AddCashSaleAsync( reportId, request );
 
     public Task DeleteCashSaleAsync( int cashSaleId ) => _mutations.DeleteCashSaleAsync( cashSaleId );
+
+    public Task<string> AddForeignRowAsync( int reportId, VatReportForeignRowCreateRequest request ) =>
+        _mutations.AddForeignRowAsync( reportId, request );
 
     public Task UploadRowInvoiceAsync( int rowId, string fileName, string contentType, byte[] data ) =>
         _mutations.UploadRowInvoiceAsync( rowId, fileName, contentType, data );

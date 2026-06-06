@@ -13,5 +13,6 @@ namespace backend.Models
         public decimal VatToPay { get; set; }
         public List<string> Documents { get; set; } = new();
         public List<string> ShopifyOrderIds { get; set; } = new();
+        public bool IsLocked { get; set; }
     }
 }

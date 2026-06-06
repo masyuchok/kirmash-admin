@@ -15,10 +15,12 @@ namespace backend.Controllers
     public class SettingsController : Controller
     {
         private readonly AppDbContext _db;
+        private readonly VatReportFinanceSyncService _vatFinanceSync;
 
-        public SettingsController( AppDbContext db )
+        public SettingsController( AppDbContext db, VatReportFinanceSyncService vatFinanceSync )
         {
             _db = db;
+            _vatFinanceSync = vatFinanceSync;
         }
 
         [HttpGet( "invoice" )]
@@ -173,6 +175,45 @@ namespace backend.Controllers
             row.Name = name;
             await _db.SaveChangesAsync();
             return Ok( new ExpenseInvoiceTypeDto { Id = row.Id, Name = row.Name, IsSystem = row.IsSystem } );
+        }
+
+        [HttpGet( "vat-auto-finance" )]
+        public async Task<ActionResult<VatAutoFinanceSettingsDto>> GetVatAutoFinance()
+        {
+            VatAutoFinanceSettings settings = await _vatFinanceSync.GetOrCreateSettingsAsync();
+            return Ok(
+                new VatAutoFinanceSettingsDto
+                {
+                    IsEnabled = settings.IsEnabled,
+                    FinancePersonId = settings.FinancePersonId
+                }
+            );
+        }
+
+        [HttpPut( "vat-auto-finance" )]
+        public async Task<IActionResult> SaveVatAutoFinance( [FromBody] VatAutoFinanceSettingsDto request )
+        {
+            if (request.IsEnabled)
+            {
+                if (!request.FinancePersonId.HasValue || request.FinancePersonId.Value <= 0)
+                {
+                    return BadRequest( new { error = "Выберыце асобу з фінансаў." } );
+                }
+
+                bool personExists = await _db.FinancePersons.AnyAsync( p => p.Id == request.FinancePersonId.Value );
+                if (!personExists)
+                {
+                    return BadRequest( new { error = "Асоба не знойдзена." } );
+                }
+            }
+
+            VatAutoFinanceSettings settings = await _vatFinanceSync.GetOrCreateSettingsAsync();
+            settings.IsEnabled = request.IsEnabled;
+            settings.FinancePersonId = request.IsEnabled ? request.FinancePersonId : null;
+            settings.UpdatedAtUtc = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+            await _vatFinanceSync.ResyncAllReportPeriodsAsync();
+            return Ok();
         }
 
         [HttpDelete( "invoice-expense-types/{id:int}" )]

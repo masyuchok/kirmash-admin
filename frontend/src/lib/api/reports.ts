@@ -1,7 +1,59 @@
 import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
 import { readInt, readNumber, readStringArray } from '@/lib/api/json';
-import type { VatReport } from '@/types/report';
+import type { VatReport, VatReportPeriod } from '@/types/report';
 import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
+
+function mapVatReportListItem(row: Record<string, unknown>): VatReport {
+  const docsRaw = row.documents ?? row.Documents;
+  return {
+    id: readInt(row.id ?? row.Id),
+    periodYear: readInt(row.periodYear ?? row.PeriodYear),
+    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
+    type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
+    name: String(row.name ?? row.Name ?? ''),
+    document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
+    vat: readNumber(row.vat ?? row.Vat),
+    vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
+    vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
+    documents: Array.isArray(docsRaw)
+      ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
+      : [],
+    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
+    isLocked: Boolean(row.isLocked ?? row.IsLocked),
+  };
+}
+
+function mapVatReportPeriod(row: Record<string, unknown>): VatReportPeriod {
+  const reportsRaw = row.reports ?? row.Reports;
+  return {
+    periodYear: readInt(row.periodYear ?? row.PeriodYear),
+    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
+    totalVat: readNumber(row.totalVat ?? row.TotalVat),
+    profit: readNumber(row.profit ?? row.Profit),
+    isLocked: Boolean(row.isLocked ?? row.IsLocked),
+    primaryReportId: readInt(row.primaryReportId ?? row.PrimaryReportId),
+    reports: Array.isArray(reportsRaw)
+      ? reportsRaw.map((item) => mapVatReportListItem(item as Record<string, unknown>))
+      : [],
+  };
+}
+
+export async function fetchVatReportPeriods(): Promise<VatReportPeriod[]> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/periods`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць справаздачы');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) {
+    throw new Error('Некарэктны адказ сервера');
+  }
+  return data.map((item) => mapVatReportPeriod(item as Record<string, unknown>));
+}
 
 export async function fetchVatReports(): Promise<VatReport[]> {
   const res = await fetch(`${getApiBaseUrl()}/Reports`, {
@@ -19,25 +71,7 @@ export async function fetchVatReports(): Promise<VatReport[]> {
     throw new Error('Некарэктны адказ сервера');
   }
 
-  return data.map((item) => {
-    const row = item as Record<string, unknown>;
-    const docsRaw = row.documents ?? row.Documents;
-    return {
-      id: readInt(row.id ?? row.Id),
-      periodYear: readInt(row.periodYear ?? row.PeriodYear),
-      periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
-      type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
-      name: String(row.name ?? row.Name ?? ''),
-      document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
-      vat: readNumber(row.vat ?? row.Vat),
-      vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
-      vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
-      documents: Array.isArray(docsRaw)
-        ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
-        : [],
-      shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
-    };
-  });
+  return data.map((item) => mapVatReportListItem(item as Record<string, unknown>));
 }
 
 export async function generateVatReport(
@@ -56,23 +90,7 @@ export async function generateVatReport(
     throw new Error(msg);
   }
 
-  const row = (await res.json()) as Record<string, unknown>;
-  const docsRaw = row.documents ?? row.Documents;
-  return {
-    id: readInt(row.id ?? row.Id),
-    periodYear: readInt(row.periodYear ?? row.PeriodYear),
-    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
-    type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
-    name: String(row.name ?? row.Name ?? ''),
-    document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
-    vat: readNumber(row.vat ?? row.Vat),
-    vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
-    vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
-    documents: Array.isArray(docsRaw)
-      ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
-      : [],
-    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
-  };
+  return mapVatReportListItem((await res.json()) as Record<string, unknown>);
 }
 
 function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
@@ -99,6 +117,8 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
             deliveryAddress: String(r.deliveryAddress ?? r.DeliveryAddress ?? ''),
             shippingAddress: String(r.shippingAddress ?? r.ShippingAddress ?? ''),
             billingAddress: String(r.billingAddress ?? r.BillingAddress ?? ''),
+            shippingCountryCode: String(r.shippingCountryCode ?? r.ShippingCountryCode ?? ''),
+            billingCountryCode: String(r.billingCountryCode ?? r.BillingCountryCode ?? ''),
             grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
             vat: readNumber(r.vat ?? r.Vat),
             netAmount: readNumber(r.netAmount ?? r.NetAmount),
@@ -112,7 +132,9 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                     netAmount: readNumber(e.netAmount ?? e.NetAmount),
                     expenseDateUtc: String(e.expenseDateUtc ?? e.ExpenseDateUtc ?? ''),
                     comment: String(e.comment ?? e.Comment ?? ''),
+                    invoiceNumber: String(e.invoiceNumber ?? e.InvoiceNumber ?? ''),
                     isPaid: Boolean(e.isPaid ?? e.IsPaid ?? false),
+                    isByProsvet: Boolean(e.isByProsvet ?? e.IsByProsvet ?? false),
                     expenseInvoiceTypeId: readInt(e.expenseInvoiceTypeId ?? e.ExpenseInvoiceTypeId),
                     expenseInvoiceTypeName: String(
                       e.expenseInvoiceTypeName ?? e.ExpenseInvoiceTypeName ?? ''
@@ -136,6 +158,7 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                           shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
                           productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
                           quantity: readInt(row.quantity ?? row.Quantity),
+                          unitGrossPrice: readNumber(row.unitGrossPrice ?? row.UnitGrossPrice),
                         };
                       });
                     })(),
@@ -201,10 +224,30 @@ function mapVatReportDetails(row: Record<string, unknown>): VatReportDetails {
     id: readInt(row.id ?? row.Id),
     periodYear: readInt(row.periodYear ?? row.PeriodYear),
     periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
+    isLocked: Boolean(row.isLocked ?? row.IsLocked),
     vat: readNumber(row.vat ?? row.Vat),
     profit: readNumber(row.profit ?? row.Profit),
     rows: mapSummaryRows(rowsRaw),
   };
+}
+
+export async function setVatReportLocked(reportId: number, locked: boolean): Promise<VatReport[]> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/${locked ? 'lock' : 'unlock'}`, {
+    method: 'POST',
+    credentials: apiCredentials,
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(
+      res,
+      locked ? 'Не ўдалося заблакаваць справаздачу' : 'Не ўдалося разблакаваць справаздачу'
+    );
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) {
+    throw new Error('Некарэктны адказ сервера');
+  }
+  return data.map((item) => mapVatReportListItem(item as Record<string, unknown>));
 }
 
 export async function fetchVatReportDetails(id: number): Promise<VatReportDetails> {
@@ -284,13 +327,17 @@ export async function createVatReportExpense(
     netAmount: number;
     expenseDateUtc: string;
     comment?: string;
+    invoiceNumber?: string;
     isPaid: boolean;
+    isByProsvet: boolean;
     expenseInvoiceTypeId: number;
     supplierId?: number;
     products?: Array<{
       shopifyProductId: string;
       productTitle: string;
       quantity: number;
+      unitGrossPrice: number;
+      vatRatePercent: number;
     }>;
   }
 ): Promise<number> {
@@ -306,6 +353,40 @@ export async function createVatReportExpense(
   }
   const data = (await res.json()) as Record<string, unknown>;
   return readInt(data.id ?? data.Id);
+}
+
+export async function updateVatReportExpense(
+  expenseId: number,
+  payload: {
+    grossAmount: number;
+    vatAmount: number;
+    netAmount: number;
+    expenseDateUtc: string;
+    comment?: string;
+    invoiceNumber?: string;
+    isPaid: boolean;
+    isByProsvet: boolean;
+    expenseInvoiceTypeId: number;
+    supplierId?: number;
+    products?: Array<{
+      shopifyProductId: string;
+      productTitle: string;
+      quantity: number;
+      unitGrossPrice: number;
+      vatRatePercent: number;
+    }>;
+  }
+): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося змяніць расход');
+    throw new Error(msg);
+  }
 }
 
 export async function uploadVatReportExpenseInvoice(expenseId: number, file: File): Promise<void> {
@@ -424,6 +505,38 @@ export async function fetchVatReportSourceOrders(reportId: number): Promise<VatR
   });
 }
 
+export async function createVatReportForeignRow(
+  reportId: number,
+  payload: {
+    orderNumber: string;
+    orderDateUtc: string;
+    deliveryName: string;
+    deliveryAddress: string;
+    countryCode: string;
+    shippingGrossAmount: number;
+    items: Array<{
+      shopifyProductId: string;
+      productTitle: string;
+      productType?: string;
+      quantity: number;
+      unitPrice: number;
+    }>;
+  }
+): Promise<string> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/foreign-rows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося дадаць замежны радок');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  return String(data.shopifyOrderId ?? data.ShopifyOrderId ?? '');
+}
+
 export async function createVatReportRow(
   reportId: number,
   payload: {
@@ -487,23 +600,7 @@ export async function regenerateVatReport(id: number): Promise<VatReport> {
     const msg = await readErrorMessage(res, 'Не ўдалося перегенераваць справаздачу');
     throw new Error(msg);
   }
-  const row = (await res.json()) as Record<string, unknown>;
-  const docsRaw = row.documents ?? row.Documents;
-  return {
-    id: readInt(row.id ?? row.Id),
-    periodYear: readInt(row.periodYear ?? row.PeriodYear),
-    periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
-    type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
-    name: String(row.name ?? row.Name ?? ''),
-    document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
-    vat: readNumber(row.vat ?? row.Vat),
-    vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
-    vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
-    documents: Array.isArray(docsRaw)
-      ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
-      : [],
-    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
-  };
+  return mapVatReportListItem((await res.json()) as Record<string, unknown>);
 }
 
 export async function uploadVatReportRowInvoice(rowId: number, file: File): Promise<void> {

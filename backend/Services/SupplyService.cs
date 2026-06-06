@@ -238,4 +238,60 @@ public class SupplyService
         string variantId = (shopifyVariantId ?? string.Empty).Trim();
         return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
     }
+
+    public async Task<List<SupplyCatalogProductItem>> GetCatalogProductsAsync( int? supplierId )
+    {
+        IQueryable<SupplyProduct> query = _db.SupplyProducts
+            .AsNoTracking()
+            .Include( sp => sp.Supply );
+        if (supplierId.HasValue && supplierId.Value > 0)
+        {
+            query = query.Where( sp => sp.Supply.SupplierId == supplierId.Value );
+        }
+
+        List<SupplyCatalogRow> rows = await query
+            .Select( sp => new SupplyCatalogRow
+            {
+                ShopifyProductId = sp.ShopifyProductId,
+                VatRatePercent = sp.VatRatePercent,
+                SupplyDate = sp.Supply.Date
+            } )
+            .ToListAsync();
+
+        return rows
+            .Select( row =>
+            {
+                string productId = ShopifyIds.NormalizeGid( row.ShopifyProductId.Trim(), "gid://shopify/Product/" ).Trim();
+                return new
+                {
+                    ProductId = productId,
+                    row.VatRatePercent,
+                    row.SupplyDate
+                };
+            } )
+            .Where( x => !string.IsNullOrWhiteSpace( x.ProductId ) )
+            .GroupBy( x => x.ProductId, StringComparer.OrdinalIgnoreCase )
+            .Select( g =>
+            {
+                var latest = g
+                    .OrderByDescending( x => x.SupplyDate )
+                    .ThenByDescending( x => x.VatRatePercent )
+                    .First();
+                return new SupplyCatalogProductItem
+                {
+                    ShopifyProductId = latest.ProductId,
+                    ProductName = latest.ProductId,
+                    VatRatePercent = latest.VatRatePercent
+                };
+            } )
+            .OrderBy( x => x.ShopifyProductId, StringComparer.OrdinalIgnoreCase )
+            .ToList();
+    }
+
+    private sealed class SupplyCatalogRow
+    {
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public decimal VatRatePercent { get; set; }
+        public DateOnly SupplyDate { get; set; }
+    }
 }

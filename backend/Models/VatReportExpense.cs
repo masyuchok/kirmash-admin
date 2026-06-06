@@ -12,7 +12,9 @@ namespace backend.Models
         public decimal NetAmount { get; set; }
         public DateTime ExpenseDateUtc { get; set; }
         public string? Comment { get; set; }
+        public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
+        public bool IsByProsvet { get; set; }
         public string InvoiceFileName { get; set; } = string.Empty;
         public string InvoiceContentType { get; set; } = string.Empty;
         public byte[]? InvoiceData { get; set; }

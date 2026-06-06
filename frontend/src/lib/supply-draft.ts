@@ -44,11 +44,72 @@ export function normalizeSupplyDraftRow(row: Partial<SupplyProductDraft>): Suppl
   };
 }
 
-export function displayDraftLabel(row: SupplyProductDraft): string {
+export function formatProductNameWithAuthor(productName: string, author?: string | null): string {
+  const name = productName.trim() || '—';
+  const trimmedAuthor = author?.trim();
+  if (!trimmedAuthor) return name;
+  return `${name}, ${trimmedAuthor}`;
+}
+
+export type SupplyProductSnapshot = {
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+  quantity: number;
+  supplierPrice: number;
+  vatRatePercent: number;
+  marginPercent: number;
+  salePrice: number;
+  syncWithShopify: boolean;
+};
+
+export function formatDraftQuantity(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '';
+  return Number.isInteger(value) ? String(value) : String(value);
+}
+
+export function formatDraftMoney(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  if (rounded === 0) return '0';
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+}
+
+export function formatDraftMargin(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  return String(Math.round(value));
+}
+
+export function createDraftRowFromSupplyProduct(
+  product: SupplyProductSnapshot,
+  productMap: Map<string, ProductWithSuppliers>,
+  normalizeVatRatePercent: (value: number) => number
+): SupplyProductDraft {
+  const match = productMap.get(product.shopifyProductId);
+  const variantMatch = match?.variants.find((v) => v.variantId === product.shopifyVariantId);
+  return normalizeSupplyDraftRow({
+    lineKey: makeSupplyLineKey(product.shopifyProductId, product.shopifyVariantId),
+    productId: product.shopifyProductId,
+    variantId: product.shopifyVariantId ?? '',
+    variantName: variantMatch?.variantName ?? '',
+    productName: match?.productName ?? product.shopifyProductId,
+    productType: match?.productType ?? '',
+    syncWithShopify: product.syncWithShopify,
+    quantity: formatDraftQuantity(product.quantity),
+    supplierPrice: formatDraftMoney(product.supplierPrice),
+    vatRatePercent: String(
+      normalizeVatRatePercent(product.vatRatePercent > 0 ? product.vatRatePercent : 23)
+    ),
+    marginPercent: formatDraftMargin(product.marginPercent),
+    salePrice: formatDraftMoney(product.salePrice),
+  });
+}
+
+export function displayDraftLabel(row: SupplyProductDraft, author?: string | null): string {
+  const title = formatProductNameWithAuthor(row.productName, author);
   if (row.variantName.trim()) {
-    return `${row.productName} — ${row.variantName}`;
+    return `${title} — ${row.variantName}`;
   }
-  return row.productName;
+  return title;
 }
 
 export function createDraftLinesForProduct(

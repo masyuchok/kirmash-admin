@@ -26,6 +26,7 @@ namespace backend.Models
     {
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ProductName { get; set; } = string.Empty;
+        public string ProductAuthor { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public string ProductAdminUrl { get; set; } = string.Empty;
         public string? MainImageUrl { get; set; }

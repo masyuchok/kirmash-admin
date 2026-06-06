@@ -27,6 +27,13 @@ namespace backend.Models
         public string MovementDate { get; set; } = string.Empty;
         public bool IsFromRecurring { get; set; }
         public int? RecurringExpenseId { get; set; }
+        public bool IsVatAutoPayment { get; set; }
+        public bool IsVatAmountLocked { get; set; }
+    }
+
+    public class VatPaymentAmountLockRequest
+    {
+        public bool Locked { get; set; }
     }
 
     public class FinanceMovementCreateRequest

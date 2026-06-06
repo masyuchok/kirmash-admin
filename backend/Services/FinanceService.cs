@@ -7,10 +7,12 @@ namespace backend.Services
     public class FinanceService
     {
         private readonly AppDbContext _db;
+        private readonly VatReportFinanceSyncService _vatSync;
 
-        public FinanceService( AppDbContext db )
+        public FinanceService( AppDbContext db, VatReportFinanceSyncService vatSync )
         {
             _db = db;
+            _vatSync = vatSync;
         }
 
         public async Task<List<FinancePersonDto>> ListPersonsAsync()
@@ -84,13 +86,49 @@ namespace backend.Services
                 .ThenBy( x => x.Id )
                 .ToListAsync();
 
+            List<int> movementIds = movements.Select( x => x.Id ).ToList();
+            Dictionary<int, VatPeriodFinancePayment> vatLinks = await LoadVatLinksByMovementIdsAsync( movementIds );
+
             return new FinancePersonOverviewDto
             {
                 Person = ToPersonDto( person ),
                 Summary = BuildSummary( movements ),
-                Movements = movements.Select( ToMovementDto ).ToList(),
+                Movements = movements
+                    .Select( x => ToMovementDto( x, vatLinks.GetValueOrDefault( x.Id ) ) )
+                    .ToList(),
                 RecurringExpenses = recurring.Select( ToRecurringDto ).ToList()
             };
+        }
+
+        public async Task<FinanceMovementDto?> SetVatPaymentAmountLockedAsync( int movementId, bool locked )
+        {
+            VatPeriodFinancePayment? link = await _db.VatPeriodFinancePayments
+                .FirstOrDefaultAsync( x => x.FinanceMovementId == movementId );
+            if (link is null)
+            {
+                return null;
+            }
+
+            link.IsAmountLocked = locked;
+            await _db.SaveChangesAsync();
+
+            if (!locked)
+            {
+                await _vatSync.SyncPeriodAsync( link.PeriodYear, link.PeriodMonth );
+            }
+
+            FinanceMovement? movement = await _db.FinanceMovements
+                .AsNoTracking()
+                .FirstOrDefaultAsync( x => x.Id == movementId );
+            if (movement is null)
+            {
+                return null;
+            }
+
+            VatPeriodFinancePayment? vatLink = await _db.VatPeriodFinancePayments
+                .AsNoTracking()
+                .FirstOrDefaultAsync( x => x.FinanceMovementId == movementId );
+            return ToMovementDto( movement, vatLink );
         }
 
         public async Task<FinanceMovementDto?> CreateMovementAsync( FinanceMovementCreateRequest request )
@@ -123,7 +161,7 @@ namespace backend.Services
             };
             _db.FinanceMovements.Add( row );
             await _db.SaveChangesAsync();
-            return ToMovementDto( row );
+            return await ToMovementDtoAsync( row );
         }
 
         public async Task<FinanceMovementDto?> UpdateMovementAsync( int id, FinanceMovementUpdateRequest request )
@@ -147,7 +185,7 @@ namespace backend.Services
             row.MovementDate = movementDate;
             row.UpdatedAtUtc = DateTime.UtcNow;
             await _db.SaveChangesAsync();
-            return ToMovementDto( row );
+            return await ToMovementDtoAsync( row );
         }
 
         public async Task<bool> DeleteMovementAsync( int id )
@@ -165,6 +203,13 @@ namespace backend.Services
                 {
                     _db.FinanceRecurringApplications.Remove( application );
                 }
+            }
+
+            VatPeriodFinancePayment? vatLink = await _db.VatPeriodFinancePayments
+                .FirstOrDefaultAsync( l => l.FinanceMovementId == id );
+            if (vatLink is not null)
+            {
+                _db.VatPeriodFinancePayments.Remove( vatLink );
             }
 
             _db.FinanceMovements.Remove( row );
@@ -399,7 +444,33 @@ namespace backend.Services
             SortOrder = row.SortOrder
         };
 
-        private static FinanceMovementDto ToMovementDto( FinanceMovement row ) => new()
+        private async Task<Dictionary<int, VatPeriodFinancePayment>> LoadVatLinksByMovementIdsAsync(
+            IReadOnlyCollection<int> movementIds
+        )
+        {
+            if (movementIds.Count == 0)
+            {
+                return new Dictionary<int, VatPeriodFinancePayment>();
+            }
+
+            return await _db.VatPeriodFinancePayments
+                .AsNoTracking()
+                .Where( x => movementIds.Contains( x.FinanceMovementId ) )
+                .ToDictionaryAsync( x => x.FinanceMovementId );
+        }
+
+        private async Task<FinanceMovementDto> ToMovementDtoAsync( FinanceMovement row )
+        {
+            VatPeriodFinancePayment? vatLink = await _db.VatPeriodFinancePayments
+                .AsNoTracking()
+                .FirstOrDefaultAsync( x => x.FinanceMovementId == row.Id );
+            return ToMovementDto( row, vatLink );
+        }
+
+        private static FinanceMovementDto ToMovementDto(
+            FinanceMovement row,
+            VatPeriodFinancePayment? vatLink = null
+        ) => new()
         {
             Id = row.Id,
             PersonId = row.PersonId,
@@ -408,7 +479,9 @@ namespace backend.Services
             Description = row.Description,
             MovementDate = row.MovementDate.ToString( "yyyy-MM-dd" ),
             IsFromRecurring = row.IsFromRecurring,
-            RecurringExpenseId = row.RecurringExpenseId
+            RecurringExpenseId = row.RecurringExpenseId,
+            IsVatAutoPayment = vatLink is not null,
+            IsVatAmountLocked = vatLink?.IsAmountLocked ?? false
         };
 
         private static FinanceRecurringExpenseDto ToRecurringDto( FinanceRecurringExpense row ) => new()

@@ -145,6 +145,7 @@ public class ProductService
             {
                 ShopifyProductId = product.ProductId,
                 ProductName = product.Title,
+                ProductAuthor = product.Author,
                 ProductType = product.ProductType,
                 ProductAdminUrl = $"https://admin.shopify.com/store/{storeSlug}/products/{product.ProductId}",
                 MainImageUrl = product.ImageUrl,

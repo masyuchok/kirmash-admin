@@ -9,15 +9,24 @@ public class VatReportGenerationService
 {
     private readonly AppDbContext _db;
     private readonly ShopifyOrderFetchService _shopifyOrders;
+    private readonly VatReportLockService _locks;
+    private readonly VatReportFinanceSyncService _financeSync;
 
-    public VatReportGenerationService( AppDbContext db, ShopifyOrderFetchService shopifyOrders )
+    public VatReportGenerationService(
+        AppDbContext db,
+        ShopifyOrderFetchService shopifyOrders,
+        VatReportLockService locks,
+        VatReportFinanceSyncService financeSync )
     {
         _db = db;
         _shopifyOrders = shopifyOrders;
+        _locks = locks;
+        _financeSync = financeSync;
     }
 
     public async Task<VatReportListItem> GenerateAsync( int periodYear, int periodMonth, string reportType )
         {
+            await _locks.EnsurePeriodUnlockedAsync( periodYear, periodMonth );
             VatReportHelpers.ValidatePeriod( periodYear, periodMonth );
             string normalizedType = VatReportHelpers.NormalizeReportType( reportType );
             bool exists = await _db.VatReports.AnyAsync(
@@ -54,6 +63,7 @@ public class VatReportGenerationService
 
             _db.VatReports.Add( report );
             await _db.SaveChangesAsync();
+            await _financeSync.SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
 
             return new VatReportListItem
             {
@@ -67,7 +77,8 @@ public class VatReportGenerationService
                 VatCredit = report.VatCredit,
                 VatToPay = report.VatToPay,
                 Documents = report.Documents.ToList(),
-                ShopifyOrderIds = report.ShopifyOrderIds.ToList()
+                ShopifyOrderIds = report.ShopifyOrderIds.ToList(),
+                IsLocked = report.IsLocked
             };
         }
 
@@ -81,6 +92,8 @@ public class VatReportGenerationService
             {
                 throw new InvalidOperationException( "РЎРїСЂР°РІР°Р·РґР°С‡Р° РЅРµ Р·РЅРѕР№РґР·РµРЅР°." );
             }
+
+            VatReportLockGuard.EnsureNotLocked( report );
 
             List<VatReportRow> rows = report.Type switch
             {
@@ -105,6 +118,7 @@ public class VatReportGenerationService
             report.Rows = rows;
 
             await _db.SaveChangesAsync();
+            await _financeSync.SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
 
             return new VatReportListItem
             {
@@ -118,7 +132,8 @@ public class VatReportGenerationService
                 VatCredit = report.VatCredit,
                 VatToPay = report.VatToPay,
                 Documents = report.Documents.ToList(),
-                ShopifyOrderIds = report.ShopifyOrderIds.ToList()
+                ShopifyOrderIds = report.ShopifyOrderIds.ToList(),
+                IsLocked = report.IsLocked
             };
         }
     public async Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId )
@@ -198,6 +213,13 @@ public class VatReportGenerationService
 
                 decimal totalGross = gross5 + gross23;
                 if (totalGross <= 0m) continue;
+
+                decimal computedOrderGross = VatReportHelpers.Round2( totalGross + shippingGross );
+                if (order.CurrentTotalGross > 0m &&
+                    Math.Abs( computedOrderGross - order.CurrentTotalGross ) > 0.01m)
+                {
+                    shippingGross = VatReportHelpers.Round2( Math.Max( 0m, order.CurrentTotalGross - totalGross ) );
+                }
 
                 decimal originalOrderGross = VatReportHelpers.Round2( totalGross + shippingGross );
                 if (order.CurrentTotalGross > 0m && originalOrderGross > 0m && order.CurrentTotalGross < originalOrderGross)
@@ -298,6 +320,14 @@ public class VatReportGenerationService
 
                 decimal totalGross = grossByRate.Values.Sum();
                 if (totalGross <= 0m) continue;
+
+                decimal computedOrderGross = VatReportHelpers.Round2( totalGross + shippingGross );
+                if (order.CurrentTotalGross > 0m &&
+                    Math.Abs( computedOrderGross - order.CurrentTotalGross ) > 0.01m)
+                {
+                    shippingGross = VatReportHelpers.Round2( Math.Max( 0m, order.CurrentTotalGross - totalGross ) );
+                }
+
                 foreach ((decimal rate, decimal goodsGross) in grossByRate.OrderBy( x => x.Key ))
                 {
                     decimal shippingForRate = totalGross > 0m ? VatReportHelpers.Round2( shippingGross * (goodsGross / totalGross) ) : 0m;

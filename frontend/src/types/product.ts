@@ -20,6 +20,7 @@ export type ProductVariant = {
 export type ProductWithSuppliers = {
   shopifyProductId: string;
   productName: string;
+  productAuthor: string;
   productType: string;
   productAdminUrl: string;
   mainImageUrl: string | null;

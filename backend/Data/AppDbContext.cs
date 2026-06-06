@@ -26,6 +26,8 @@ namespace backend.Data
         public DbSet<FinanceMovement> FinanceMovements { get; set; } = default!;
         public DbSet<FinanceRecurringExpense> FinanceRecurringExpenses { get; set; } = default!;
         public DbSet<FinanceRecurringApplication> FinanceRecurringApplications { get; set; } = default!;
+        public DbSet<VatAutoFinanceSettings> VatAutoFinanceSettings { get; set; } = default!;
+        public DbSet<VatPeriodFinancePayment> VatPeriodFinancePayments { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -113,6 +115,8 @@ namespace backend.Data
                     .IsRequired();
                 entity.Property( x => x.Comment )
                     .HasMaxLength( 1024 );
+                entity.Property( x => x.InvoiceNumber )
+                    .HasMaxLength( 128 );
                 entity.Property( x => x.InvoiceFileName )
                     .HasMaxLength( 512 );
                 entity.Property( x => x.InvoiceContentType )
@@ -143,6 +147,9 @@ namespace backend.Data
                     .HasMaxLength( 512 );
                 entity.Property( x => x.Quantity )
                     .IsRequired();
+                entity.Property( x => x.UnitGrossPrice )
+                    .HasColumnType( "numeric(12,2)" )
+                    .HasDefaultValue( 0m );
             } );
 
             modelBuilder.Entity<VatReportCashSale>( entity =>
@@ -363,6 +370,26 @@ namespace backend.Data
                     .IsRequired();
 
                 entity.HasIndex( x => new { x.RecurringExpenseId, x.Year, x.Month } )
+                    .IsUnique();
+            } );
+
+            modelBuilder.Entity<VatAutoFinanceSettings>( entity =>
+            {
+                entity.HasKey( x => x.Id );
+                entity.Property( x => x.IsEnabled )
+                    .IsRequired();
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+            } );
+
+            modelBuilder.Entity<VatPeriodFinancePayment>( entity =>
+            {
+                entity.HasOne( x => x.FinanceMovement )
+                    .WithMany()
+                    .HasForeignKey( x => x.FinanceMovementId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.HasIndex( x => new { x.PeriodYear, x.PeriodMonth } )
                     .IsUnique();
             } );
         }

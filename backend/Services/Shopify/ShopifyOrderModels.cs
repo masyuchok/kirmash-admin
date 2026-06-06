@@ -26,6 +26,8 @@ public sealed class ForeignDeliveryInfo
     public string Name { get; set; } = string.Empty;
     public string ShippingAddress { get; set; } = string.Empty;
     public string BillingAddress { get; set; } = string.Empty;
+    public string ShippingCountryCode { get; set; } = string.Empty;
+    public string BillingCountryCode { get; set; } = string.Empty;
 }
 
 internal enum ShopifyOrderScope

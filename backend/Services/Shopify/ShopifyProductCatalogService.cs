@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using backend.Models;
 
 namespace backend.Services.Shopify;
@@ -164,14 +165,193 @@ public class ShopifyProductCatalogService
             return null;
         }
 
+        string author = ParseAuthor( node );
+
         return new ShopifyCatalogProduct
         {
             ProductId = productId,
             Title = productName,
             ProductType = productType,
+            Author = author,
             TotalInventory = quantityInStock,
             ImageUrl = string.IsNullOrWhiteSpace( mainImageUrl ) ? null : mainImageUrl,
             Variants = variants
         };
+    }
+
+    private static string ParseAuthor( JsonElement node )
+    {
+        string? fromAlias = ReadAliasedMetafield( node, "authorMetafield" );
+        if (!string.IsNullOrWhiteSpace( fromAlias ))
+        {
+            return fromAlias;
+        }
+
+        fromAlias = ReadAliasedMetafield( node, "autorMetafield" );
+        if (!string.IsNullOrWhiteSpace( fromAlias ))
+        {
+            return fromAlias;
+        }
+
+        if (node.TryGetProperty( "metafields", out JsonElement metafieldsEl ) &&
+            metafieldsEl.ValueKind == JsonValueKind.Object &&
+            metafieldsEl.TryGetProperty( "edges", out JsonElement metafieldEdgesEl ) &&
+            metafieldEdgesEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement edge in metafieldEdgesEl.EnumerateArray())
+            {
+                if (!edge.TryGetProperty( "node", out JsonElement metafieldNode ) ||
+                    metafieldNode.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                string key = metafieldNode.TryGetProperty( "key", out JsonElement keyEl ) &&
+                               keyEl.ValueKind == JsonValueKind.String
+                    ? (keyEl.GetString() ?? string.Empty)
+                    : string.Empty;
+                if (!IsAuthorMetafieldKey( key ))
+                {
+                    continue;
+                }
+
+                string? value = ReadMetafieldNodeValue( metafieldNode );
+                if (!string.IsNullOrWhiteSpace( value ))
+                {
+                    return value;
+                }
+            }
+        }
+
+        if (node.TryGetProperty( "tags", out JsonElement tagsEl ) &&
+            tagsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement tagEl in tagsEl.EnumerateArray())
+            {
+                if (tagEl.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                string? fromTag = ParseAuthorFromTag( tagEl.GetString() );
+                if (!string.IsNullOrWhiteSpace( fromTag ))
+                {
+                    return fromTag;
+                }
+            }
+        }
+
+        if (node.TryGetProperty( "vendor", out JsonElement vendorEl ) &&
+            vendorEl.ValueKind == JsonValueKind.String)
+        {
+            string vendor = (vendorEl.GetString() ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace( vendor ) &&
+                !string.Equals( vendor, "Kirma", StringComparison.OrdinalIgnoreCase ) &&
+                !string.Equals( vendor, "Kamunikat", StringComparison.OrdinalIgnoreCase ))
+            {
+                return vendor;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsAuthorMetafieldKey( string key )
+    {
+        if (string.IsNullOrWhiteSpace( key ))
+        {
+            return false;
+        }
+
+        string normalized = key.Trim().ToLowerInvariant();
+        return normalized is "author" or "autor" or "authors" or "аўтар" or "book_author" or "book-author";
+    }
+
+    private static string? ReadAliasedMetafield( JsonElement node, string aliasProperty )
+    {
+        if (!node.TryGetProperty( aliasProperty, out JsonElement metafieldEl ) ||
+            metafieldEl.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return ReadMetafieldNodeValue( metafieldEl );
+    }
+
+    private static string? ReadMetafieldNodeValue( JsonElement metafieldNode )
+    {
+        if (!metafieldNode.TryGetProperty( "value", out JsonElement valueEl ) ||
+            valueEl.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return NormalizeAuthorValue( valueEl.GetString() );
+    }
+
+    private static string? NormalizeAuthorValue( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        string trimmed = raw.Trim();
+        if (!trimmed.StartsWith( "[", StringComparison.Ordinal ))
+        {
+            return trimmed;
+        }
+
+        try
+        {
+            JsonNode? parsed = JsonNode.Parse( trimmed );
+            if (parsed is JsonArray array)
+            {
+                List<string> parts = array
+                    .Select( x => x?.ToString()?.Trim() ?? string.Empty )
+                    .Where( x => !string.IsNullOrWhiteSpace( x ) )
+                    .ToList();
+                if (parts.Count > 0)
+                {
+                    return string.Join( ", ", parts );
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Keep raw value when Shopify returns a non-JSON list payload.
+        }
+
+        return trimmed;
+    }
+
+    private static string? ParseAuthorFromTag( string? tag )
+    {
+        if (string.IsNullOrWhiteSpace( tag ))
+        {
+            return null;
+        }
+
+        string trimmed = tag.Trim();
+        string[] prefixes =
+        [
+            "author:",
+            "autor:",
+            "аўтар:",
+            "аўтар ",
+            "author ",
+            "autor "
+        ];
+
+        foreach (string prefix in prefixes)
+        {
+            if (trimmed.StartsWith( prefix, StringComparison.OrdinalIgnoreCase ))
+            {
+                string value = trimmed[prefix.Length..].Trim();
+                return string.IsNullOrWhiteSpace( value ) ? null : value;
+            }
+        }
+
+        return null;
     }
 }

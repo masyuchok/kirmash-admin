@@ -1,3 +1,13 @@
+export type VatReportPeriod = {
+  periodYear: number;
+  periodMonth: number;
+  totalVat: number;
+  profit: number;
+  isLocked: boolean;
+  primaryReportId: number;
+  reports: VatReport[];
+};
+
 export type VatReport = {
   id: number;
   periodYear: number;
@@ -10,4 +20,5 @@ export type VatReport = {
   vatToPay: number;
   documents: string[];
   shopifyOrderIds: string[];
+  isLocked: boolean;
 };

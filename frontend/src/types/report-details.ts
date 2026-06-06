@@ -42,6 +42,8 @@ export type VatReportSummaryRow = {
   deliveryAddress?: string;
   shippingAddress?: string;
   billingAddress?: string;
+  shippingCountryCode?: string;
+  billingCountryCode?: string;
   grossAmount?: number;
   vat: number;
   netAmount?: number;
@@ -55,6 +57,7 @@ export type VatReportExpenseProductRow = {
   shopifyProductId: string;
   productTitle: string;
   quantity: number;
+  unitGrossPrice: number;
 };
 
 export type VatReportExpenseRow = {
@@ -64,7 +67,9 @@ export type VatReportExpenseRow = {
   netAmount: number;
   expenseDateUtc: string;
   comment: string;
+  invoiceNumber: string;
   isPaid: boolean;
+  isByProsvet: boolean;
   expenseInvoiceTypeId: number;
   expenseInvoiceTypeName: string;
   invoiceFileName: string;
@@ -78,6 +83,7 @@ export type VatReportDetails = {
   id: number;
   periodYear: number;
   periodMonth: number;
+  isLocked: boolean;
   vat: number;
   profit: number;
   rows: VatReportSummaryRow[];

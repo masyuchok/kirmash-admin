@@ -84,6 +84,7 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
     return {
       shopifyProductId: readString(r.shopifyProductId ?? r.ShopifyProductId),
       productName: readString(r.productName ?? r.ProductName) || '—',
+      productAuthor: readString(r.productAuthor ?? r.ProductAuthor),
       productType: readString(r.productType ?? r.ProductType),
       productAdminUrl: readString(r.productAdminUrl ?? r.ProductAdminUrl),
       mainImageUrl: readString(r.mainImageUrl ?? r.MainImageUrl) || null,

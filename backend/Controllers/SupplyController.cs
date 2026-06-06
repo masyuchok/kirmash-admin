@@ -73,6 +73,20 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet("catalog-products")]
+        public async Task<ActionResult<List<SupplyCatalogProductItem>>> GetCatalogProducts( [FromQuery] int? supplierId )
+        {
+            try
+            {
+                List<SupplyCatalogProductItem> products = await _service.GetCatalogProductsAsync( supplierId );
+                return Ok( products );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання тавараў з паставак", details = ex.Message } );
+            }
+        }
+
         [HttpDelete("{id:int}")]
         public async Task<ActionResult<object>> Delete( int id )
         {

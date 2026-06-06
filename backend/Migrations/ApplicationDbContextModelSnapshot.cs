@@ -432,6 +432,58 @@ namespace backend.Migrations
                     b.ToTable("SupplyProducts");
                 });
 
+            modelBuilder.Entity("backend.Models.VatAutoFinanceSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("FinancePersonId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("VatAutoFinanceSettings");
+                });
+
+            modelBuilder.Entity("backend.Models.VatPeriodFinancePayment", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("FinanceMovementId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsAmountLocked")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("PeriodMonth")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PeriodYear")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FinanceMovementId");
+
+                    b.HasIndex("PeriodYear", "PeriodMonth")
+                        .IsUnique();
+
+                    b.ToTable("VatPeriodFinancePayments");
+                });
+
             modelBuilder.Entity("backend.Models.VatReport", b =>
                 {
                     b.Property<int>("Id")
@@ -450,6 +502,9 @@ namespace backend.Migrations
                     b.PrimitiveCollection<string[]>("Documents")
                         .IsRequired()
                         .HasColumnType("text[]");
+
+                    b.Property<bool>("IsLocked")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -562,6 +617,14 @@ namespace backend.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
 
+                    b.Property<string>("InvoiceNumber")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<bool>("IsByProsvet")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("IsPaid")
                         .HasColumnType("boolean");
 
@@ -608,6 +671,11 @@ namespace backend.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("UnitGrossPrice")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("numeric(12,2)")
+                        .HasDefaultValue(0m);
 
                     b.Property<int>("VatReportExpenseId")
                         .HasColumnType("integer");
@@ -806,6 +874,17 @@ namespace backend.Migrations
                         .IsRequired();
 
                     b.Navigation("Supply");
+                });
+
+            modelBuilder.Entity("backend.Models.VatPeriodFinancePayment", b =>
+                {
+                    b.HasOne("backend.Models.FinanceMovement", "FinanceMovement")
+                        .WithMany()
+                        .HasForeignKey("FinanceMovementId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("FinanceMovement");
                 });
 
             modelBuilder.Entity("backend.Models.VatReportCashSale", b =>

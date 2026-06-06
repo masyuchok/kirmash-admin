@@ -16,6 +16,7 @@ import {
   MOVEMENT_KIND_OPTIONS,
   updateFinanceMovement,
   updateFinanceRecurring,
+  setVatPaymentAmountLocked,
   type FinanceMovement,
   type FinanceMovementKind,
   type FinancePerson,
@@ -23,7 +24,7 @@ import {
   type FinanceRecurringExpense,
 } from '@/lib/api/finances';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { FiChevronDown, FiChevronRight, FiEdit2, FiPlus, FiTrash2, FiX } from 'react-icons/fi';
+import { FiChevronDown, FiChevronRight, FiEdit2, FiLock, FiPlus, FiTrash2, FiUnlock, FiX } from 'react-icons/fi';
 
 function todayIso(): string {
   const d = new Date();
@@ -253,6 +254,19 @@ export default function FinancesClient() {
     }
   };
 
+  const handleToggleVatLock = async (row: FinanceMovement) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await setVatPaymentAmountLocked(row.id, !row.isVatAmountLocked);
+      await refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const openCreateRecurring = () => {
     setEditingRecurring(null);
     setRecurringForm(emptyRecurringForm());
@@ -439,6 +453,7 @@ export default function FinancesClient() {
               rows={overview.movements}
               onEdit={openEditMovement}
               onDelete={(id) => void handleDeleteMovement(id)}
+              onToggleVatLock={(row) => void handleToggleVatLock(row)}
             />
           </section>
 
@@ -637,10 +652,12 @@ function MovementsHistory({
   rows,
   onEdit,
   onDelete,
+  onToggleVatLock,
 }: {
   rows: FinanceMovement[];
   onEdit: (row: FinanceMovement) => void;
   onDelete: (id: number) => void;
+  onToggleVatLock: (row: FinanceMovement) => void;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
@@ -736,7 +753,7 @@ function MovementsHistory({
                         <th className="px-3 py-2">Тып</th>
                         <th className="px-3 py-2">Апісанне</th>
                         <th className="px-3 py-2 text-right">Сума</th>
-                        <th className="px-3 py-2 w-24" />
+                        <th className="px-3 py-2 w-32" />
                       </tr>
                     </thead>
                     <tbody>
@@ -753,10 +770,40 @@ function MovementsHistory({
                                 рэгулярны
                               </span>
                             )}
+                            {row.isVatAutoPayment && row.isVatAmountLocked && (
+                              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                                VAT зафіксаваны
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-2 text-right font-medium">{formatMoney(row.amount)}</td>
                           <td className="px-3 py-2">
                             <div className="flex justify-end gap-1">
+                              {row.isVatAutoPayment && (
+                                <button
+                                  type="button"
+                                  onClick={() => onToggleVatLock(row)}
+                                  className={`rounded p-1.5 ${
+                                    row.isVatAmountLocked
+                                      ? 'text-amber-700 hover:bg-amber-50'
+                                      : 'text-gray-500 hover:bg-gray-100'
+                                  }`}
+                                  title={
+                                    row.isVatAmountLocked
+                                      ? 'Зняць фіксацыю сумы VAT (абнаўляць пры пераразліку)'
+                                      : 'Зафіксаваць суму VAT (не абнаўляць пры пераразліку)'
+                                  }
+                                  aria-label={
+                                    row.isVatAmountLocked ? 'Зняць фіксацыю VAT' : 'Зафіксаваць VAT'
+                                  }
+                                >
+                                  {row.isVatAmountLocked ? (
+                                    <FiLock className="size-4" />
+                                  ) : (
+                                    <FiUnlock className="size-4" />
+                                  )}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => onEdit(row)}

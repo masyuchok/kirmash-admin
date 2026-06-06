@@ -5,6 +5,7 @@ namespace backend.Models
         public int Id { get; set; }
         public int PeriodYear { get; set; }
         public int PeriodMonth { get; set; }
+        public bool IsLocked { get; set; }
         public decimal Vat { get; set; }
         public decimal Profit { get; set; }
         public List<VatReportDetailsSummaryRow> Rows { get; set; } = new();
@@ -20,6 +21,8 @@ namespace backend.Models
         public string DeliveryAddress { get; set; } = string.Empty;
         public string ShippingAddress { get; set; } = string.Empty;
         public string BillingAddress { get; set; } = string.Empty;
+        public string ShippingCountryCode { get; set; } = string.Empty;
+        public string BillingCountryCode { get; set; } = string.Empty;
         public decimal GrossAmount { get; set; }
         public decimal Vat { get; set; }
         public decimal NetAmount { get; set; }
@@ -74,7 +77,9 @@ namespace backend.Models
         public decimal NetAmount { get; set; }
         public DateTime ExpenseDateUtc { get; set; }
         public string Comment { get; set; } = string.Empty;
+        public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
+        public bool IsByProsvet { get; set; }
         public int ExpenseInvoiceTypeId { get; set; }
         public string ExpenseInvoiceTypeName { get; set; } = string.Empty;
         public string InvoiceFileName { get; set; } = string.Empty;
@@ -90,5 +95,6 @@ namespace backend.Models
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
+        public decimal UnitGrossPrice { get; set; }
     }
 }
