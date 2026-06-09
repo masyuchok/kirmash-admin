@@ -256,8 +256,11 @@ public class SupplyService
             .Select( sp => new SupplyCatalogRow
             {
                 ShopifyProductId = sp.ShopifyProductId,
+                ShopifyVariantId = sp.ShopifyVariantId,
                 VatRatePercent = sp.VatRatePercent,
-                SupplyDate = sp.Supply.Date
+                SupplierPrice = sp.SupplierPrice,
+                SupplyDate = sp.Supply.Date,
+                SupplyId = sp.Supply.Id
             } )
             .ToListAsync();
 
@@ -267,27 +270,40 @@ public class SupplyService
             .Select( row =>
             {
                 string productId = ShopifyIds.NormalizeProductId( row.ShopifyProductId.Trim() );
+                string variantId = string.IsNullOrWhiteSpace( row.ShopifyVariantId )
+                    ? string.Empty
+                    : ShopifyIds.NormalizeVariantId( row.ShopifyVariantId.Trim() );
                 return new
                 {
                     ProductId = productId,
+                    VariantId = variantId,
                     row.VatRatePercent,
-                    row.SupplyDate
+                    row.SupplierPrice,
+                    row.SupplyDate,
+                    row.SupplyId
                 };
             } )
             .Where( x => !string.IsNullOrWhiteSpace( x.ProductId ) )
-            .GroupBy( x => x.ProductId, StringComparer.OrdinalIgnoreCase )
+            .GroupBy( x => (x.ProductId, x.VariantId), SupplyCatalogLineComparer.Instance )
             .Select( g =>
             {
-                var latest = g
+                var latestOverall = g
                     .OrderByDescending( x => x.SupplyDate )
-                    .ThenByDescending( x => x.VatRatePercent )
+                    .ThenByDescending( x => x.SupplyId )
                     .First();
-                productNames.TryGetValue( latest.ProductId, out string? productName );
+                var latestWithPrice = g
+                    .Where( x => x.SupplierPrice > 0m )
+                    .OrderByDescending( x => x.SupplyDate )
+                    .ThenByDescending( x => x.SupplyId )
+                    .FirstOrDefault();
+                productNames.TryGetValue( latestOverall.ProductId, out string? productName );
                 return new SupplyCatalogProductItem
                 {
-                    ShopifyProductId = latest.ProductId,
-                    ProductName = string.IsNullOrWhiteSpace( productName ) ? latest.ProductId : productName,
-                    VatRatePercent = latest.VatRatePercent
+                    ShopifyProductId = latestOverall.ProductId,
+                    ShopifyVariantId = latestOverall.VariantId,
+                    ProductName = string.IsNullOrWhiteSpace( productName ) ? latestOverall.ProductId : productName,
+                    VatRatePercent = latestWithPrice?.VatRatePercent ?? latestOverall.VatRatePercent,
+                    SupplierPrice = latestWithPrice?.SupplierPrice ?? 0m
                 };
             } )
             .OrderBy( x => x.ProductName, StringComparer.OrdinalIgnoreCase )
@@ -348,7 +364,25 @@ public class SupplyService
     private sealed class SupplyCatalogRow
     {
         public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
         public decimal VatRatePercent { get; set; }
+        public decimal SupplierPrice { get; set; }
         public DateOnly SupplyDate { get; set; }
+        public int SupplyId { get; set; }
+    }
+
+    private sealed class SupplyCatalogLineComparer : IEqualityComparer<(string ProductId, string VariantId)>
+    {
+        public static SupplyCatalogLineComparer Instance { get; } = new();
+
+        public bool Equals( (string ProductId, string VariantId) x, (string ProductId, string VariantId) y ) =>
+            string.Equals( x.ProductId, y.ProductId, StringComparison.OrdinalIgnoreCase ) &&
+            string.Equals( x.VariantId, y.VariantId, StringComparison.OrdinalIgnoreCase );
+
+        public int GetHashCode( (string ProductId, string VariantId) obj ) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode( obj.ProductId ),
+                StringComparer.OrdinalIgnoreCase.GetHashCode( obj.VariantId )
+            );
     }
 }

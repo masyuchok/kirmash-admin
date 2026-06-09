@@ -31,8 +31,10 @@ import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { fetchSupplyCatalogProducts } from '@/lib/api/supplies';
 import { fetchSuppliers } from '@/lib/api/suppliers';
 import { formatProductNameWithAuthor } from '@/lib/supply-draft';
+import { makeSupplyLineKey } from '@/lib/supply-line-key';
+import type { SupplyCatalogProduct } from '@/lib/api/supplies';
 import type { VatReportDetails, VatReportExpenseRow, VatReportSourceOrderOption } from '@/types/report-details';
-import type { ProductWithSuppliers } from '@/types/product';
+import type { ProductVariant, ProductWithSuppliers } from '@/types/product';
 import type { Supplier } from '@/types/supplier';
 import { FiRefreshCw } from 'react-icons/fi';
 import { FiChevronDown } from 'react-icons/fi';
@@ -470,20 +472,126 @@ const FOREIGN_COUNTRY_OPTIONS: Array<{ code: string; label: string }> = [
   { code: 'BY', label: 'Belarus' },
 ];
 
-type SupplyCatalogPickerProduct = {
+type ExpensePickerLine = {
+  lineKey: string;
   shopifyProductId: string;
+  shopifyVariantId: string;
   productName: string;
+  productAuthor: string;
+  variantName: string;
+  mainImageUrl: string | null;
   vatRatePercent: number;
+  supplierPrice: number;
 };
 
 type ExpenseProductLineDraft = {
+  lineKey: string;
   shopifyProductId: string;
+  shopifyVariantId: string;
   productTitle: string;
   productType: string;
   quantity: number;
   unitGrossPrice: number;
   vatRatePercent: number;
 };
+
+function visibleExpenseProductVariants(product: ProductWithSuppliers): ProductVariant[] {
+  return (product.variants ?? []).filter(
+    (variant) =>
+      (variant.variantId?.trim() || variant.variantName?.trim()) &&
+      variant.variantName !== 'Default Title'
+  );
+}
+
+function buildExpensePickerLineTitle(line: {
+  productName: string;
+  productAuthor: string;
+  variantName: string;
+}): string {
+  const base = formatProductNameWithAuthor(line.productName, line.productAuthor);
+  const variantName = line.variantName.trim();
+  return variantName ? `${base} — ${variantName}` : base;
+}
+
+function buildExpensePickerLinesFromSupply(
+  catalogProducts: ProductWithSuppliers[],
+  supplyRows: SupplyCatalogProduct[]
+): ExpensePickerLine[] {
+  const catalogById = new Map(catalogProducts.map((product) => [product.shopifyProductId, product]));
+
+  return supplyRows
+    .map((row) => {
+      const product = catalogById.get(row.shopifyProductId);
+      const variantId = row.shopifyVariantId?.trim() ?? '';
+      const variantName =
+        variantId && product
+          ? (product.variants?.find((variant) => variant.variantId === variantId)?.variantName ?? '')
+          : '';
+      return {
+        lineKey: makeSupplyLineKey(row.shopifyProductId, variantId),
+        shopifyProductId: row.shopifyProductId,
+        shopifyVariantId: variantId,
+        productName: product?.productName || row.productName || row.shopifyProductId,
+        productAuthor: product?.productAuthor ?? '',
+        variantName,
+        mainImageUrl: product?.mainImageUrl ?? null,
+        vatRatePercent: row.vatRatePercent,
+        supplierPrice: row.supplierPrice,
+      };
+    })
+    .sort((a, b) =>
+      buildExpensePickerLineTitle(a).localeCompare(buildExpensePickerLineTitle(b), 'be')
+    );
+}
+
+function buildExpensePickerLinesFromCatalog(
+  catalogProducts: ProductWithSuppliers[],
+  supplyRows: SupplyCatalogProduct[]
+): ExpensePickerLine[] {
+  const supplyByLineKey = new Map(
+    supplyRows.map((row) => [
+      makeSupplyLineKey(row.shopifyProductId, row.shopifyVariantId),
+      { vatRatePercent: row.vatRatePercent, supplierPrice: row.supplierPrice },
+    ])
+  );
+
+  const lines: ExpensePickerLine[] = [];
+  for (const product of catalogProducts) {
+    if (!product.shopifyProductId.trim()) continue;
+    const variants = visibleExpenseProductVariants(product);
+    const variantEntries =
+      variants.length > 1
+        ? variants
+        : [
+            {
+              variantId: variants[0]?.variantId ?? '',
+              variantName: variants[0]?.variantName ?? '',
+              quantityInStock: variants[0]?.quantityInStock ?? 0,
+            },
+          ];
+
+    for (const variant of variantEntries) {
+      const variantId = variant.variantId?.trim() ?? '';
+      const lineKey = makeSupplyLineKey(product.shopifyProductId, variantId);
+      const supply = supplyByLineKey.get(lineKey);
+      lines.push({
+        lineKey,
+        shopifyProductId: product.shopifyProductId,
+        shopifyVariantId: variantId,
+        productName: product.productName,
+        productAuthor: product.productAuthor,
+        variantName: variant.variantName,
+        mainImageUrl: product.mainImageUrl,
+        vatRatePercent: supply?.vatRatePercent ?? 23,
+        supplierPrice: supply?.supplierPrice ?? 0,
+      });
+    }
+  }
+
+  return lines.sort((a, b) =>
+    buildExpensePickerLineTitle(a).localeCompare(buildExpensePickerLineTitle(b), 'be')
+  );
+}
 
 function defaultExpenseDateInput(): string {
   return new Date().toISOString().slice(0, 10);
@@ -599,7 +707,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [expenseSuppliers, setExpenseSuppliers] = useState<Supplier[]>([]);
   const [expenseSupplierId, setExpenseSupplierId] = useState(0);
   const [expenseProductLines, setExpenseProductLines] = useState<ExpenseProductLineDraft[]>([]);
-  const [supplierProducts, setSupplierProducts] = useState<SupplyCatalogPickerProduct[]>([]);
+  const [supplierProducts, setSupplierProducts] = useState<ExpensePickerLine[]>([]);
   const [supplierProductsLoading, setSupplierProductsLoading] = useState(false);
   const [expenseProductSearch, setExpenseProductSearch] = useState('');
   const [expenseGrossOverride, setExpenseGrossOverride] = useState<number | null>(null);
@@ -787,37 +895,22 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     let cancelled = false;
     setSupplierProductsLoading(true);
 
-    const loadExpensePickerProducts = async (): Promise<SupplyCatalogPickerProduct[]> => {
+    const loadExpensePickerProducts = async (): Promise<ExpensePickerLine[]> => {
       const catalogProducts = await fetchProductsWithSuppliers();
-      if (expenseSupplierId > 0) {
-        const supplyRows = await fetchSupplyCatalogProducts(expenseSupplierId);
-        const nameById = new Map(
-          catalogProducts.map((product) => [product.shopifyProductId, product.productName])
-        );
-        return supplyRows.map((row) => ({
-          shopifyProductId: row.shopifyProductId,
-          productName: nameById.get(row.shopifyProductId) || row.productName || row.shopifyProductId,
-          vatRatePercent: row.vatRatePercent,
-        }));
-      }
-
-      let vatByProductId = new Map<string, number>();
+      let supplyRows: SupplyCatalogProduct[] = [];
       try {
-        const supplyRows = await fetchSupplyCatalogProducts();
-        vatByProductId = new Map(
-          supplyRows.map((row) => [row.shopifyProductId, row.vatRatePercent])
+        supplyRows = await fetchSupplyCatalogProducts(
+          expenseSupplierId > 0 ? expenseSupplierId : undefined
         );
       } catch {
-        vatByProductId = new Map();
+        supplyRows = [];
       }
 
-      return catalogProducts
-        .filter((product) => product.shopifyProductId.trim().length > 0)
-        .map((product) => ({
-          shopifyProductId: product.shopifyProductId,
-          productName: product.productName || product.shopifyProductId,
-          vatRatePercent: vatByProductId.get(product.shopifyProductId) ?? 23,
-        }));
+      if (expenseSupplierId > 0) {
+        return buildExpensePickerLinesFromSupply(catalogProducts, supplyRows);
+      }
+
+      return buildExpensePickerLinesFromCatalog(catalogProducts, supplyRows);
     };
 
     loadExpensePickerProducts()
@@ -886,9 +979,18 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
 
   const visibleSupplierProducts = useMemo(() => {
     const search = expenseProductSearch.trim().toLowerCase();
-    const sorted = [...supplierProducts].sort((a, b) => a.productName.localeCompare(b.productName, 'be'));
-    if (!search) return sorted;
-    return sorted.filter((product) => product.productName.toLowerCase().includes(search));
+    if (!search) return supplierProducts;
+    return supplierProducts.filter((line) => {
+      const haystack = [
+        line.productName,
+        line.productAuthor,
+        line.variantName,
+        buildExpensePickerLineTitle(line),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
   }, [supplierProducts, expenseProductSearch]);
 
   const expandedRow = useMemo(
@@ -1183,11 +1285,14 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const toggleForeignProduct = (product: ProductWithSuppliers, selected: boolean) => {
     if (selected) {
       setForeignProductLines((prev) => {
-        if (prev.some((line) => line.shopifyProductId === product.shopifyProductId)) return prev;
+        const lineKey = makeSupplyLineKey(product.shopifyProductId);
+        if (prev.some((line) => line.lineKey === lineKey)) return prev;
         return [
           ...prev,
           {
+            lineKey,
             shopifyProductId: product.shopifyProductId,
+            shopifyVariantId: '',
             productTitle: formatProductNameWithAuthor(product.productName, product.productAuthor),
             productType: product.productType,
             quantity: 1,
@@ -1327,7 +1432,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     const supplierId = expense.supplierId ?? 0;
     const supplierIsVatPayer = suppliers.find((supplier) => supplier.id === supplierId)?.isVatPayer ?? false;
     const lines: ExpenseProductLineDraft[] = expense.products.map((product) => ({
+      lineKey: makeSupplyLineKey(product.shopifyProductId, product.shopifyVariantId),
       shopifyProductId: product.shopifyProductId,
+      shopifyVariantId: product.shopifyVariantId ?? '',
       productTitle: product.productTitle,
       productType: '',
       quantity: product.quantity,
@@ -1360,44 +1467,42 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     setExpenseModalOpen(true);
   };
 
-  const toggleExpenseProduct = (product: SupplyCatalogPickerProduct, selected: boolean) => {
+  const toggleExpenseProduct = (pickerLine: ExpensePickerLine, selected: boolean) => {
     if (selected) {
+      const defaultUnitGrossPrice =
+        pickerLine.supplierPrice > 0 ? round2(pickerLine.supplierPrice) : 0;
       setExpenseProductLines((prev) => {
-        if (prev.some((line) => line.shopifyProductId === product.shopifyProductId)) return prev;
+        if (prev.some((line) => line.lineKey === pickerLine.lineKey)) return prev;
         return [
           ...prev,
           {
-            shopifyProductId: product.shopifyProductId,
-            productTitle: product.productName,
+            lineKey: pickerLine.lineKey,
+            shopifyProductId: pickerLine.shopifyProductId,
+            shopifyVariantId: pickerLine.shopifyVariantId,
+            productTitle: buildExpensePickerLineTitle(pickerLine),
             productType: '',
             quantity: 1,
-            unitGrossPrice: 0,
-            vatRatePercent: product.vatRatePercent,
+            unitGrossPrice: defaultUnitGrossPrice,
+            vatRatePercent: pickerLine.vatRatePercent,
           },
         ];
       });
       return;
     }
-    setExpenseProductLines((prev) =>
-      prev.filter((line) => line.shopifyProductId !== product.shopifyProductId)
-    );
+    setExpenseProductLines((prev) => prev.filter((line) => line.lineKey !== pickerLine.lineKey));
   };
 
-  const updateExpenseProductQuantity = (shopifyProductId: string, quantity: number) => {
+  const updateExpenseProductQuantity = (lineKey: string, quantity: number) => {
     const safeQuantity = Math.max(1, Math.trunc(quantity) || 1);
     setExpenseProductLines((prev) =>
-      prev.map((line) =>
-        line.shopifyProductId === shopifyProductId ? { ...line, quantity: safeQuantity } : line
-      )
+      prev.map((line) => (line.lineKey === lineKey ? { ...line, quantity: safeQuantity } : line))
     );
   };
 
-  const updateExpenseProductUnitGrossPrice = (shopifyProductId: string, unitGrossPrice: number) => {
+  const updateExpenseProductUnitGrossPrice = (lineKey: string, unitGrossPrice: number) => {
     const safePrice = Math.max(0, unitGrossPrice);
     setExpenseProductLines((prev) =>
-      prev.map((line) =>
-        line.shopifyProductId === shopifyProductId ? { ...line, unitGrossPrice: safePrice } : line
-      )
+      prev.map((line) => (line.lineKey === lineKey ? { ...line, unitGrossPrice: safePrice } : line))
     );
   };
 
@@ -1447,7 +1552,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         includeVatInTotal: newExpense.includeVatInTotal,
         expenseInvoiceTypeId: newExpense.expenseInvoiceTypeId,
         supplierId: isSupplierPaymentExpense && expenseSupplierId > 0 ? expenseSupplierId : undefined,
-        products: isSupplierPaymentExpense ? expenseProductLines : undefined,
+        products: isSupplierPaymentExpense
+          ? expenseProductLines.map((line) => ({
+              shopifyProductId: line.shopifyProductId,
+              shopifyVariantId: line.shopifyVariantId,
+              productTitle: line.productTitle,
+              quantity: line.quantity,
+              unitGrossPrice: line.unitGrossPrice,
+              vatRatePercent: line.vatRatePercent,
+            }))
+          : undefined,
       };
 
       if (editingExpenseId !== null) {
@@ -4141,26 +4255,46 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           </div>
                         )}
                         {!supplierProductsLoading &&
-                          visibleSupplierProducts.map((product) => {
+                          visibleSupplierProducts.map((pickerLine) => {
                             const line = expenseProductLines.find(
-                              (item) => item.shopifyProductId === product.shopifyProductId
+                              (item) => item.lineKey === pickerLine.lineKey
                             );
                             const selected = Boolean(line);
                             return (
                               <div
-                                key={product.shopifyProductId}
+                                key={pickerLine.lineKey}
                                 className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-100 px-3 py-2 last:border-b-0"
                               >
                                 <input
                                   type="checkbox"
                                   checked={selected}
-                                  onChange={(e) => toggleExpenseProduct(product, e.target.checked)}
+                                  onChange={(e) => toggleExpenseProduct(pickerLine, e.target.checked)}
                                   className="size-4 shrink-0 rounded border-gray-300 accent-primary"
                                 />
+                                {pickerLine.mainImageUrl ? (
+                                  <img
+                                    src={pickerLine.mainImageUrl}
+                                    alt={pickerLine.productName}
+                                    className="h-10 w-8 shrink-0 rounded border border-gray-200 object-cover object-center"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <div className="h-10 w-8 shrink-0 rounded border border-gray-200 bg-gray-100" />
+                                )}
                                 <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
-                                  <span className="line-clamp-2">{product.productName}</span>
+                                  <span className="line-clamp-2">
+                                    {formatProductNameWithAuthor(
+                                      pickerLine.productName,
+                                      pickerLine.productAuthor
+                                    )}
+                                  </span>
+                                  {pickerLine.variantName.trim() && (
+                                    <span className="block text-xs text-gray-600">
+                                      {pickerLine.variantName}
+                                    </span>
+                                  )}
                                   <span className="text-xs text-gray-500">
-                                    VAT {formatAmount(product.vatRatePercent)}%
+                                    VAT {formatAmount(pickerLine.vatRatePercent)}%
                                   </span>
                                 </span>
                                 {selected && (
@@ -4174,7 +4308,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         value={line?.quantity ?? 1}
                                         onChange={(e) =>
                                           updateExpenseProductQuantity(
-                                            product.shopifyProductId,
+                                            pickerLine.lineKey,
                                             Number(e.target.value)
                                           )
                                         }
@@ -4190,7 +4324,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         value={line?.unitGrossPrice || ''}
                                         onChange={(e) =>
                                           updateExpenseProductUnitGrossPrice(
-                                            product.shopifyProductId,
+                                            pickerLine.lineKey,
                                             Number(e.target.value)
                                           )
                                         }

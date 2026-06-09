@@ -910,13 +910,17 @@ public class VatReportMutationService
                     throw new InvalidOperationException( "Пастаўшчык не знойдзены." );
                 }
 
-                List<string> supplierProductIds = await _db.SupplyProducts
+                List<SupplyProductLineKeyRow> supplierProductLines = await _db.SupplyProducts
                     .AsNoTracking()
                     .Where( sp => sp.Supply.SupplierId == request.SupplierId.Value )
-                    .Select( sp => sp.ShopifyProductId )
+                    .Select( sp => new SupplyProductLineKeyRow
+                    {
+                        ShopifyProductId = sp.ShopifyProductId,
+                        ShopifyVariantId = sp.ShopifyVariantId
+                    } )
                     .ToListAsync();
-                allowedProductIds = supplierProductIds
-                    .Select( id => ShopifyIds.NormalizeGid( id, "gid://shopify/Product/" ).Trim() )
+                allowedProductIds = supplierProductLines
+                    .Select( line => BuildSupplyLineKey( line.ShopifyProductId, line.ShopifyVariantId ) )
                     .ToHashSet( StringComparer.OrdinalIgnoreCase );
                 supplierId = supplier.Id;
             }
@@ -927,11 +931,15 @@ public class VatReportMutationService
                     line.ShopifyProductId.Trim(),
                     "gid://shopify/Product/"
                 ).Trim();
-                if (allowedProductIds is not null && !allowedProductIds.Contains( normalizedProductId ))
+                if (allowedProductIds is not null)
                 {
-                    throw new InvalidOperationException(
-                        $"Тавар «{line.ProductTitle}» не належыць выбранаму пастаўшчыку."
-                    );
+                    string lineKey = BuildSupplyLineKey( normalizedProductId, line.ShopifyVariantId );
+                    if (!allowedProductIds.Contains( lineKey ))
+                    {
+                        throw new InvalidOperationException(
+                            $"Тавар «{line.ProductTitle}» не належыць выбранаму пастаўшчыку."
+                        );
+                    }
                 }
             }
 
@@ -991,12 +999,30 @@ public class VatReportMutationService
                 line.ShopifyProductId.Trim(),
                 "gid://shopify/Product/"
             ).Trim(),
+            ShopifyVariantId = string.IsNullOrWhiteSpace( line.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( line.ShopifyVariantId.Trim() ),
             ProductTitle = string.IsNullOrWhiteSpace( line.ProductTitle )
                 ? line.ShopifyProductId.Trim()
                 : line.ProductTitle.Trim(),
             Quantity = line.Quantity,
             UnitGrossPrice = VatReportHelpers.Round2( line.UnitGrossPrice )
         };
+
+    private static string BuildSupplyLineKey( string shopifyProductId, string? shopifyVariantId )
+    {
+        string productId = ShopifyIds.NormalizeProductId( shopifyProductId.Trim() );
+        string variantId = string.IsNullOrWhiteSpace( shopifyVariantId )
+            ? string.Empty
+            : ShopifyIds.NormalizeVariantId( shopifyVariantId.Trim() );
+        return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
+    }
+
+    private sealed class SupplyProductLineKeyRow
+    {
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
+    }
 
     private async Task<VatReport> ResolveOrCreateForeignReportAsync( int year, int month )
     {

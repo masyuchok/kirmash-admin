@@ -55,6 +55,7 @@ export type VatReportSummaryRow = {
 export type VatReportExpenseProductRow = {
   id: number;
   shopifyProductId: string;
+  shopifyVariantId: string;
   productTitle: string;
   quantity: number;
   unitGrossPrice: number;

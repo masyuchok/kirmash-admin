@@ -157,6 +157,7 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                         return {
                           id: readInt(row.id ?? row.Id),
                           shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
+                          shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
                           productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
                           quantity: readInt(row.quantity ?? row.Quantity),
                           unitGrossPrice: readNumber(row.unitGrossPrice ?? row.UnitGrossPrice),
@@ -336,6 +337,7 @@ export async function createVatReportExpense(
     supplierId?: number;
     products?: Array<{
       shopifyProductId: string;
+      shopifyVariantId?: string;
       productTitle: string;
       quantity: number;
       unitGrossPrice: number;
@@ -373,6 +375,7 @@ export async function updateVatReportExpense(
     supplierId?: number;
     products?: Array<{
       shopifyProductId: string;
+      shopifyVariantId?: string;
       productTitle: string;
       quantity: number;
       unitGrossPrice: number;

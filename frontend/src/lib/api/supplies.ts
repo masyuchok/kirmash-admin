@@ -141,8 +141,10 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
 
 export type SupplyCatalogProduct = {
   shopifyProductId: string;
+  shopifyVariantId: string;
   productName: string;
   vatRatePercent: number;
+  supplierPrice: number;
 };
 
 export async function fetchSupplyCatalogProducts(
@@ -164,8 +166,10 @@ export async function fetchSupplyCatalogProducts(
     const r = row as Record<string, unknown>;
     return {
       shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
+      shopifyVariantId: String(r.shopifyVariantId ?? r.ShopifyVariantId ?? ''),
       productName: String(r.productName ?? r.ProductName ?? ''),
       vatRatePercent: readNumber(r.vatRatePercent ?? r.VatRatePercent ?? 23),
+      supplierPrice: readNumber(r.supplierPrice ?? r.SupplierPrice),
     };
   });
 }
