@@ -10,15 +10,18 @@ public class SupplyService
     private readonly AppDbContext _db;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ShopifyInventoryService _shopifyInventory;
+    private readonly ShopifyProductCatalogService _shopifyCatalog;
 
     public SupplyService(
         AppDbContext db,
         IHttpContextAccessor httpContextAccessor,
-        ShopifyInventoryService shopifyInventory )
+        ShopifyInventoryService shopifyInventory,
+        ShopifyProductCatalogService shopifyCatalog )
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _shopifyInventory = shopifyInventory;
+        _shopifyCatalog = shopifyCatalog;
     }
 
         public async Task<List<Supply>> GetAllAsync()
@@ -258,10 +261,12 @@ public class SupplyService
             } )
             .ToListAsync();
 
+        Dictionary<string, string> productNames = await BuildProductNamesAsync();
+
         return rows
             .Select( row =>
             {
-                string productId = ShopifyIds.NormalizeGid( row.ShopifyProductId.Trim(), "gid://shopify/Product/" ).Trim();
+                string productId = ShopifyIds.NormalizeProductId( row.ShopifyProductId.Trim() );
                 return new
                 {
                     ProductId = productId,
@@ -277,15 +282,67 @@ public class SupplyService
                     .OrderByDescending( x => x.SupplyDate )
                     .ThenByDescending( x => x.VatRatePercent )
                     .First();
+                productNames.TryGetValue( latest.ProductId, out string? productName );
                 return new SupplyCatalogProductItem
                 {
                     ShopifyProductId = latest.ProductId,
-                    ProductName = latest.ProductId,
+                    ProductName = string.IsNullOrWhiteSpace( productName ) ? latest.ProductId : productName,
                     VatRatePercent = latest.VatRatePercent
                 };
             } )
-            .OrderBy( x => x.ShopifyProductId, StringComparer.OrdinalIgnoreCase )
+            .OrderBy( x => x.ProductName, StringComparer.OrdinalIgnoreCase )
             .ToList();
+    }
+
+    private async Task<Dictionary<string, string>> BuildProductNamesAsync()
+    {
+        Dictionary<string, string> names = new( StringComparer.OrdinalIgnoreCase );
+
+        List<VatReportExpenseProduct> expenseProducts = await _db.VatReportExpenseProducts
+            .AsNoTracking()
+            .Where( p => p.ProductTitle != "" )
+            .ToListAsync();
+        foreach (VatReportExpenseProduct product in expenseProducts)
+        {
+            string productId = ShopifyIds.NormalizeProductId( product.ShopifyProductId );
+            if (string.IsNullOrWhiteSpace( productId ) || string.IsNullOrWhiteSpace( product.ProductTitle )) continue;
+            names[productId] = product.ProductTitle.Trim();
+        }
+
+        List<VatReportCashSale> cashSales = await _db.VatReportCashSales
+            .AsNoTracking()
+            .Where( s => s.ProductTitle != "" )
+            .ToListAsync();
+        foreach (VatReportCashSale sale in cashSales)
+        {
+            string productId = ShopifyIds.NormalizeProductId( sale.ShopifyProductId );
+            if (string.IsNullOrWhiteSpace( productId ) || string.IsNullOrWhiteSpace( sale.ProductTitle )) continue;
+            names[productId] = sale.ProductTitle.Trim();
+        }
+
+        List<VatReportRowItem> rowItems = await _db.VatReportRowItems
+            .AsNoTracking()
+            .Where( i => i.ProductTitle != "" )
+            .ToListAsync();
+        foreach (VatReportRowItem item in rowItems)
+        {
+            string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId );
+            if (string.IsNullOrWhiteSpace( productId ) || string.IsNullOrWhiteSpace( item.ProductTitle )) continue;
+            names[productId] = item.ProductTitle.Trim();
+        }
+
+        if (ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession? session ))
+        {
+            List<ShopifyCatalogProduct> catalogProducts =
+                await _shopifyCatalog.FetchAllProductsAsync( session.Shop, session.AccessToken );
+            foreach (ShopifyCatalogProduct product in catalogProducts)
+            {
+                if (string.IsNullOrWhiteSpace( product.ProductId ) || string.IsNullOrWhiteSpace( product.Title )) continue;
+                names[product.ProductId] = product.Title.Trim();
+            }
+        }
+
+        return names;
     }
 
     private sealed class SupplyCatalogRow

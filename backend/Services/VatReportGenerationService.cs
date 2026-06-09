@@ -286,7 +286,7 @@ public class VatReportGenerationService
             foreach (ShopifyOrderDto order in orders)
             {
                 deliveryByOrderId.TryGetValue( order.OrderId, out ForeignDeliveryInfo? deliveryInfo );
-                string orderNumber = ResolveForeignOrderNumber( order.OrderNumber, deliveryInfo );
+                string orderNumber = ResolveForeignOrderNumber( order.OrderNumber, deliveryInfo, order.CountryCode );
                 decimal shippingGross = VatReportHelpers.Round2( order.ShippingGross );
                 bool isEuDestination = IsEuCountryCode( order.CountryCode );
                 Dictionary<decimal, decimal> grossByRate = new();
@@ -350,7 +350,10 @@ public class VatReportGenerationService
             return rows;
         }
 
-    private static string ResolveForeignOrderNumber( string orderNumber, ForeignDeliveryInfo? deliveryInfo )
+    private static string ResolveForeignOrderNumber(
+        string orderNumber,
+        ForeignDeliveryInfo? deliveryInfo,
+        string fallbackCountryCode )
     {
         if (deliveryInfo is null)
         {
@@ -365,7 +368,17 @@ public class VatReportGenerationService
             return orderNumber;
         }
 
-        return VatReportHelpers.EncodeOrderNumberWithContact( orderNumber, deliveryInfo.Name, address );
+        string countryCode = !string.IsNullOrWhiteSpace( deliveryInfo.ShippingCountryCode )
+            ? deliveryInfo.ShippingCountryCode
+            : (!string.IsNullOrWhiteSpace( deliveryInfo.BillingCountryCode )
+                ? deliveryInfo.BillingCountryCode
+                : fallbackCountryCode);
+
+        return VatReportHelpers.EncodeOrderNumberWithContact(
+            orderNumber,
+            deliveryInfo.Name,
+            address,
+            countryCode );
     }
 
     private static VatReportRow BuildRow(

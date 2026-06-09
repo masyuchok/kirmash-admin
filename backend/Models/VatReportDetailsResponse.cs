@@ -80,6 +80,7 @@ namespace backend.Models
         public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
         public bool IsByProsvet { get; set; }
+        public bool IncludeVatInTotal { get; set; }
         public int ExpenseInvoiceTypeId { get; set; }
         public string ExpenseInvoiceTypeName { get; set; } = string.Empty;
         public string InvoiceFileName { get; set; } = string.Empty;

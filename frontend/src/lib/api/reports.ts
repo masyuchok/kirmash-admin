@@ -135,6 +135,7 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                     invoiceNumber: String(e.invoiceNumber ?? e.InvoiceNumber ?? ''),
                     isPaid: Boolean(e.isPaid ?? e.IsPaid ?? false),
                     isByProsvet: Boolean(e.isByProsvet ?? e.IsByProsvet ?? false),
+                    includeVatInTotal: Boolean(e.includeVatInTotal ?? e.IncludeVatInTotal ?? true),
                     expenseInvoiceTypeId: readInt(e.expenseInvoiceTypeId ?? e.ExpenseInvoiceTypeId),
                     expenseInvoiceTypeName: String(
                       e.expenseInvoiceTypeName ?? e.ExpenseInvoiceTypeName ?? ''
@@ -330,6 +331,7 @@ export async function createVatReportExpense(
     invoiceNumber?: string;
     isPaid: boolean;
     isByProsvet: boolean;
+    includeVatInTotal: boolean;
     expenseInvoiceTypeId: number;
     supplierId?: number;
     products?: Array<{
@@ -366,6 +368,7 @@ export async function updateVatReportExpense(
     invoiceNumber?: string;
     isPaid: boolean;
     isByProsvet: boolean;
+    includeVatInTotal: boolean;
     expenseInvoiceTypeId: number;
     supplierId?: number;
     products?: Array<{

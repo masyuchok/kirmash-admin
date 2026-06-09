@@ -10,6 +10,7 @@ namespace backend.Models
         public string? InvoiceNumber { get; set; }
         public bool IsPaid { get; set; }
         public bool IsByProsvet { get; set; }
+        public bool IncludeVatInTotal { get; set; } = true;
         public int ExpenseInvoiceTypeId { get; set; }
         public int? SupplierId { get; set; }
         public List<VatReportExpenseProductCreateRequest>? Products { get; set; }

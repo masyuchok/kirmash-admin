@@ -444,6 +444,7 @@ public class VatReportMutationService
                 InvoiceNumber = payload.InvoiceNumber,
                 IsPaid = payload.IsPaid,
                 IsByProsvet = payload.IsByProsvet,
+                IncludeVatInTotal = payload.IncludeVatInTotal,
                 SupplierId = payload.SupplierId,
                 CreatedAtUtc = DateTime.UtcNow
             };
@@ -488,6 +489,7 @@ public class VatReportMutationService
             expense.InvoiceNumber = payload.InvoiceNumber;
             expense.IsPaid = payload.IsPaid;
             expense.IsByProsvet = payload.IsByProsvet;
+            expense.IncludeVatInTotal = payload.IncludeVatInTotal;
             expense.SupplierId = payload.SupplierId;
 
             _db.VatReportExpenseProducts.RemoveRange( expense.Products );
@@ -750,11 +752,11 @@ public class VatReportMutationService
         await _locks.EnsurePeriodUnlockedByReportIdAsync( foreignReport.Id );
 
         string countryCode = (request.CountryCode ?? string.Empty).Trim().ToUpperInvariant();
-        string addressForStorage = AppendCountryToAddressIfNeeded( deliveryAddress, countryCode );
         string encodedOrderNumber = VatReportHelpers.EncodeOrderNumberWithContact(
             orderNumber,
             deliveryName,
-            addressForStorage
+            deliveryAddress,
+            countryCode
         );
         string shopifyOrderId = $"manual-{Guid.NewGuid():N}";
         DateTime orderDateUtc = DateTime.SpecifyKind( request.OrderDateUtc, DateTimeKind.Utc );
@@ -976,6 +978,7 @@ public class VatReportMutationService
             string.IsNullOrWhiteSpace( request.InvoiceNumber ) ? string.Empty : request.InvoiceNumber.Trim(),
             request.IsPaid,
             request.IsByProsvet,
+            request.IncludeVatInTotal,
             supplierId,
             productLines
         );
@@ -1179,6 +1182,7 @@ public class VatReportMutationService
         string InvoiceNumber,
         bool IsPaid,
         bool IsByProsvet,
+        bool IncludeVatInTotal,
         int? SupplierId,
         List<VatReportExpenseProductCreateRequest> ProductLines );
 }

@@ -75,37 +75,102 @@ internal static class VatReportHelpers
     public static string EncodeOrderNumberWithContact(
         string orderNumberBase,
         string deliveryName,
-        string deliveryAddress )
+        string deliveryAddress,
+        string? countryCode = null )
     {
+        const int maxLen = 64;
+        const string sep = " || ";
         string order = (orderNumberBase ?? string.Empty).Trim();
         string name = (deliveryName ?? string.Empty).Trim();
         string address = (deliveryAddress ?? string.Empty).Trim();
-        string encoded = $"{order} || {name} || {address}";
-        if (encoded.Length <= 64) return encoded;
+        string country = NormalizeCountryCode( countryCode );
 
-        int available = Math.Max( 0, 64 - order.Length - 8 );
-        string clippedName = name[..Math.Min( name.Length, available )];
-        available = Math.Max( 0, 64 - order.Length - clippedName.Length - 8 );
-        string clippedAddress = address[..Math.Min( address.Length, available )];
-        encoded = $"{order} || {clippedName} || {clippedAddress}";
-        return encoded.Length <= 64 ? encoded : order[..Math.Min( order.Length, 64 )];
+        if (string.IsNullOrEmpty( country ))
+        {
+            return EncodeOrderNumberLegacy( order, name, address, maxLen, sep );
+        }
+
+        string Build( string contactName, string contactAddress ) =>
+            $"{order}{sep}{contactName}{sep}{contactAddress}{sep}{country}";
+
+        string full = Build( name, address );
+        if (full.Length <= maxLen) return full;
+
+        int overhead = order.Length + country.Length + sep.Length * 3;
+        int available = maxLen - overhead;
+        if (available <= 0)
+        {
+            string orderWithCountry = $"{order}{sep}{country}";
+            return orderWithCountry.Length <= maxLen
+                ? orderWithCountry
+                : order[..Math.Min( order.Length, maxLen )];
+        }
+
+        string clippedName = name;
+        string clippedAddress = address;
+        while (Build( clippedName, clippedAddress ).Length > maxLen && clippedAddress.Length > 0)
+        {
+            clippedAddress = clippedAddress[..^1];
+        }
+
+        while (Build( clippedName, clippedAddress ).Length > maxLen && clippedName.Length > 0)
+        {
+            clippedName = clippedName[..^1];
+        }
+
+        return Build( clippedName, clippedAddress );
     }
 
-    public static (string orderNumber, string deliveryName, string deliveryAddress) ParseOrderNumberAndContact(
-        string orderNumberRaw )
+    public static (string orderNumber, string deliveryName, string deliveryAddress, string countryCode)
+        ParseOrderNumberAndContact( string orderNumberRaw )
     {
-        if (string.IsNullOrWhiteSpace( orderNumberRaw )) return (string.Empty, string.Empty, string.Empty);
+        if (string.IsNullOrWhiteSpace( orderNumberRaw ))
+        {
+            return (string.Empty, string.Empty, string.Empty, string.Empty);
+        }
+
         string[] parts = orderNumberRaw.Split( "||", StringSplitOptions.TrimEntries );
+        if (parts.Length >= 4)
+        {
+            return (
+                parts[0].Trim(),
+                parts[1].Trim(),
+                parts[2].Trim(),
+                NormalizeCountryCode( parts[3] )
+            );
+        }
+
         if (parts.Length >= 3)
         {
-            return (parts[0].Trim(), parts[1].Trim(), parts[2].Trim());
+            return (parts[0].Trim(), parts[1].Trim(), parts[2].Trim(), string.Empty);
         }
 
         if (parts.Length == 2)
         {
-            return (parts[0].Trim(), string.Empty, parts[1].Trim());
+            return (parts[0].Trim(), string.Empty, parts[1].Trim(), string.Empty);
         }
 
-        return (orderNumberRaw.Trim(), string.Empty, string.Empty);
+        return (orderNumberRaw.Trim(), string.Empty, string.Empty, string.Empty);
+    }
+
+    private static string NormalizeCountryCode( string? countryCode ) =>
+        string.IsNullOrWhiteSpace( countryCode ) ? string.Empty : countryCode.Trim().ToUpperInvariant();
+
+    private static string EncodeOrderNumberLegacy(
+        string order,
+        string name,
+        string address,
+        int maxLen,
+        string sep )
+    {
+        string encoded = $"{order}{sep}{name}{sep}{address}";
+        if (encoded.Length <= maxLen) return encoded;
+
+        int available = Math.Max( 0, maxLen - order.Length - 8 );
+        string clippedName = name[..Math.Min( name.Length, available )];
+        available = Math.Max( 0, maxLen - order.Length - clippedName.Length - 8 );
+        string clippedAddress = address[..Math.Min( address.Length, available )];
+        encoded = $"{order}{sep}{clippedName}{sep}{clippedAddress}";
+        return encoded.Length <= maxLen ? encoded : order[..Math.Min( order.Length, maxLen )];
     }
 }

@@ -34,6 +34,8 @@ export type FinanceRecurringExpense = {
   amount: number;
   description: string;
   dayOfMonth: number;
+  startDate: string;
+  endDate: string | null;
   isActive: boolean;
 };
 
@@ -110,6 +112,8 @@ function mapRecurring(row: Record<string, unknown>): FinanceRecurringExpense {
     amount: Number(pick(row, 'amount', 'Amount')) || 0,
     description: String(pick(row, 'description', 'Description') ?? ''),
     dayOfMonth: Number(pick(row, 'dayOfMonth', 'DayOfMonth')) || 1,
+    startDate: String(pick(row, 'startDate', 'StartDate') ?? ''),
+    endDate: (pick<string | null>(row, 'endDate', 'EndDate') ?? null) || null,
     isActive: Boolean(pick(row, 'isActive', 'IsActive') ?? true),
   };
 }
@@ -305,6 +309,8 @@ export type FinanceRecurringPayload = {
   amount: number;
   description: string;
   dayOfMonth: number;
+  startDate: string;
+  endDate?: string | null;
 };
 
 export async function createFinanceRecurring(payload: FinanceRecurringPayload): Promise<FinanceRecurringExpense> {

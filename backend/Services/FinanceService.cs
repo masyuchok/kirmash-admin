@@ -230,6 +230,9 @@ namespace backend.Services
             if (amount <= 0) return null;
 
             int day = ClampDayOfMonth( request.DayOfMonth );
+            if (!TryParseDate( request.StartDate, out DateOnly startDate )) return null;
+            if (!TryParseOptionalDate( request.EndDate, out DateOnly? endDate )) return null;
+            if (endDate.HasValue && endDate.Value < startDate) return null;
 
             FinanceRecurringExpense row = new()
             {
@@ -238,12 +241,14 @@ namespace backend.Services
                 Amount = amount,
                 Description = description,
                 DayOfMonth = day,
+                StartDate = startDate,
+                EndDate = endDate,
                 IsActive = true,
                 CreatedAtUtc = DateTime.UtcNow
             };
             _db.FinanceRecurringExpenses.Add( row );
             await _db.SaveChangesAsync();
-            await ApplyRecurringForMonthAsync( row, DateTime.UtcNow.Year, DateTime.UtcNow.Month );
+            await ApplyRecurringThroughCurrentMonthAsync( row );
             return ToRecurringDto( row );
         }
 
@@ -261,10 +266,16 @@ namespace backend.Services
             decimal amount = NormalizeAmount( request.Amount );
             if (amount <= 0) return null;
 
+            if (!TryParseDate( request.StartDate, out DateOnly startDate )) return null;
+            if (!TryParseOptionalDate( request.EndDate, out DateOnly? endDate )) return null;
+            if (endDate.HasValue && endDate.Value < startDate) return null;
+
             row.Kind = kind;
             row.Amount = amount;
             row.Description = description;
             row.DayOfMonth = ClampDayOfMonth( request.DayOfMonth );
+            row.StartDate = startDate;
+            row.EndDate = endDate;
             row.IsActive = request.IsActive;
             await _db.SaveChangesAsync();
             return ToRecurringDto( row );
@@ -293,9 +304,39 @@ namespace backend.Services
             }
         }
 
+        private async Task ApplyRecurringThroughCurrentMonthAsync( FinanceRecurringExpense recurring )
+        {
+            DateTime now = DateTime.UtcNow;
+            DateOnly currentMonth = new( now.Year, now.Month, 1 );
+            DateOnly fromMonth = new( recurring.StartDate.Year, recurring.StartDate.Month, 1 );
+            DateOnly toMonth = recurring.EndDate.HasValue
+                ? MinMonth( new DateOnly( recurring.EndDate.Value.Year, recurring.EndDate.Value.Month, 1 ), currentMonth )
+                : currentMonth;
+            if (fromMonth > toMonth) return;
+
+            int year = fromMonth.Year;
+            int month = fromMonth.Month;
+            while (true)
+            {
+                DateOnly cursor = new( year, month, 1 );
+                if (cursor > toMonth) break;
+                await ApplyRecurringForMonthAsync( recurring, year, month );
+                if (month == 12)
+                {
+                    month = 1;
+                    year++;
+                }
+                else
+                {
+                    month++;
+                }
+            }
+        }
+
         private async Task ApplyRecurringForMonthAsync( FinanceRecurringExpense recurring, int year, int month )
         {
             if (!recurring.IsActive) return;
+            if (!IsRecurringActiveForMonth( recurring, year, month )) return;
 
             bool alreadyApplied = await _db.FinanceRecurringApplications.AnyAsync( x =>
                 x.RecurringExpenseId == recurring.Id && x.Year == year && x.Month == month );
@@ -432,6 +473,37 @@ namespace backend.Services
             return DateOnly.TryParse( raw.Trim(), out date );
         }
 
+        private static bool TryParseOptionalDate( string? raw, out DateOnly? date )
+        {
+            if (string.IsNullOrWhiteSpace( raw ))
+            {
+                date = null;
+                return true;
+            }
+
+            if (DateOnly.TryParse( raw.Trim(), out DateOnly parsed ))
+            {
+                date = parsed;
+                return true;
+            }
+
+            date = null;
+            return false;
+        }
+
+        private static bool IsRecurringActiveForMonth( FinanceRecurringExpense recurring, int year, int month )
+        {
+            DateOnly targetMonth = new( year, month, 1 );
+            DateOnly startMonth = new( recurring.StartDate.Year, recurring.StartDate.Month, 1 );
+            if (targetMonth < startMonth) return false;
+            if (!recurring.EndDate.HasValue) return true;
+
+            DateOnly endMonth = new( recurring.EndDate.Value.Year, recurring.EndDate.Value.Month, 1 );
+            return targetMonth <= endMonth;
+        }
+
+        private static DateOnly MinMonth( DateOnly a, DateOnly b ) => a <= b ? a : b;
+
         private static decimal NormalizeAmount( decimal amount ) =>
             Math.Round( amount, 2, MidpointRounding.AwayFromZero );
 
@@ -492,6 +564,8 @@ namespace backend.Services
             Amount = row.Amount,
             Description = row.Description,
             DayOfMonth = row.DayOfMonth,
+            StartDate = row.StartDate.ToString( "yyyy-MM-dd" ),
+            EndDate = row.EndDate?.ToString( "yyyy-MM-dd" ),
             IsActive = row.IsActive
         };
     }

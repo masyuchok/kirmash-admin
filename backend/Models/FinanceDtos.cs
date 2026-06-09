@@ -61,6 +61,8 @@ namespace backend.Models
         public decimal Amount { get; set; }
         public string Description { get; set; } = string.Empty;
         public int DayOfMonth { get; set; }
+        public string StartDate { get; set; } = string.Empty;
+        public string? EndDate { get; set; }
         public bool IsActive { get; set; }
     }
 
@@ -71,6 +73,8 @@ namespace backend.Models
         public decimal Amount { get; set; }
         public string? Description { get; set; }
         public int DayOfMonth { get; set; } = 1;
+        public string? StartDate { get; set; }
+        public string? EndDate { get; set; }
     }
 
     public class FinanceRecurringExpenseUpdateRequest
@@ -79,6 +83,8 @@ namespace backend.Models
         public decimal Amount { get; set; }
         public string? Description { get; set; }
         public int DayOfMonth { get; set; } = 1;
+        public string? StartDate { get; set; }
+        public string? EndDate { get; set; }
         public bool IsActive { get; set; } = true;
     }
 

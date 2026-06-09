@@ -30,6 +30,7 @@ import { fetchExpenseInvoiceTypes, fetchInvoiceSettings, type ExpenseInvoiceType
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { fetchSupplyCatalogProducts } from '@/lib/api/supplies';
 import { fetchSuppliers } from '@/lib/api/suppliers';
+import { formatProductNameWithAuthor } from '@/lib/supply-draft';
 import type { VatReportDetails, VatReportExpenseRow, VatReportSourceOrderOption } from '@/types/report-details';
 import type { ProductWithSuppliers } from '@/types/product';
 import type { Supplier } from '@/types/supplier';
@@ -239,6 +240,22 @@ function normalizeInvoiceAddress(address: string): string {
   return address.replace(/,\s*$/, '').trim();
 }
 
+function inferUsCountryFromAddress(address: string): string {
+  const normalized = normalizeInvoiceAddress(address);
+  if (!normalized) return '';
+  if (
+    /\b(los angeles|new york|san francisco|chicago|houston|miami|seattle|boston|philadelphia|atlanta|denver|portland|phoenix|dallas|austin|orlando|san diego|las vegas)\b/i.test(
+      normalized,
+    )
+  ) {
+    return 'Stany Zjednoczone';
+  }
+  if (/,\s*[A-Z]{2}(\s+\d{2,5})?\s*$/i.test(normalized)) {
+    return 'Stany Zjednoczone';
+  }
+  return '';
+}
+
 function invoiceCountryLabel(codeOrName?: string, address?: string): string {
   const hint = (codeOrName ?? '').trim();
   if (hint) {
@@ -258,6 +275,9 @@ function invoiceCountryLabel(codeOrName?: string, address?: string): string {
 
   const fromCity = inferCountryFromCity(normalizedAddress);
   if (fromCity) return fromCity;
+
+  const fromUsAddress = inferUsCountryFromAddress(normalizedAddress);
+  if (fromUsAddress) return fromUsAddress;
 
   const fromAddress = extractCountryFromAddress(normalizedAddress);
   if (fromAddress) {
@@ -459,6 +479,7 @@ type SupplyCatalogPickerProduct = {
 type ExpenseProductLineDraft = {
   shopifyProductId: string;
   productTitle: string;
+  productType: string;
   quantity: number;
   unitGrossPrice: number;
   vatRatePercent: number;
@@ -571,6 +592,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     invoiceNumber: '',
     isPaid: false,
     isByProsvet: false,
+    includeVatInTotal: true,
     expenseInvoiceTypeId: 0,
   });
   const [expenseInvoiceFile, setExpenseInvoiceFile] = useState<File | null>(null);
@@ -596,8 +618,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [foreignAddSaving, setForeignAddSaving] = useState(false);
   const [foreignAddError, setForeignAddError] = useState<string | null>(null);
   const [foreignProductLines, setForeignProductLines] = useState<ExpenseProductLineDraft[]>([]);
-  const [foreignCatalogProducts, setForeignCatalogProducts] = useState<SupplyCatalogPickerProduct[]>([]);
-  const [foreignCatalogLoading, setForeignCatalogLoading] = useState(false);
+  const [foreignShopifyProducts, setForeignShopifyProducts] = useState<ProductWithSuppliers[]>([]);
+  const [foreignShopifyProductsLoading, setForeignShopifyProductsLoading] = useState(false);
   const [foreignProductSearch, setForeignProductSearch] = useState('');
   const [newForeignRow, setNewForeignRow] = useState({
     orderNumber: '',
@@ -817,23 +839,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   useEffect(() => {
     if (!foreignAddModalOpen) return;
     let cancelled = false;
-    setForeignCatalogLoading(true);
-    fetchSupplyCatalogProducts()
+    setForeignShopifyProductsLoading(true);
+    fetchProductsWithSuppliers()
       .then((rows) => {
-        if (cancelled) return;
-        setForeignCatalogProducts(
-          rows.map((row) => ({
-            shopifyProductId: row.shopifyProductId,
-            productName: row.productName || row.shopifyProductId,
-            vatRatePercent: row.vatRatePercent,
-          }))
-        );
+        if (!cancelled) setForeignShopifyProducts(rows);
       })
       .catch(() => {
-        if (!cancelled) setForeignCatalogProducts([]);
+        if (!cancelled) setForeignShopifyProducts([]);
       })
       .finally(() => {
-        if (!cancelled) setForeignCatalogLoading(false);
+        if (!cancelled) setForeignShopifyProductsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -904,12 +919,26 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     return expandedRow.cashSaleRows ?? [];
   }, [expandedRow]);
 
+  const expenseVatForTotal = useMemo(() => {
+    const expenseRow = data?.rows.find((r) => r.type === 'expense');
+    if (!expenseRow) return 0;
+    const expenseRows = expenseRow.expenseRows ?? [];
+    if (expenseRows.length > 0) {
+      return round2(
+        expenseRows
+          .filter((row) => row.includeVatInTotal)
+          .reduce((sum, row) => sum + row.vatAmount, 0)
+      );
+    }
+    return expenseRow.vat ?? 0;
+  }, [data]);
+
   const baseTotalVat = useMemo(() => {
     if (!data?.rows.length) return data?.vat ?? 0;
-    const vatOf = (type: 'poland' | 'foreign' | 'expense') =>
+    const vatOf = (type: 'poland' | 'foreign') =>
       data.rows.find((r) => r.type === type)?.vat ?? 0;
-    return round2(vatOf('poland') + vatOf('foreign') - vatOf('expense'));
-  }, [data]);
+    return round2(vatOf('poland') + vatOf('foreign') - expenseVatForTotal);
+  }, [data, expenseVatForTotal]);
 
   const displayTotalVat = useMemo(() => {
     if (!data) return 0;
@@ -975,12 +1004,23 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       });
   }, [foreignOrderRows, foreignOrderSearch]);
 
-  const visibleForeignCatalogProducts = useMemo(() => {
+  const visibleForeignShopifyProducts = useMemo(() => {
     const search = foreignProductSearch.trim().toLowerCase();
-    return foreignCatalogProducts.filter((product) =>
-      search ? product.productName.toLowerCase().includes(search) : true
+    const sorted = [...foreignShopifyProducts].sort((a, b) =>
+      a.productName.localeCompare(b.productName, 'be')
     );
-  }, [foreignCatalogProducts, foreignProductSearch]);
+    if (!search) return sorted;
+    return sorted.filter((product) => {
+      const haystack = [
+        product.productName,
+        product.productAuthor,
+        product.productType,
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [foreignShopifyProducts, foreignProductSearch]);
 
   const foreignProductGrossTotal = useMemo(
     () => calcExpenseProductGrossTotal(foreignProductLines),
@@ -1140,7 +1180,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     setForeignAddModalOpen(true);
   };
 
-  const toggleForeignProduct = (product: SupplyCatalogPickerProduct, selected: boolean) => {
+  const toggleForeignProduct = (product: ProductWithSuppliers, selected: boolean) => {
     if (selected) {
       setForeignProductLines((prev) => {
         if (prev.some((line) => line.shopifyProductId === product.shopifyProductId)) return prev;
@@ -1148,10 +1188,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
           ...prev,
           {
             shopifyProductId: product.shopifyProductId,
-            productTitle: product.productName,
+            productTitle: formatProductNameWithAuthor(product.productName, product.productAuthor),
+            productType: product.productType,
             quantity: 1,
             unitGrossPrice: 0,
-            vatRatePercent: product.vatRatePercent,
+            vatRatePercent: 23,
           },
         ];
       });
@@ -1223,6 +1264,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         items: foreignProductLines.map((line) => ({
           shopifyProductId: line.shopifyProductId,
           productTitle: line.productTitle,
+          productType: line.productType,
           quantity: line.quantity,
           unitPrice: line.unitGrossPrice,
         })),
@@ -1253,10 +1295,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       expenseDateUtc: defaultExpenseDateInput(),
       comment: '',
       invoiceNumber: '',
-      isPaid: false,
-      isByProsvet: false,
-      expenseInvoiceTypeId: expenseTypes[0]?.id || 0,
-    });
+    isPaid: false,
+    isByProsvet: false,
+    includeVatInTotal: true,
+    expenseInvoiceTypeId: expenseTypes[0]?.id || 0,
+  });
     setExpenseInvoiceFile(null);
     setExpenseSupplierId(0);
     setExpenseProductLines([]);
@@ -1286,6 +1329,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     const lines: ExpenseProductLineDraft[] = expense.products.map((product) => ({
       shopifyProductId: product.shopifyProductId,
       productTitle: product.productTitle,
+      productType: '',
       quantity: product.quantity,
       unitGrossPrice: product.unitGrossPrice,
       vatRatePercent: 23,
@@ -1309,6 +1353,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       invoiceNumber: expense.invoiceNumber,
       isPaid: expense.isPaid,
       isByProsvet: expense.isByProsvet,
+      includeVatInTotal: expense.includeVatInTotal,
       expenseInvoiceTypeId: expense.expenseInvoiceTypeId,
     });
     setExpenseInvoiceFile(null);
@@ -1324,6 +1369,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
           {
             shopifyProductId: product.shopifyProductId,
             productTitle: product.productName,
+            productType: '',
             quantity: 1,
             unitGrossPrice: 0,
             vatRatePercent: product.vatRatePercent,
@@ -1398,6 +1444,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         invoiceNumber: newExpense.invoiceNumber.trim() || undefined,
         isPaid: newExpense.isPaid,
         isByProsvet: newExpense.isByProsvet,
+        includeVatInTotal: newExpense.includeVatInTotal,
         expenseInvoiceTypeId: newExpense.expenseInvoiceTypeId,
         supplierId: isSupplierPaymentExpense && expenseSupplierId > 0 ? expenseSupplierId : undefined,
         products: isSupplierPaymentExpense ? expenseProductLines : undefined,
@@ -2290,7 +2337,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         <select
                                           value={String(item.assignedVatRatePercent)}
                                           onChange={(e) => {
-                                            const nextVat = Number(e.currentTarget.value);
+                                            const nextVat = Number(e.target.value);
                                             if (!Number.isFinite(nextVat)) return;
                                             void handleUpdateForeignItemVat(item.id, nextVat);
                                           }}
@@ -2324,7 +2371,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                       <select
                                         value={String(group.vatRatePercent)}
                                         onChange={(e) => {
-                                          const nextVat = Number(e.currentTarget.value);
+                                          const nextVat = Number(e.target.value);
                                           if (!Number.isFinite(nextVat)) return;
                                           void handleUpdateForeignShippingVat(group, nextVat);
                                         }}
@@ -2369,7 +2416,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={orderSearch}
-                    onChange={(e) => setOrderSearch(e.currentTarget.value)}
+                    onChange={(e) => setOrderSearch(e.target.value)}
                     placeholder="Нумар замовы"
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -2443,7 +2490,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             <input
                               type="checkbox"
                               checked={vatFilter5}
-                              onChange={(e) => setVatFilter5(e.currentTarget.checked)}
+                              onChange={(e) => setVatFilter5(e.target.checked)}
                               className="size-3.5 rounded border-gray-300 accent-primary"
                             />
                             5%
@@ -2452,7 +2499,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             <input
                               type="checkbox"
                               checked={vatFilter23}
-                              onChange={(e) => setVatFilter23(e.currentTarget.checked)}
+                              onChange={(e) => setVatFilter23(e.target.checked)}
                               className="size-3.5 rounded border-gray-300 accent-primary"
                             />
                             23%
@@ -2501,7 +2548,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           <select
                             value={edited?.vatRatePercent ?? row.vatRatePercent}
                             onChange={(e) => {
-                              const value = Number(e.currentTarget.value) || 0;
+                              const value = Number(e.target.value) || 0;
                               setEditedRows((prev) => ({
                                 ...(() => {
                                   const base = prev[rowKey] ?? {
@@ -2540,7 +2587,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             step="0.01"
                             value={edited?.grossAmount ?? row.grossAmount}
                             onChange={(e) => {
-                              const value = Number(e.currentTarget.value) || 0;
+                              const value = Number(e.target.value) || 0;
                               setEditedRows((prev) => ({
                                 ...(() => {
                                   const base = prev[rowKey] ?? {
@@ -2576,7 +2623,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             step="0.01"
                             value={edited?.vatAmount ?? row.vatAmount}
                             onChange={(e) => {
-                              const value = Number(e.currentTarget.value) || 0;
+                              const value = Number(e.target.value) || 0;
                               setEditedRows((prev) => ({
                                 ...prev,
                                 [rowKey]: {
@@ -2604,7 +2651,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                             step="0.01"
                             value={edited?.netAmount ?? row.netAmount}
                             onChange={(e) => {
-                              const value = Number(e.currentTarget.value) || 0;
+                              const value = Number(e.target.value) || 0;
                               setEditedRows((prev) => ({
                                 ...prev,
                                 [rowKey]: {
@@ -2777,7 +2824,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={foreignOrderSearch}
-                    onChange={(e) => setForeignOrderSearch(e.currentTarget.value)}
+                    onChange={(e) => setForeignOrderSearch(e.target.value)}
                     placeholder="Нумар замовы"
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -2944,7 +2991,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                           <select
                                             value={edited?.vatRatePercent ?? group.vatRatePercent}
                                             onChange={(e) => {
-                                              const value = Number(e.currentTarget.value) || 0;
+                                              const value = Number(e.target.value) || 0;
                                               setEditedRows((prev) => {
                                                 const base = prev[rowKey] ?? {
                                                   orderDateUtc: toDateInputValue(group.orderDateUtc),
@@ -2985,7 +3032,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                             step="0.01"
                                             value={shippingGrossAmount}
                                             onChange={(e) => {
-                                              const value = Math.max(0, Number(e.currentTarget.value) || 0);
+                                              const value = Math.max(0, Number(e.target.value) || 0);
                                               setEditedRows((prev) => {
                                                 const base = prev[rowKey] ?? {
                                                   orderDateUtc: toDateInputValue(group.orderDateUtc),
@@ -3026,7 +3073,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                                 type="checkbox"
                                                 checked={edited?.vatManualOverride ?? false}
                                                 onChange={(e) => {
-                                                  const checked = e.currentTarget.checked;
+                                                  const checked = e.target.checked;
                                                   setEditedRows((prev) => {
                                                     const base = prev[rowKey] ?? {
                                                       orderDateUtc: toDateInputValue(group.orderDateUtc),
@@ -3062,7 +3109,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                               step="0.01"
                                               value={vatAmount}
                                               onChange={(e) => {
-                                                const value = Math.max(0, Number(e.currentTarget.value) || 0);
+                                                const value = Math.max(0, Number(e.target.value) || 0);
                                                 setEditedRows((prev) => {
                                                   const base = prev[rowKey] ?? {
                                                     orderDateUtc: toDateInputValue(group.orderDateUtc),
@@ -3200,7 +3247,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                           <select
                                             value={String(item.assignedVatRatePercent)}
                                             onChange={(e) => {
-                                              const nextVat = Number(e.currentTarget.value);
+                                              const nextVat = Number(e.target.value);
                                               if (!Number.isFinite(nextVat)) return;
                                               void handleUpdateForeignItemVat(item.id, nextVat);
                                             }}
@@ -3234,7 +3281,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         <select
                                           value={String(group.vatRatePercent)}
                                           onChange={(e) => {
-                                            const nextVat = Number(e.currentTarget.value);
+                                            const nextVat = Number(e.target.value);
                                             if (!Number.isFinite(nextVat)) return;
                                             void handleUpdateForeignShippingVat(group, nextVat);
                                           }}
@@ -3354,7 +3401,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={expenseSearch}
-                    onChange={(e) => setExpenseSearch(e.currentTarget.value)}
+                    onChange={(e) => setExpenseSearch(e.target.value)}
                     placeholder="Тып або каментар"
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -3515,14 +3562,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {addModalOpen && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (addingRow) return;
-            setAddModalOpen(false);
-          }}
         >
           <div
             className="w-full max-w-2xl rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-3">
               <div className="text-base font-semibold text-gray-900">Дадаць радок справаздачы</div>
@@ -3561,7 +3603,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <span className="text-sm font-medium text-gray-700">Нумар замовы (за гэты месяц)</span>
                   <select
                     value={selectedSourceKey}
-                    onChange={(e) => setSelectedSourceKey(e.currentTarget.value)}
+                    onChange={(e) => setSelectedSourceKey(e.target.value)}
                     disabled={sourceOrdersLoading || addingRow}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   >
@@ -3582,7 +3624,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     type="text"
                     value={newRow.orderNumber}
                     onChange={(e) => {
-                      const orderNumber = e.currentTarget.value;
+                      const orderNumber = e.target.value;
                       setNewRow((prev) => ({ ...prev, orderNumber }));
                     }}
                     disabled={addingRow}
@@ -3595,7 +3637,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     type="date"
                     value={newRow.orderDateUtc}
                     onChange={(e) => {
-                      const orderDateUtc = e.currentTarget.value;
+                      const orderDateUtc = e.target.value;
                       setNewRow((prev) => ({ ...prev, orderDateUtc }));
                     }}
                     disabled={addingRow}
@@ -3607,7 +3649,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <select
                     value={newRow.vatRatePercent}
                     onChange={(e) => {
-                      const vatRatePercent = Number(e.currentTarget.value) || 0;
+                      const vatRatePercent = Number(e.target.value) || 0;
                       setNewRow((prev) => {
                         const recalculated = recalcVatAndNet(prev.grossAmount, vatRatePercent);
                         return { ...prev, vatRatePercent, vatAmount: recalculated.vatAmount, netAmount: recalculated.netAmount };
@@ -3627,7 +3669,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     step="0.01"
                     value={newRow.grossAmount}
                     onChange={(e) => {
-                      const grossAmount = Number(e.currentTarget.value) || 0;
+                      const grossAmount = Number(e.target.value) || 0;
                       setNewRow((prev) => {
                         const recalculated = recalcVatAndNet(grossAmount, prev.vatRatePercent);
                         return { ...prev, grossAmount, vatAmount: recalculated.vatAmount, netAmount: recalculated.netAmount };
@@ -3644,7 +3686,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     step="0.01"
                     value={newRow.vatAmount}
                     onChange={(e) => {
-                      const vatAmount = Number(e.currentTarget.value) || 0;
+                      const vatAmount = Number(e.target.value) || 0;
                       setNewRow((prev) => ({ ...prev, vatAmount }));
                     }}
                     disabled={addingRow}
@@ -3658,7 +3700,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     step="0.01"
                     value={newRow.netAmount}
                     onChange={(e) => {
-                      const netAmount = Number(e.currentTarget.value) || 0;
+                      const netAmount = Number(e.target.value) || 0;
                       setNewRow((prev) => ({ ...prev, netAmount }));
                     }}
                     disabled={addingRow}
@@ -3697,14 +3739,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {foreignAddModalOpen && (
         <div
           className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-black/40 p-3 sm:items-center sm:p-4"
-          onClick={() => {
-            if (foreignAddSaving) return;
-            setForeignAddModalOpen(false);
-          }}
         >
           <div
             className="my-auto flex max-h-[min(760px,calc(100dvh-1.5rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl sm:my-0"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="shrink-0 border-b border-gray-100 px-4 py-3 sm:px-5">
               <div className="text-base font-semibold text-gray-900">Дадаць замежны заказ</div>
@@ -3721,9 +3758,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={newForeignRow.orderNumber}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({ ...prev, orderNumber: e.currentTarget.value }))
-                    }
+                    onChange={(e) => {
+                      const orderNumber = e.target.value;
+                      setNewForeignRow((prev) => ({ ...prev, orderNumber }));
+                    }}
                     placeholder="#1701"
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
@@ -3733,9 +3771,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="date"
                     value={newForeignRow.orderDateUtc}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({ ...prev, orderDateUtc: e.currentTarget.value }))
-                    }
+                    onChange={(e) => {
+                      const orderDateUtc = e.target.value;
+                      setNewForeignRow((prev) => ({ ...prev, orderDateUtc }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>
@@ -3744,9 +3783,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={newForeignRow.deliveryName}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({ ...prev, deliveryName: e.currentTarget.value }))
-                    }
+                    onChange={(e) => {
+                      const deliveryName = e.target.value;
+                      setNewForeignRow((prev) => ({ ...prev, deliveryName }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>
@@ -3755,9 +3795,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <input
                     type="text"
                     value={newForeignRow.deliveryAddress}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({ ...prev, deliveryAddress: e.currentTarget.value }))
-                    }
+                    onChange={(e) => {
+                      const deliveryAddress = e.target.value;
+                      setNewForeignRow((prev) => ({ ...prev, deliveryAddress }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>
@@ -3765,9 +3806,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   <span className="text-sm font-medium text-gray-700">Краіна</span>
                   <select
                     value={newForeignRow.countryCode}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({ ...prev, countryCode: e.currentTarget.value }))
-                    }
+                    onChange={(e) => {
+                      const countryCode = e.target.value;
+                      setNewForeignRow((prev) => ({ ...prev, countryCode }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   >
                     {FOREIGN_COUNTRY_OPTIONS.map((option) => (
@@ -3784,12 +3826,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     min="0"
                     step="0.01"
                     value={newForeignRow.shippingGrossAmount || ''}
-                    onChange={(e) =>
-                      setNewForeignRow((prev) => ({
-                        ...prev,
-                        shippingGrossAmount: Number(e.currentTarget.value) || 0,
-                      }))
-                    }
+                    onChange={(e) => {
+                      const shippingGrossAmount = Number(e.target.value) || 0;
+                      setNewForeignRow((prev) => ({ ...prev, shippingGrossAmount }));
+                    }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   />
                 </label>
@@ -3804,19 +3844,23 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 <input
                   type="search"
                   value={foreignProductSearch}
-                  onChange={(e) => setForeignProductSearch(e.currentTarget.value)}
+                  onChange={(e) => setForeignProductSearch(e.target.value)}
                   placeholder="Пошук тавару..."
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                 />
                 <div className="max-h-[min(12rem,30vh)] overflow-y-auto rounded-lg border border-gray-200">
-                  {foreignCatalogLoading && (
-                    <div className="px-3 py-4 text-sm text-gray-500">Загрузка тавараў...</div>
+                  {foreignShopifyProductsLoading && (
+                    <div className="px-3 py-4 text-sm text-gray-500">Загрузка тавараў з Shopify...</div>
                   )}
-                  {!foreignCatalogLoading && visibleForeignCatalogProducts.length === 0 && (
-                    <div className="px-3 py-4 text-sm text-gray-500">Няма тавараў у каталогу паставак.</div>
+                  {!foreignShopifyProductsLoading && visibleForeignShopifyProducts.length === 0 && (
+                    <div className="px-3 py-4 text-sm text-gray-500">
+                      {foreignProductSearch.trim()
+                        ? 'Тавары не знойдзены'
+                        : 'Няма тавараў у Shopify'}
+                    </div>
                   )}
-                  {!foreignCatalogLoading &&
-                    visibleForeignCatalogProducts.map((product) => {
+                  {!foreignShopifyProductsLoading &&
+                    visibleForeignShopifyProducts.map((product) => {
                       const line = foreignProductLines.find(
                         (item) => item.shopifyProductId === product.shopifyProductId
                       );
@@ -3829,14 +3873,16 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           <input
                             type="checkbox"
                             checked={selected}
-                            onChange={(e) => toggleForeignProduct(product, e.currentTarget.checked)}
+                            onChange={(e) => toggleForeignProduct(product, e.target.checked)}
                             className="size-4 shrink-0 rounded border-gray-300 accent-primary"
                           />
                           <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
-                            <span className="line-clamp-2">{product.productName}</span>
-                            <span className="text-xs text-gray-500">
-                              VAT {formatAmount(product.vatRatePercent)}%
+                            <span className="line-clamp-2">
+                              {formatProductNameWithAuthor(product.productName, product.productAuthor)}
                             </span>
+                            {product.productType && (
+                              <span className="text-xs text-gray-500">{product.productType}</span>
+                            )}
                           </span>
                           {selected && (
                             <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
@@ -3850,7 +3896,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   onChange={(e) =>
                                     updateForeignProductQuantity(
                                       product.shopifyProductId,
-                                      Number(e.currentTarget.value)
+                                      Number(e.target.value)
                                     )
                                   }
                                   className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -3866,7 +3912,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   onChange={(e) =>
                                     updateForeignProductUnitPrice(
                                       product.shopifyProductId,
-                                      Number(e.currentTarget.value)
+                                      Number(e.target.value)
                                     )
                                   }
                                   className="w-24 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -3922,14 +3968,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {cashModalOpen && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (cashSaving) return;
-            setCashModalOpen(false);
-          }}
         >
           <div
             className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="text-base font-semibold text-gray-900">Дадаць наяўную продажу</div>
             <div className="mt-4 space-y-3">
@@ -4027,7 +4068,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 <select
                   value={newExpense.expenseInvoiceTypeId}
                   onChange={(e) => {
-                    const expenseInvoiceTypeId = Number(e.currentTarget.value) || 0;
+                    const expenseInvoiceTypeId = Number(e.target.value) || 0;
                     setNewExpense((prev) => ({ ...prev, expenseInvoiceTypeId }));
                     const nextType = expenseTypes.find((t) => t.id === expenseInvoiceTypeId);
                     if (nextType?.name !== SUPPLIER_PAYMENT_TYPE_NAME) {
@@ -4055,7 +4096,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     <select
                       value={expenseSupplierId || ''}
                       onChange={(e) => {
-                        const nextSupplierId = Number(e.currentTarget.value) || 0;
+                        const nextSupplierId = Number(e.target.value) || 0;
                         setExpenseSupplierId(nextSupplierId);
                         setExpenseProductLines([]);
                         setExpenseProductSearch('');
@@ -4084,7 +4125,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       <input
                         type="search"
                         value={expenseProductSearch}
-                        onChange={(e) => setExpenseProductSearch(e.currentTarget.value)}
+                        onChange={(e) => setExpenseProductSearch(e.target.value)}
                         placeholder="Пошук тавару..."
                         className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                       />
@@ -4113,7 +4154,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                 <input
                                   type="checkbox"
                                   checked={selected}
-                                  onChange={(e) => toggleExpenseProduct(product, e.currentTarget.checked)}
+                                  onChange={(e) => toggleExpenseProduct(product, e.target.checked)}
                                   className="size-4 shrink-0 rounded border-gray-300 accent-primary"
                                 />
                                 <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
@@ -4134,7 +4175,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         onChange={(e) =>
                                           updateExpenseProductQuantity(
                                             product.shopifyProductId,
-                                            Number(e.currentTarget.value)
+                                            Number(e.target.value)
                                           )
                                         }
                                         className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -4150,7 +4191,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                         onChange={(e) =>
                                           updateExpenseProductUnitGrossPrice(
                                             product.shopifyProductId,
-                                            Number(e.currentTarget.value)
+                                            Number(e.target.value)
                                           )
                                         }
                                         className="w-20 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -4175,7 +4216,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       min={expenseProductGrossTotal || 0}
                       value={newExpense.grossAmount || ''}
                       onChange={(e) => {
-                        const grossAmount = round2(Number(e.currentTarget.value) || 0);
+                        const grossAmount = round2(Number(e.target.value) || 0);
                         if (grossAmount > expenseProductGrossTotal) {
                           setExpenseGrossOverride(grossAmount);
                         } else {
@@ -4199,7 +4240,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       max={newExpense.grossAmount || undefined}
                       value={newExpense.vatAmount || ''}
                       onChange={(e) => {
-                        const vatAmount = round2(Number(e.currentTarget.value) || 0);
+                        const vatAmount = round2(Number(e.target.value) || 0);
                         if (vatAmount !== expenseProductVatTotal) {
                           setExpenseVatOverride(vatAmount);
                         } else {
@@ -4231,7 +4272,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   min="0"
                   value={newExpense.netAmount || ''}
                   onChange={(e) => {
-                    const netAmount = Number(e.currentTarget.value) || 0;
+                    const netAmount = Number(e.target.value) || 0;
                     setNewExpense((prev) => ({
                       ...prev,
                       ...syncExpenseAmounts(
@@ -4251,7 +4292,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   min="0"
                   value={newExpense.vatAmount || ''}
                   onChange={(e) => {
-                    const vatAmount = Number(e.currentTarget.value) || 0;
+                    const vatAmount = Number(e.target.value) || 0;
                     setNewExpense((prev) => ({
                       ...prev,
                       ...syncExpenseAmounts(
@@ -4271,7 +4312,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   min="0"
                   value={newExpense.grossAmount || ''}
                   onChange={(e) => {
-                    const grossAmount = Number(e.currentTarget.value) || 0;
+                    const grossAmount = Number(e.target.value) || 0;
                     setNewExpense((prev) => ({
                       ...prev,
                       ...syncExpenseAmounts(
@@ -4291,7 +4332,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   type="date"
                   value={newExpense.expenseDateUtc}
                   onChange={(e) => {
-                    const expenseDateUtc = e.currentTarget.value;
+                    const expenseDateUtc = e.target.value;
                     setNewExpense((prev) => ({ ...prev, expenseDateUtc }));
                   }}
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -4303,7 +4344,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   type="text"
                   value={newExpense.invoiceNumber}
                   onChange={(e) => {
-                    const invoiceNumber = e.currentTarget.value;
+                    const invoiceNumber = e.target.value;
                     setNewExpense((prev) => ({ ...prev, invoiceNumber }));
                   }}
                   placeholder="Напр. FV/06/2026/001"
@@ -4316,7 +4357,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   rows={1}
                   value={newExpense.comment}
                   onChange={(e) => {
-                    const comment = e.currentTarget.value;
+                    const comment = e.target.value;
                     setNewExpense((prev) => ({ ...prev, comment }));
                   }}
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
@@ -4330,7 +4371,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     <input
                       type="file"
                       accept=".pdf,.png,.jpg,.jpeg,.webp"
-                      onChange={(e) => setExpenseInvoiceFile(e.currentTarget.files?.[0] ?? null)}
+                      onChange={(e) => setExpenseInvoiceFile(e.target.files?.[0] ?? null)}
                       className="hidden"
                     />
                   </label>
@@ -4346,7 +4387,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   type="checkbox"
                   checked={newExpense.isPaid}
                   onChange={(e) => {
-                    const isPaid = e.currentTarget.checked;
+                    const isPaid = e.target.checked;
                     setNewExpense((prev) => ({ ...prev, isPaid }));
                   }}
                   className="size-4 rounded border-gray-300 accent-primary"
@@ -4358,12 +4399,24 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   type="checkbox"
                   checked={newExpense.isByProsvet}
                   onChange={(e) => {
-                    const isByProsvet = e.currentTarget.checked;
+                    const isByProsvet = e.target.checked;
                     setNewExpense((prev) => ({ ...prev, isByProsvet }));
                   }}
                   className="size-4 rounded border-gray-300 accent-primary"
                 />
                 ByProsvet
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 sm:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={newExpense.includeVatInTotal}
+                  onChange={(e) => {
+                    const includeVatInTotal = e.target.checked;
+                    setNewExpense((prev) => ({ ...prev, includeVatInTotal }));
+                  }}
+                  className="size-4 rounded border-gray-300 accent-primary"
+                />
+                Улічваць VAT
               </label>
             </div>
             </div>
@@ -4403,14 +4456,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {pendingDeleteRow && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (deletingRowKey) return;
-            setPendingDeleteRow(null);
-          }}
         >
           <div
             className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="text-base font-semibold text-gray-900">Пацвердзіце выдаленне</div>
             <p className="mt-2 text-sm text-gray-600">Вы сапраўды хочаце выдаліць гэты радок справаздачы?</p>
@@ -4443,16 +4491,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {pendingMoveToForeignRow && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (movingToForeignRowKey) return;
-            setPendingMoveToForeignRow(null);
-            setMoveToForeignName('');
-            setMoveToForeignAddress('');
-          }}
         >
           <div
             className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="text-base font-semibold text-gray-900">Перанос у замежныя</div>
             <p className="mt-2 text-sm text-gray-600">
@@ -4463,7 +4504,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               <input
                 type="text"
                 value={moveToForeignName}
-                onChange={(e) => setMoveToForeignName(e.currentTarget.value)}
+                onChange={(e) => setMoveToForeignName(e.target.value)}
                 placeholder="Увядзіце імя атрымальніка"
                 disabled={!!movingToForeignRowKey}
                 className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 transition placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
@@ -4473,7 +4514,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               Адрас
               <textarea
                 value={moveToForeignAddress}
-                onChange={(e) => setMoveToForeignAddress(e.currentTarget.value)}
+                onChange={(e) => setMoveToForeignAddress(e.target.value)}
                 placeholder="Увядзіце адрас"
                 rows={3}
                 disabled={!!movingToForeignRowKey}
@@ -4513,14 +4554,9 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {pendingRegenerateRowKey && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (regeneratingRowKey) return;
-            setPendingRegenerateRowKey(null);
-          }}
         >
           <div
             className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="text-base font-semibold text-gray-900">Пацвердзіце перегенерацыю</div>
             <p className="mt-2 text-sm text-gray-600">Вы сапраўды хочаце перегенераваць справаздачу?</p>

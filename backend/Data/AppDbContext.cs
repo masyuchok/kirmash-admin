@@ -348,6 +348,9 @@ namespace backend.Data
                     .HasMaxLength( 1024 );
                 entity.Property( x => x.DayOfMonth )
                     .IsRequired();
+                entity.Property( x => x.StartDate )
+                    .IsRequired();
+                entity.Property( x => x.EndDate );
                 entity.Property( x => x.IsActive )
                     .IsRequired();
                 entity.Property( x => x.CreatedAtUtc )

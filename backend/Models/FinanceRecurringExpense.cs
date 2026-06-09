@@ -9,6 +9,8 @@ namespace backend.Models
         public decimal Amount { get; set; }
         public string Description { get; set; } = string.Empty;
         public int DayOfMonth { get; set; } = 1;
+        public DateOnly StartDate { get; set; }
+        public DateOnly? EndDate { get; set; }
         public bool IsActive { get; set; } = true;
         public DateTime CreatedAtUtc { get; set; }
 

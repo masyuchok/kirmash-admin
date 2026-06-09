@@ -70,6 +70,7 @@ export type VatReportExpenseRow = {
   invoiceNumber: string;
   isPaid: boolean;
   isByProsvet: boolean;
+  includeVatInTotal: boolean;
   expenseInvoiceTypeId: number;
   expenseInvoiceTypeName: string;
   invoiceFileName: string;

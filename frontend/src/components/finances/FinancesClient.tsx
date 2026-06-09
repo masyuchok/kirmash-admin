@@ -34,6 +34,19 @@ function todayIso(): string {
   return `${y}-${m}-${day}`;
 }
 
+function formatIsoDate(iso: string): string {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}.${m}.${y}`;
+}
+
+function formatRecurringPeriod(startDate: string, endDate: string | null): string {
+  const start = formatIsoDate(startDate);
+  if (!endDate) return `${start} — …`;
+  return `${start} — ${formatIsoDate(endDate)}`;
+}
+
 type MovementFieldsState = {
   kind: FinanceMovementKind;
   amount: string;
@@ -53,6 +66,8 @@ const emptyMovementForm = (): MovementFormState => ({
 
 type RecurringFormState = MovementFieldsState & {
   dayOfMonth: string;
+  startDate: string;
+  endDate: string;
   isActive: boolean;
 };
 
@@ -61,6 +76,8 @@ const emptyRecurringForm = (): RecurringFormState => ({
   amount: '',
   description: '',
   dayOfMonth: '1',
+  startDate: todayIso(),
+  endDate: '',
   isActive: true,
 });
 
@@ -280,6 +297,8 @@ export default function FinancesClient() {
       amount: String(row.amount),
       description: row.description,
       dayOfMonth: String(row.dayOfMonth),
+      startDate: row.startDate || todayIso(),
+      endDate: row.endDate ?? '',
       isActive: row.isActive,
     });
     setRecurringFormOpen(true);
@@ -301,25 +320,37 @@ export default function FinancesClient() {
       setError('Дзень месяца: ад 1 да 28.');
       return;
     }
+    const startDate = recurringForm.startDate.trim();
+    if (!startDate) {
+      setError('Укажыце дату пачатку.');
+      return;
+    }
+    const endDateRaw = recurringForm.endDate.trim();
+    if (endDateRaw && endDateRaw < startDate) {
+      setError('Дата заканчэння не можа быць раней за дату пачатку.');
+      return;
+    }
 
     setSaving(true);
     setError(null);
     try {
+      const recurringPayload = {
+        kind: recurringForm.kind,
+        amount,
+        description: recurringForm.description.trim(),
+        dayOfMonth: day,
+        startDate,
+        endDate: endDateRaw || null,
+      };
       if (editingRecurring) {
         await updateFinanceRecurring(editingRecurring.id, {
-          kind: recurringForm.kind,
-          amount,
-          description: recurringForm.description.trim(),
-          dayOfMonth: day,
+          ...recurringPayload,
           isActive: recurringForm.isActive,
         });
       } else {
         await createFinanceRecurring({
           personId: activePersonId,
-          kind: recurringForm.kind,
-          amount,
-          description: recurringForm.description.trim(),
-          dayOfMonth: day,
+          ...recurringPayload,
         });
       }
       setRecurringFormOpen(false);
@@ -462,7 +493,7 @@ export default function FinancesClient() {
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Рэгулярныя расходы</h2>
                 <p className="text-sm text-gray-500">
-                  Аўтаматычна дадаюцца ў бягучы месяц (дзень 1–28)
+                  Аўтаматычна дадаюцца кожны месяц у межах перыяду (дзень 1–28)
                 </p>
               </div>
               <button
@@ -509,6 +540,29 @@ export default function FinancesClient() {
             onChange={(patch) => setRecurringForm((p) => ({ ...p, ...patch }))}
             hideDate
           />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="block text-sm font-medium text-gray-700">
+              Дата пачатку
+              <input
+                type="date"
+                value={recurringForm.startDate}
+                onChange={(e) => setRecurringForm((p) => ({ ...p, startDate: e.target.value }))}
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="block text-sm font-medium text-gray-700">
+              Дата заканчэння
+              <input
+                type="date"
+                value={recurringForm.endDate}
+                onChange={(e) => setRecurringForm((p) => ({ ...p, endDate: e.target.value }))}
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              />
+              <span className="mt-1 block text-xs font-normal text-gray-500">
+                Пакіньце пустым, каб працягваць бясконца
+              </span>
+            </label>
+          </div>
           <label className="block text-sm font-medium text-gray-700">
             Дзень месяца (1–28)
             <input
@@ -859,6 +913,7 @@ function RecurringTable({
         <thead>
           <tr className="border-b border-gray-100 text-xs uppercase text-gray-500">
             <th className="px-2 py-2">Дзень</th>
+            <th className="px-2 py-2">Перыяд</th>
             <th className="px-2 py-2">Тып</th>
             <th className="px-2 py-2">Апісанне</th>
             <th className="px-2 py-2 text-right">Сума</th>
@@ -870,6 +925,9 @@ function RecurringTable({
           {rows.map((row) => (
             <tr key={row.id} className="border-b border-gray-50 hover:bg-gray-50/80">
               <td className="px-2 py-2">{row.dayOfMonth}</td>
+              <td className="px-2 py-2 whitespace-nowrap text-gray-600">
+                {formatRecurringPeriod(row.startDate, row.endDate)}
+              </td>
               <td className="px-2 py-2">{movementKindLabel(row.kind)}</td>
               <td className="px-2 py-2">{row.description}</td>
               <td className="px-2 py-2 text-right font-medium">{formatMoney(row.amount)}</td>

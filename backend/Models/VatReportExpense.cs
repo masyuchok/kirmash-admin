@@ -15,6 +15,7 @@ namespace backend.Models
         public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
         public bool IsByProsvet { get; set; }
+        public bool IncludeVatInTotal { get; set; } = true;
         public string InvoiceFileName { get; set; } = string.Empty;
         public string InvoiceContentType { get; set; } = string.Empty;
         public byte[]? InvoiceData { get; set; }

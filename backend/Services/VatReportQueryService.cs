@@ -276,6 +276,7 @@ public class VatReportQueryService
                 InvoiceNumber = e.InvoiceNumber,
                 IsPaid = e.IsPaid,
                 IsByProsvet = e.IsByProsvet,
+                IncludeVatInTotal = e.IncludeVatInTotal,
                 ExpenseInvoiceTypeId = e.ExpenseInvoiceTypeId,
                 ExpenseInvoiceTypeName = e.ExpenseInvoiceType.Name,
                 InvoiceFileName = e.InvoiceFileName,
@@ -318,8 +319,20 @@ public class VatReportQueryService
     {
         decimal polandVat = rows.Where( r => r.Type == VatReportType.Poland ).Sum( r => r.Vat );
         decimal foreignVat = rows.Where( r => r.Type == VatReportType.Foreign ).Sum( r => r.Vat );
-        decimal expenseVat = rows.Where( r => r.Type == VatReportType.Expense ).Sum( r => r.Vat );
+        decimal expenseVat = SumExpenseVatForTotal( rows );
         return VatReportHelpers.Round2( polandVat + foreignVat - expenseVat );
+    }
+
+    private static decimal SumExpenseVatForTotal( IEnumerable<VatReportDetailsSummaryRow> rows )
+    {
+        VatReportDetailsSummaryRow? expenseRow = rows.FirstOrDefault( r => r.Type == VatReportType.Expense );
+        if (expenseRow?.ExpenseRows is { Count: > 0 })
+        {
+            return VatReportHelpers.Round2(
+                expenseRow.ExpenseRows.Where( e => e.IncludeVatInTotal ).Sum( e => e.VatAmount ) );
+        }
+
+        return rows.Where( r => r.Type == VatReportType.Expense ).Sum( r => r.Vat );
     }
 
     private static decimal ComputeProfitFromSummaryRows( IEnumerable<VatReportDetailsSummaryRow> rows )
@@ -433,8 +446,14 @@ public class VatReportQueryService
                 ForeignDeliveryInfo? info = null;
                 deliveryByOrderId.TryGetValue( g.Key, out info );
                 ReportRowData first = g.First();
-                (string parsedOrderNumber, string parsedDeliveryName, string parsedDeliveryAddress) =
+                (string parsedOrderNumber, string parsedDeliveryName, string parsedDeliveryAddress, string parsedCountryCode) =
                     VatReportHelpers.ParseOrderNumberAndContact( first.OrderNumber );
+                string shippingCountryCode = !string.IsNullOrWhiteSpace( info?.ShippingCountryCode )
+                    ? info!.ShippingCountryCode
+                    : parsedCountryCode;
+                string billingCountryCode = !string.IsNullOrWhiteSpace( info?.BillingCountryCode )
+                    ? info!.BillingCountryCode
+                    : parsedCountryCode;
                 return new VatReportDetailsSummaryRow
                 {
                     Type = reportType,
@@ -457,8 +476,8 @@ public class VatReportQueryService
                     BillingAddress = !string.IsNullOrWhiteSpace( info?.BillingAddress )
                         ? info!.BillingAddress
                         : string.Empty,
-                    ShippingCountryCode = info?.ShippingCountryCode ?? string.Empty,
-                    BillingCountryCode = info?.BillingCountryCode ?? string.Empty,
+                    ShippingCountryCode = shippingCountryCode,
+                    BillingCountryCode = billingCountryCode,
                     GrossAmount = VatReportHelpers.Round2( g.Sum( x => x.GrossAmount ) ),
                     Vat = VatReportHelpers.Round2( g.Sum( x => x.VatAmount ) ),
                     NetAmount = VatReportHelpers.Round2( g.Sum( x => x.NetAmount ) ),
@@ -512,6 +531,7 @@ public class VatReportQueryService
             InvoiceNumber = expense.InvoiceNumber,
             IsPaid = expense.IsPaid,
             IsByProsvet = expense.IsByProsvet,
+            IncludeVatInTotal = expense.IncludeVatInTotal,
             ExpenseInvoiceTypeId = expense.ExpenseInvoiceTypeId,
             ExpenseInvoiceTypeName = expense.ExpenseInvoiceTypeName,
             InvoiceFileName = expense.InvoiceFileName,
@@ -569,6 +589,7 @@ public class VatReportQueryService
         public string InvoiceNumber { get; set; } = string.Empty;
         public bool IsPaid { get; set; }
         public bool IsByProsvet { get; set; }
+        public bool IncludeVatInTotal { get; set; }
         public int ExpenseInvoiceTypeId { get; set; }
         public string ExpenseInvoiceTypeName { get; set; } = string.Empty;
         public string InvoiceFileName { get; set; } = string.Empty;
