@@ -307,6 +307,7 @@ public class VatReportQueryService
             {
                 Id = x.Id,
                 ShopifyProductId = x.ShopifyProductId,
+                ShopifyVariantId = x.ShopifyVariantId,
                 ProductTitle = x.ProductTitle,
                 Quantity = x.Quantity,
                 UnitPrice = x.UnitPrice,
@@ -417,6 +418,7 @@ public class VatReportQueryService
         {
             Id = sale.Id,
             ShopifyProductId = sale.ShopifyProductId,
+            ShopifyVariantId = sale.ShopifyVariantId,
             ProductTitle = sale.ProductTitle,
             Quantity = sale.Quantity,
             UnitPrice = sale.UnitPrice,
@@ -615,6 +617,7 @@ public class VatReportQueryService
     {
         public int Id { get; set; }
         public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public decimal UnitPrice { get; set; }

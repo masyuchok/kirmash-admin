@@ -631,6 +631,9 @@ public class VatReportMutationService
         }
 
         string productId = ShopifyIds.NormalizeProductId( request.ShopifyProductId.Trim() );
+        string variantId = string.IsNullOrWhiteSpace( request.ShopifyVariantId )
+            ? string.Empty
+            : ShopifyIds.NormalizeVariantId( request.ShopifyVariantId.Trim() );
         string title = string.IsNullOrWhiteSpace( request.ProductTitle ) ? productId : request.ProductTitle.Trim();
         decimal unitPrice = VatReportHelpers.Round2( request.UnitPrice );
         decimal gross = VatReportHelpers.Round2( unitPrice * request.Quantity );
@@ -653,6 +656,7 @@ public class VatReportMutationService
         {
             VatReportId = reportId,
             ShopifyProductId = productId,
+            ShopifyVariantId = variantId,
             ProductTitle = title,
             Quantity = request.Quantity,
             UnitPrice = unitPrice,

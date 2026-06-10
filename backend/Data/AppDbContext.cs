@@ -166,6 +166,10 @@ namespace backend.Data
                 entity.Property( x => x.ShopifyProductId )
                     .IsRequired()
                     .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 )
+                    .HasDefaultValue( string.Empty );
                 entity.Property( x => x.ProductTitle )
                     .IsRequired()
                     .HasMaxLength( 512 );

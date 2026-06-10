@@ -26,6 +26,7 @@ export type VatReportPolandDetailItem = {
 export type VatReportCashSaleRow = {
   id: number;
   shopifyProductId: string;
+  shopifyVariantId: string;
   productTitle: string;
   quantity: number;
   unitPrice: number;

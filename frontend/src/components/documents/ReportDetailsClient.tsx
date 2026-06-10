@@ -2,7 +2,6 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import ProductSearchSelect from '@/components/ui/ProductSearchSelect';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import {
   createVatReportCashSale,
@@ -472,7 +471,7 @@ const FOREIGN_COUNTRY_OPTIONS: Array<{ code: string; label: string }> = [
   { code: 'BY', label: 'Belarus' },
 ];
 
-type ExpensePickerLine = {
+type CatalogPickerLine = {
   lineKey: string;
   shopifyProductId: string;
   shopifyVariantId: string;
@@ -480,9 +479,14 @@ type ExpensePickerLine = {
   productAuthor: string;
   variantName: string;
   mainImageUrl: string | null;
+};
+
+type ExpensePickerLine = CatalogPickerLine & {
   vatRatePercent: number;
   supplierPrice: number;
 };
+
+type CashPickerLine = CatalogPickerLine;
 
 type ExpenseProductLineDraft = {
   lineKey: string;
@@ -500,6 +504,41 @@ function visibleExpenseProductVariants(product: ProductWithSuppliers): ProductVa
     (variant) =>
       (variant.variantId?.trim() || variant.variantName?.trim()) &&
       variant.variantName !== 'Default Title'
+  );
+}
+
+function buildCatalogPickerLines(catalogProducts: ProductWithSuppliers[]): CatalogPickerLine[] {
+  const lines: CatalogPickerLine[] = [];
+  for (const product of catalogProducts) {
+    if (!product.shopifyProductId.trim()) continue;
+    const variants = visibleExpenseProductVariants(product);
+    const variantEntries =
+      variants.length > 1
+        ? variants
+        : [
+            {
+              variantId: variants[0]?.variantId ?? '',
+              variantName: variants[0]?.variantName ?? '',
+              quantityInStock: variants[0]?.quantityInStock ?? 0,
+            },
+          ];
+
+    for (const variant of variantEntries) {
+      const variantId = variant.variantId?.trim() ?? '';
+      lines.push({
+        lineKey: makeSupplyLineKey(product.shopifyProductId, variantId),
+        shopifyProductId: product.shopifyProductId,
+        shopifyVariantId: variantId,
+        productName: product.productName,
+        productAuthor: product.productAuthor,
+        variantName: variant.variantName,
+        mainImageUrl: product.mainImageUrl,
+      });
+    }
+  }
+
+  return lines.sort((a, b) =>
+    buildExpensePickerLineTitle(a).localeCompare(buildExpensePickerLineTitle(b), 'be')
   );
 }
 
@@ -555,42 +594,14 @@ function buildExpensePickerLinesFromCatalog(
     ])
   );
 
-  const lines: ExpensePickerLine[] = [];
-  for (const product of catalogProducts) {
-    if (!product.shopifyProductId.trim()) continue;
-    const variants = visibleExpenseProductVariants(product);
-    const variantEntries =
-      variants.length > 1
-        ? variants
-        : [
-            {
-              variantId: variants[0]?.variantId ?? '',
-              variantName: variants[0]?.variantName ?? '',
-              quantityInStock: variants[0]?.quantityInStock ?? 0,
-            },
-          ];
-
-    for (const variant of variantEntries) {
-      const variantId = variant.variantId?.trim() ?? '';
-      const lineKey = makeSupplyLineKey(product.shopifyProductId, variantId);
-      const supply = supplyByLineKey.get(lineKey);
-      lines.push({
-        lineKey,
-        shopifyProductId: product.shopifyProductId,
-        shopifyVariantId: variantId,
-        productName: product.productName,
-        productAuthor: product.productAuthor,
-        variantName: variant.variantName,
-        mainImageUrl: product.mainImageUrl,
-        vatRatePercent: supply?.vatRatePercent ?? 23,
-        supplierPrice: supply?.supplierPrice ?? 0,
-      });
-    }
-  }
-
-  return lines.sort((a, b) =>
-    buildExpensePickerLineTitle(a).localeCompare(buildExpensePickerLineTitle(b), 'be')
-  );
+  return buildCatalogPickerLines(catalogProducts).map((line) => {
+    const supply = supplyByLineKey.get(line.lineKey);
+    return {
+      ...line,
+      vatRatePercent: supply?.vatRatePercent ?? 23,
+      supplierPrice: supply?.supplierPrice ?? 0,
+    };
+  });
 }
 
 function defaultExpenseDateInput(): string {
@@ -742,8 +753,12 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [cashSaving, setCashSaving] = useState(false);
   const [deletingCashSaleId, setDeletingCashSaleId] = useState<number | null>(null);
   const [cashProducts, setCashProducts] = useState<ProductWithSuppliers[]>([]);
+  const [cashProductsLoading, setCashProductsLoading] = useState(false);
+  const [cashProductSearch, setCashProductSearch] = useState('');
   const [newCashSale, setNewCashSale] = useState({
+    lineKey: '',
     shopifyProductId: '',
+    shopifyVariantId: '',
     productTitle: '',
     quantity: 1,
     unitPrice: 0,
@@ -965,17 +980,39 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   useEffect(() => {
     if (!cashModalOpen) return;
     let cancelled = false;
+    setCashProductsLoading(true);
     fetchProductsWithSuppliers()
       .then((rows) => {
         if (!cancelled) setCashProducts(rows);
       })
       .catch(() => {
         if (!cancelled) setCashProducts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setCashProductsLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [cashModalOpen]);
+
+  const cashPickerLines = useMemo(() => buildCatalogPickerLines(cashProducts), [cashProducts]);
+
+  const visibleCashPickerLines = useMemo(() => {
+    const search = cashProductSearch.trim().toLowerCase();
+    if (!search) return cashPickerLines;
+    return cashPickerLines.filter((line) => {
+      const haystack = [
+        line.productName,
+        line.productAuthor,
+        line.variantName,
+        buildExpensePickerLineTitle(line),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [cashPickerLines, cashProductSearch]);
 
   const visibleSupplierProducts = useMemo(() => {
     const search = expenseProductSearch.trim().toLowerCase();
@@ -1609,16 +1646,29 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   };
 
   const resetNewCashSaleForm = () => {
+    setCashProductSearch('');
     setNewCashSale({
+      lineKey: '',
       shopifyProductId: '',
+      shopifyVariantId: '',
       productTitle: '',
       quantity: 1,
       unitPrice: 0,
     });
   };
 
+  const selectCashPickerLine = (line: CashPickerLine) => {
+    setNewCashSale((prev) => ({
+      ...prev,
+      lineKey: line.lineKey,
+      shopifyProductId: line.shopifyProductId,
+      shopifyVariantId: line.shopifyVariantId,
+      productTitle: buildExpensePickerLineTitle(line),
+    }));
+  };
+
   const submitCashSale = async () => {
-    if (!newCashSale.shopifyProductId) {
+    if (!newCashSale.lineKey || !newCashSale.shopifyProductId) {
       setError('Выберыце тавар.');
       return;
     }
@@ -1636,6 +1686,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     try {
       await createVatReportCashSale(targetReportId, {
         shopifyProductId: newCashSale.shopifyProductId,
+        shopifyVariantId: newCashSale.shopifyVariantId,
         productTitle: newCashSale.productTitle,
         quantity: newCashSale.quantity,
         unitPrice: newCashSale.unitPrice,
@@ -4081,28 +4132,74 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
 
       {cashModalOpen && (
         <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-black/40 p-3 sm:items-center sm:p-4"
         >
           <div
-            className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+            className="my-auto flex max-h-[min(640px,calc(100dvh-1.5rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl sm:my-0"
           >
-            <div className="text-base font-semibold text-gray-900">Дадаць наяўную продажу</div>
-            <div className="mt-4 space-y-3">
-              <label className="block space-y-1.5">
+            <div className="shrink-0 border-b border-gray-100 px-4 py-3 sm:px-5">
+              <div className="text-base font-semibold text-gray-900">Дадаць наяўную продажу</div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 sm:px-5">
+            <div className="space-y-3">
+              <div className="space-y-2">
                 <span className="text-sm font-medium text-gray-700">Тавар</span>
-                <ProductSearchSelect
-                  products={cashProducts}
-                  value={newCashSale.shopifyProductId}
-                  onChange={(product) =>
-                    setNewCashSale({
-                      shopifyProductId: product?.shopifyProductId ?? '',
-                      productTitle: product?.productName ?? '',
-                      quantity: newCashSale.quantity,
-                      unitPrice: newCashSale.unitPrice,
-                    })
-                  }
+                <input
+                  type="search"
+                  value={cashProductSearch}
+                  onChange={(e) => setCashProductSearch(e.target.value)}
+                  placeholder="Пошук тавару..."
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                 />
-              </label>
+                <div className="max-h-[min(12rem,32vh)] overflow-y-auto rounded-lg border border-gray-200">
+                  {cashProductsLoading && (
+                    <div className="px-3 py-4 text-sm text-gray-500">Загрузка тавараў...</div>
+                  )}
+                  {!cashProductsLoading && visibleCashPickerLines.length === 0 && (
+                    <div className="px-3 py-4 text-sm text-gray-500">Тавары не знойдзены</div>
+                  )}
+                  {!cashProductsLoading &&
+                    visibleCashPickerLines.map((line) => {
+                      const selected = newCashSale.lineKey === line.lineKey;
+                      return (
+                        <button
+                          key={line.lineKey}
+                          type="button"
+                          onClick={() => selectCashPickerLine(line)}
+                          className={`flex w-full items-center gap-x-3 border-b border-gray-100 px-3 py-2 text-left last:border-b-0 transition ${
+                            selected ? 'bg-primary/5' : 'hover:bg-gray-50'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            checked={selected}
+                            readOnly
+                            className="size-4 shrink-0 accent-primary"
+                            aria-hidden
+                          />
+                          {line.mainImageUrl ? (
+                            <img
+                              src={line.mainImageUrl}
+                              alt={line.productName}
+                              className="h-10 w-8 shrink-0 rounded border border-gray-200 object-cover object-center"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="h-10 w-8 shrink-0 rounded border border-gray-200 bg-gray-100" />
+                          )}
+                          <span className="min-w-0 flex-1 text-sm text-gray-800">
+                            <span className="line-clamp-2">
+                              {formatProductNameWithAuthor(line.productName, line.productAuthor)}
+                            </span>
+                            {line.variantName.trim() && (
+                              <span className="block text-xs text-gray-600">{line.variantName}</span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block space-y-1.5">
                   <span className="text-sm font-medium text-gray-700">Колькасць</span>
@@ -4132,7 +4229,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   />
                 </label>
               </div>
-              {newCashSale.shopifyProductId && newCashSale.quantity > 0 && newCashSale.unitPrice > 0 && (
+              {newCashSale.lineKey && newCashSale.quantity > 0 && newCashSale.unitPrice > 0 && (
                 <div className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
                   Сума:{' '}
                   <span className="font-semibold tabular-nums">
@@ -4141,7 +4238,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 </div>
               )}
             </div>
-            <div className="mt-5 flex justify-end gap-2">
+            </div>
+            <div className="shrink-0 flex justify-end gap-2 border-t border-gray-100 px-4 py-3 sm:px-5">
               <button
                 type="button"
                 onClick={() => setCashModalOpen(false)}
