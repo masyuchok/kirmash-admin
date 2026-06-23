@@ -1406,12 +1406,18 @@ public class VatReportProfitService
         List<VatReportAllocationDebugStepRow> steps = [];
         List<SupplyPriceRow> supplyPrices = await LoadSupplyPriceRowsAsync();
         List<ManualAllocationPool> manualPools = await LoadManualAllocationPoolsAsync();
+        List<SupplyEventRow> supplyEvents = await LoadSupplyEventsAsync();
+        Dictionary<int, int> fallbackSupplierBySaleId = BuildFallbackSupplierBySaleId(
+            sales,
+            supplyEvents,
+            variantToProduct );
         RunSalePaymentAllocation(
             sales,
             paymentUnits,
             supplyPrices,
             variantToProduct,
             manualPools,
+            fallbackSupplierBySaleId,
             steps,
             search );
         response.Steps = steps;
@@ -1457,12 +1463,18 @@ public class VatReportProfitService
         List<PaymentUnit> paymentUnits = await LoadPaymentUnitsAsync();
         List<SupplyPriceRow> supplyPriceRows = await LoadSupplyPriceRowsAsync();
         List<ManualAllocationPool> manualPools = await LoadManualAllocationPoolsAsync();
+        List<SupplyEventRow> supplyEvents = await LoadSupplyEventsAsync();
+        Dictionary<int, int> fallbackSupplierBySaleId = BuildFallbackSupplierBySaleId(
+            saleUnits,
+            supplyEvents,
+            variantToProduct );
         return RunSalePaymentAllocation(
             saleUnits,
             paymentUnits,
             supplyPriceRows,
             variantToProduct,
-            manualPools );
+            manualPools,
+            fallbackSupplierBySaleId );
     }
 
     private async Task<List<ManualAllocationPool>> LoadManualAllocationPoolsAsync()
@@ -1496,6 +1508,7 @@ public class VatReportProfitService
         IReadOnlyList<SupplyPriceRow> supplyPriceRows,
         IReadOnlyDictionary<string, string> variantToProduct,
         IReadOnlyList<ManualAllocationPool> manualAllocationPools,
+        IReadOnlyDictionary<int, int>? fallbackSupplierBySaleId = null,
         List<VatReportAllocationDebugStepRow>? traceSteps = null,
         string? traceTitleFilter = null )
     {
@@ -1801,10 +1814,18 @@ public class VatReportProfitService
 
             if (unpaidQuantity > 0)
             {
+                int? supplierForUnpaid = sale.SupplierId;
+                if ((!supplierForUnpaid.HasValue || supplierForUnpaid.Value <= 0) &&
+                    fallbackSupplierBySaleId is not null &&
+                    fallbackSupplierBySaleId.TryGetValue( sale.Id, out int fallbackSupplierId ))
+                {
+                    supplierForUnpaid = fallbackSupplierId;
+                }
+
                 decimal supplyUnitPrice = ResolveSupplyFallbackUnitPrice(
                     supplyPriceRows,
                     sale.ProductId,
-                    sale.SupplierId,
+                    supplierForUnpaid,
                     sale.DateUtc );
                 if (supplyUnitPrice > 0m)
                 {
@@ -1819,7 +1840,7 @@ public class VatReportProfitService
                     sale.VariantId,
                     sale.VariantTitle,
                     sale.ProductTitle,
-                    sale.SupplierId,
+                    supplierForUnpaid,
                     unpaidQuantity,
                     supplyUnitPrice,
                     sale.DateUtc,
@@ -2191,6 +2212,59 @@ public class VatReportProfitService
         }
     }
 
+    private static Dictionary<int, int> BuildFallbackSupplierBySaleId(
+        IReadOnlyList<SaleUnit> sales,
+        List<SupplyEventRow> supplyEvents,
+        IReadOnlyDictionary<string, string> variantToProduct )
+    {
+        Dictionary<int, int> fallback = new();
+        List<SupplyEventRow> positiveSupplies = supplyEvents
+            .Where( supplyEvent => supplyEvent.Quantity > 0 )
+            .ToList();
+        if (positiveSupplies.Count == 0)
+        {
+            return fallback;
+        }
+
+        foreach (SaleUnit sale in sales.Where( sale => !sale.SupplierId.HasValue || sale.SupplierId.Value <= 0 ))
+        {
+            HashSet<int> supplierIds = new();
+            foreach (SupplyEventRow supplyEvent in positiveSupplies)
+            {
+                if (!SupplyEventMatchesSale( sale, supplyEvent, variantToProduct ))
+                {
+                    continue;
+                }
+
+                supplierIds.Add( supplyEvent.SupplierId );
+            }
+
+            if (supplierIds.Count == 1)
+            {
+                fallback[sale.Id] = supplierIds.First();
+            }
+        }
+
+        return fallback;
+    }
+
+    private static bool SupplyEventMatchesSale(
+        SaleUnit sale,
+        SupplyEventRow supplyEvent,
+        IReadOnlyDictionary<string, string> variantToProduct )
+    {
+        SupplyBatchRow batch = new()
+        {
+            SupplierId = supplyEvent.SupplierId,
+            ProductId = supplyEvent.ProductId,
+            VariantId = supplyEvent.VariantId,
+            Quantity = supplyEvent.Quantity,
+            Remaining = supplyEvent.Quantity,
+            SupplyDate = supplyEvent.SupplyDate
+        };
+        return SupplyLineMatchesProduct( sale, batch, variantToProduct );
+    }
+
     private static void ApplySupplyReturn(
         List<SupplyBatchRow> batches,
         SupplyEventRow supplyReturn,
@@ -2459,33 +2533,32 @@ public class VatReportProfitService
         SaleUnit sale,
         IReadOnlyDictionary<string, string> variantToProduct )
     {
-        if (!string.IsNullOrWhiteSpace( sale.VariantId ))
+        string saleProductId = ResolveCatalogProductId( sale.ProductId, variantToProduct );
+        if (string.IsNullOrWhiteSpace( saleProductId ))
         {
-            string paymentProductId = ResolvePaymentProductId( payment.ProductId, payment.VariantId );
-            if (VatReportHelpers.ProductLineKeysEqual(
-                    sale.ProductId,
-                    sale.VariantId,
-                    paymentProductId,
-                    payment.VariantId ))
-            {
-                return true;
-            }
-
-            return false;
+            saleProductId = NormalizeProductId( sale.ProductId );
         }
 
-        string saleProductId = ResolveCatalogProductId( sale.ProductId, variantToProduct );
-        string paymentProductIdLoose = ResolveCatalogProductId( payment.ProductId, variantToProduct );
+        string paymentProductId = ResolvePaymentProductId( payment.ProductId, payment.VariantId );
+        string paymentProductIdResolved = ResolveCatalogProductId( paymentProductId, variantToProduct );
+        if (string.IsNullOrWhiteSpace( paymentProductIdResolved ))
+        {
+            paymentProductIdResolved = paymentProductId;
+        }
+
+        if (VatReportHelpers.ProductLinesCompatible(
+                saleProductId,
+                sale.VariantId,
+                paymentProductIdResolved,
+                payment.VariantId ))
+        {
+            return true;
+        }
+
         string paymentVariantProductId = ResolveVariantMappedProductId( payment.VariantId, variantToProduct );
 
         if (!string.IsNullOrWhiteSpace( saleProductId ))
         {
-            if (!string.IsNullOrWhiteSpace( paymentProductIdLoose ) &&
-                ProductIdsEqual( paymentProductIdLoose, saleProductId ))
-            {
-                return true;
-            }
-
             if (!string.IsNullOrWhiteSpace( paymentVariantProductId ) &&
                 ProductIdsEqual( paymentVariantProductId, saleProductId ))
             {
@@ -2493,7 +2566,7 @@ public class VatReportProfitService
             }
 
             long? saleNumeric = ShopifyIds.TryParseNumericProductId( saleProductId );
-            long? paymentNumeric = ShopifyIds.TryParseNumericProductId( paymentProductIdLoose );
+            long? paymentNumeric = ShopifyIds.TryParseNumericProductId( paymentProductIdResolved );
             if (saleNumeric.HasValue && paymentNumeric.HasValue && saleNumeric.Value == paymentNumeric.Value)
             {
                 return true;
