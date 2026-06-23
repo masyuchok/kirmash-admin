@@ -63,7 +63,7 @@ export type SupplyProductSnapshot = {
 };
 
 export function formatDraftQuantity(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '';
+  if (!Number.isFinite(value) || value === 0) return '';
   return Number.isInteger(value) ? String(value) : String(value);
 }
 

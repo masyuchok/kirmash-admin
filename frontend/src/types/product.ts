@@ -17,6 +17,14 @@ export type ProductVariant = {
   quantityInStock: number;
 };
 
+export type ProductOverpaidLine = {
+  supplierId: number;
+  supplierName: string;
+  shopifyProductId: string;
+  shopifyVariantId: string;
+  overpaidQuantity: number;
+};
+
 export type ProductWithSuppliers = {
   shopifyProductId: string;
   productName: string;
@@ -32,4 +40,5 @@ export type ProductWithSuppliers = {
   unsyncedSuppliers: ProductUnsyncedSupplier[];
   variants: ProductVariant[];
   supplierPrices: ProductSupplierPrice[];
+  overpaidLines: ProductOverpaidLine[];
 };

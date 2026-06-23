@@ -1,5 +1,6 @@
 using backend.Models;
 using backend.Services;
+using backend.Services.Shopify;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,10 +12,12 @@ namespace backend.Controllers
     public class ProductsController : Controller
     {
         private readonly ProductService _service;
+        private readonly VatReportUnpaidLinkService _unpaidLink;
 
-        public ProductsController( ProductService service )
+        public ProductsController( ProductService service, VatReportUnpaidLinkService unpaidLink )
         {
             _service = service;
+            _unpaidLink = unpaidLink;
         }
 
         [HttpGet]
@@ -23,6 +26,22 @@ namespace backend.Controllers
             try
             {
                 List<ProductWithSuppliersListItem> products = await _service.GetProductsWithSuppliersAsync();
+                List<ProductOverpaidLineItem> overpaidLines = await _unpaidLink.GetAllOverpaidLinesAsync();
+                Dictionary<string, List<ProductOverpaidLineItem>> overpaidByProductId = overpaidLines
+                    .GroupBy( line => ShopifyIds.NormalizeProductId( line.ShopifyProductId ) )
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.ToList(),
+                        StringComparer.OrdinalIgnoreCase );
+
+                foreach (ProductWithSuppliersListItem product in products)
+                {
+                    if (overpaidByProductId.TryGetValue( product.ShopifyProductId, out List<ProductOverpaidLineItem>? lines ))
+                    {
+                        product.OverpaidLines = lines;
+                    }
+                }
+
                 return Ok( products );
             }
             catch (InvalidOperationException ex)
@@ -32,6 +51,33 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка атрымання прадуктаў", details = ex.Message } );
+            }
+        }
+
+        [HttpGet( "{shopifyProductId}/history" )]
+        public async Task<ActionResult<ProductHistoryResponse>> GetHistory(
+            string shopifyProductId,
+            [FromQuery] string? shopifyVariantId = null,
+            [FromQuery] int? supplierId = null,
+            [FromQuery] string? variantTitle = null )
+        {
+            try
+            {
+                ProductHistoryResponse history = await _service.GetProductHistoryAsync(
+                    shopifyProductId,
+                    shopifyVariantId,
+                    supplierId,
+                    variantTitle
+                );
+                return Ok( history );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання гісторыі прадукту", details = ex.Message } );
             }
         }
 

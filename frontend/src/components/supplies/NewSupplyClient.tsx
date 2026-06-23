@@ -8,7 +8,7 @@ import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchSupplierOptions } from '@/lib/api/suppliers';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
-import { deleteSupply, fetchSupplyById } from '@/lib/api/supplies';
+import { deleteSupply, fetchSupplierProductBalances, fetchSupplyById } from '@/lib/api/supplies';
 import {
   createDraftLinesForProduct,
   createDraftRowFromSupplyProduct,
@@ -142,6 +142,7 @@ export default function NewSupplyClient({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
+  const [supplierNetBalances, setSupplierNetBalances] = useState<Record<string, number>>({});
 
   const handleSaveRef = useRef<() => Promise<void>>(async () => {});
   const handleResetToBaselineRef = useRef<() => void>(() => {});
@@ -264,6 +265,50 @@ export default function NewSupplyClient({
       cancelled = true;
     };
   }, []);
+
+  const baselineQuantityByLine = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const row of baselineDrafts) {
+      const qty = Number(row.quantity);
+      if (!Number.isFinite(qty)) continue;
+      map[row.lineKey] = (map[row.lineKey] ?? 0) + qty;
+    }
+    return map;
+  }, [baselineDrafts]);
+
+  const getMaxReturnableQuantity = (lineKey: string): number => {
+    const net = supplierNetBalances[lineKey] ?? 0;
+    const baseline = baselineQuantityByLine[lineKey] ?? 0;
+    return Math.max(0, net + baseline);
+  };
+
+  useEffect(() => {
+    const supplierIdNumber = Number(currentSupplierId);
+    if (!Number.isFinite(supplierIdNumber) || supplierIdNumber <= 0) {
+      setSupplierNetBalances({});
+      return;
+    }
+    let cancelled = false;
+    fetchSupplierProductBalances(
+      supplierIdNumber,
+      supplyId ? Number(supplyId) : undefined
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, number> = {};
+        for (const row of rows) {
+          const key = makeSupplyLineKey(row.shopifyProductId, row.shopifyVariantId || undefined);
+          map[key] = row.netQuantity;
+        }
+        setSupplierNetBalances(map);
+      })
+      .catch(() => {
+        if (!cancelled) setSupplierNetBalances({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSupplierId, supplyId]);
 
   useEffect(() => {
     if (supplyId) return;
@@ -572,9 +617,24 @@ export default function NewSupplyClient({
       const marginPercent = Number(row.marginPercent);
       const vatRatePercent = Number(row.vatRatePercent);
       const salePrice = Number(row.salePrice);
-      if (!Number.isFinite(quantity) || quantity <= 0) {
-        setSaveError(`Праверце колькасць для "${displayDraftLabel(row)}" (павінна быць > 0).`);
+      if (!Number.isFinite(quantity) || quantity === 0) {
+        setSaveError(`Праверце колькасць для "${displayDraftLabel(row)}" (не можа быць 0).`);
         return;
+      }
+      if (quantity < 0) {
+        const maxReturn = getMaxReturnableQuantity(row.lineKey);
+        if (maxReturn <= 0) {
+          setSaveError(
+            `"${displayDraftLabel(row)}" нельга вярнуць — тавар не быў у пастаўках гэтага пастаўшчыка.`
+          );
+          return;
+        }
+        if (Math.abs(quantity) > maxReturn) {
+          setSaveError(
+            `Для "${displayDraftLabel(row)}" можна вернуць не больш за ${maxReturn} шт.`
+          );
+          return;
+        }
       }
       if (!Number.isFinite(supplierPrice) || supplierPrice < 0) {
         setSaveError(`Праверце цану пастаўшчыка для "${displayDraftLabel(row)}".`);
@@ -922,13 +982,37 @@ export default function NewSupplyClient({
                       </div>
                     </td>
                     <td className="px-4 py-3.5">
-                      <input
-                        type="number"
-                        min="0"
-                        value={row.quantity}
-                        onChange={(e) => updateDraftField(row.lineKey, 'quantity', readFieldValue(e))}
-                        className="w-24 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-                      />
+                      {(() => {
+                        const maxReturnable = getMaxReturnableQuantity(row.lineKey);
+                        const quantityValue = Number(row.quantity);
+                        const isReturn = Number.isFinite(quantityValue) && quantityValue < 0;
+                        return (
+                          <div className="space-y-1">
+                            <input
+                              type="number"
+                              min={maxReturnable > 0 ? -maxReturnable : 0}
+                              step="1"
+                              value={row.quantity}
+                              onChange={(e) =>
+                                updateDraftField(row.lineKey, 'quantity', readFieldValue(e))
+                              }
+                              title={
+                                maxReturnable > 0
+                                  ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
+                                  : undefined
+                              }
+                              className={`w-24 rounded-lg border bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 ${
+                                isReturn
+                                  ? 'border-amber-300 ring-amber-100'
+                                  : 'border-gray-200'
+                              }`}
+                            />
+                            {maxReturnable > 0 && (
+                              <p className="text-[11px] text-gray-500">Вяртанне: да −{maxReturnable}</p>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3.5">
                       <input

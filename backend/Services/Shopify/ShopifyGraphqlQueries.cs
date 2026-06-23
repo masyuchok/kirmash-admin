@@ -44,6 +44,8 @@ public static class ShopifyGraphqlQueries
                       productType
                     }
                     variant {
+                      id
+                      title
                       product {
                         id
                         productType
@@ -65,6 +67,44 @@ public static class ShopifyGraphqlQueries
               id
               shippingAddress { firstName lastName address1 address2 city zip country countryCodeV2 }
               billingAddress { firstName lastName address1 address2 city zip country countryCodeV2 }
+            }
+          }
+        }
+        """;
+
+    public const string OrderLineItemNodes = """
+        query OrderLineItemNodes($ids:[ID!]!) {
+          nodes(ids:$ids) {
+            ... on Order {
+              id
+              createdAt
+              lineItems(first: 250) {
+                nodes {
+                  quantity
+                  currentQuantity
+                  title
+                  originalUnitPriceSet { shopMoney { amount } }
+                  originalTotalSet { shopMoney { amount } }
+                  discountedTotalSet { shopMoney { amount } }
+                  discountAllocations {
+                    allocatedAmountSet {
+                      shopMoney { amount }
+                    }
+                  }
+                  product {
+                    id
+                    productType
+                  }
+                  variant {
+                    id
+                    title
+                    product {
+                      id
+                      productType
+                    }
+                  }
+                }
+              }
             }
           }
         }

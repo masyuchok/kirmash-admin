@@ -112,6 +112,8 @@ public class VatReportMutationService
                 Items = sourceRow.Items.Select( i => new VatReportRowItem
                 {
                     ShopifyProductId = i.ShopifyProductId,
+                    ShopifyVariantId = i.ShopifyVariantId,
+                    VariantTitle = i.VariantTitle,
                     ProductTitle = i.ProductTitle,
                     ProductType = i.ProductType,
                     Quantity = i.Quantity,
@@ -777,6 +779,12 @@ public class VatReportMutationService
             if (lineGross <= 0m) continue;
 
             string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId.Trim() );
+            string variantId = string.IsNullOrWhiteSpace( item.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( item.ShopifyVariantId.Trim() );
+            string variantTitle = string.IsNullOrWhiteSpace( item.VariantTitle )
+                ? VatReportHelpers.ExtractVariantTitleFromProductLineTitle( item.ProductTitle )
+                : item.VariantTitle.Trim();
             (decimal classifiedRate, string classifiedReason) = ResolveVatRateForReportItem( productId, supplyVatRates );
             decimal assignedRate = !isEuDestination ? 0m : classifiedRate;
             string reason = !isEuDestination ? "non-eu-destination" : classifiedReason;
@@ -787,6 +795,8 @@ public class VatReportMutationService
             itemsByRate[assignedRate].Add( new VatReportRowItem
             {
                 ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                VariantTitle = variantTitle,
                 ProductTitle = string.IsNullOrWhiteSpace( item.ProductTitle ) ? productId : item.ProductTitle.Trim(),
                 ProductType = (item.ProductType ?? string.Empty).Trim(),
                 Quantity = item.Quantity,

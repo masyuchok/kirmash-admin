@@ -143,14 +143,18 @@ public class VatReportGenerationService
                 .FirstOrDefaultAsync( r => r.Id == reportId );
             if (report is null)
             {
-                throw new InvalidOperationException( "РЎРїСЂР°РІР°Р·РґР°С‡Р° РЅРµ Р·РЅРѕР№РґР·РµРЅР°." );
-            }
-            if (!string.Equals( report.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
-            {
-                return new List<VatReportSourceOrderOption>();
+                throw new InvalidOperationException( "Справаздача не знойдзена." );
             }
 
-            return (await BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth ))
+            Task<List<VatReportRow>> polandTask = BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth );
+            Task<List<VatReportRow>> foreignTask = BuildForeignRowsAsync(
+                report.PeriodYear,
+                report.PeriodMonth,
+                resolveDeliveryInfo: false );
+            await Task.WhenAll( polandTask, foreignTask );
+
+            return polandTask.Result
+                .Concat( foreignTask.Result )
                 .OrderByDescending( x => x.OrderDateUtc )
                 .ThenBy( x => x.OrderNumber )
                 .ThenBy( x => x.VatRatePercent )
@@ -191,6 +195,8 @@ public class VatReportGenerationService
                     ShopifyClassifiedItemDto classified = new()
                     {
                         ShopifyProductId = ShopifyIds.NormalizeGid( item.ShopifyProductId, "gid://shopify/Product/" ).Trim(),
+                        ShopifyVariantId = ShopifyIds.NormalizeVariantId( item.ShopifyVariantId ),
+                        VariantTitle = item.VariantTitle,
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
                         Quantity = item.Quantity,
@@ -271,22 +277,31 @@ public class VatReportGenerationService
             return rows;
         }
 
-    private async Task<List<VatReportRow>> BuildForeignRowsAsync( int year, int month )
+    private async Task<List<VatReportRow>> BuildForeignRowsAsync(
+        int year,
+        int month,
+        bool resolveDeliveryInfo = true )
         {
             List<ShopifyOrderDto> orders = await _shopifyOrders.FetchOrdersForForeignAsync( year, month );
             Dictionary<string, decimal> supplyVatRates = await GetSupplyVatRatesAsync();
-            List<string> orderIds = orders
-                .Select( o => o.OrderId )
-                .Where( id => !string.IsNullOrWhiteSpace( id ) )
-                .Distinct( StringComparer.OrdinalIgnoreCase )
-                .ToList();
-            Dictionary<string, ForeignDeliveryInfo> deliveryByOrderId =
-                await _shopifyOrders.FetchForeignDeliveryInfoAsync( orderIds );
+            Dictionary<string, ForeignDeliveryInfo> deliveryByOrderId = new( StringComparer.OrdinalIgnoreCase );
+            if (resolveDeliveryInfo)
+            {
+                List<string> orderIds = orders
+                    .Select( o => o.OrderId )
+                    .Where( id => !string.IsNullOrWhiteSpace( id ) )
+                    .Distinct( StringComparer.OrdinalIgnoreCase )
+                    .ToList();
+                deliveryByOrderId = await _shopifyOrders.FetchForeignDeliveryInfoAsync( orderIds );
+            }
+
             List<VatReportRow> rows = new();
             foreach (ShopifyOrderDto order in orders)
             {
                 deliveryByOrderId.TryGetValue( order.OrderId, out ForeignDeliveryInfo? deliveryInfo );
-                string orderNumber = ResolveForeignOrderNumber( order.OrderNumber, deliveryInfo, order.CountryCode );
+                string orderNumber = resolveDeliveryInfo
+                    ? ResolveForeignOrderNumber( order.OrderNumber, deliveryInfo, order.CountryCode )
+                    : order.OrderNumber;
                 decimal shippingGross = VatReportHelpers.Round2( order.ShippingGross );
                 bool isEuDestination = IsEuCountryCode( order.CountryCode );
                 Dictionary<decimal, decimal> grossByRate = new();
@@ -308,6 +323,8 @@ public class VatReportGenerationService
                     itemsByRate[assignedRate].Add( new ShopifyClassifiedItemDto
                     {
                         ShopifyProductId = ShopifyIds.NormalizeGid( item.ShopifyProductId, "gid://shopify/Product/" ).Trim(),
+                        ShopifyVariantId = ShopifyIds.NormalizeVariantId( item.ShopifyVariantId ),
+                        VariantTitle = item.VariantTitle,
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
                         Quantity = item.Quantity,
@@ -411,6 +428,8 @@ public class VatReportGenerationService
                     .Select( x => new VatReportRowItem
                     {
                         ShopifyProductId = string.IsNullOrWhiteSpace( x.ShopifyProductId ) ? string.Empty : x.ShopifyProductId,
+                        ShopifyVariantId = string.IsNullOrWhiteSpace( x.ShopifyVariantId ) ? string.Empty : x.ShopifyVariantId,
+                        VariantTitle = string.IsNullOrWhiteSpace( x.VariantTitle ) ? string.Empty : x.VariantTitle,
                         ProductTitle = string.IsNullOrWhiteSpace( x.ProductTitle ) ? "—" : x.ProductTitle,
                         ProductType = x.ProductType ?? string.Empty,
                         Quantity = x.Quantity,
@@ -522,6 +541,8 @@ public class VatReportGenerationService
     private sealed class ShopifyClassifiedItemDto
     {
         public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public int Quantity { get; set; }

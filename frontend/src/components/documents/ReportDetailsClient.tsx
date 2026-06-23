@@ -17,6 +17,8 @@ import {
   fetchVatReportDetails,
   fetchVatReports,
   fetchVatReportSourceOrders,
+  fetchUnpaidLinkOptions,
+  linkUnpaidProduct,
   regenerateVatReport,
   moveVatReportRowToForeign,
   updateVatReportExpense,
@@ -32,7 +34,13 @@ import { fetchSuppliers } from '@/lib/api/suppliers';
 import { formatProductNameWithAuthor } from '@/lib/supply-draft';
 import { makeSupplyLineKey } from '@/lib/supply-line-key';
 import type { SupplyCatalogProduct } from '@/lib/api/supplies';
-import type { VatReportDetails, VatReportExpenseRow, VatReportSourceOrderOption } from '@/types/report-details';
+import type {
+  VatReportDetails,
+  VatReportExpenseRow,
+  VatReportSourceOrderOption,
+  VatReportUnpaidLinkOptions,
+  VatReportUnpaidProductRow,
+} from '@/types/report-details';
 import type { ProductVariant, ProductWithSuppliers } from '@/types/product';
 import type { Supplier } from '@/types/supplier';
 import { FiRefreshCw } from 'react-icons/fi';
@@ -59,6 +67,19 @@ function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleDateString('ru-RU');
+}
+
+function formatSupplierExpenseOptionLabel(option: {
+  expenseDateUtc: string;
+  invoiceNumber: string;
+  comment: string;
+  grossAmount: number;
+  totalProductUnits: number;
+}): string {
+  const title = option.invoiceNumber || option.comment || 'Аплата';
+  const units =
+    option.totalProductUnits > 0 ? `${option.totalProductUnits} ад.` : 'без тавараў';
+  return [formatDate(option.expenseDateUtc), title, formatAmount(option.grossAmount), units].join(' · ');
 }
 
 function formatDatePl(value: string): string {
@@ -542,6 +563,31 @@ function buildCatalogPickerLines(catalogProducts: ProductWithSuppliers[]): Catal
   );
 }
 
+function normalizeShopifyNumericId(id: string): string {
+  const trimmed = id.trim();
+  if (!trimmed) return '';
+  const gidMatch = trimmed.match(/\/(\d+)$/);
+  if (gidMatch) return gidMatch[1];
+  return trimmed;
+}
+
+function findCatalogProduct(
+  catalogProducts: ProductWithSuppliers[],
+  shopifyProductId: string
+): ProductWithSuppliers | undefined {
+  const target = normalizeShopifyNumericId(shopifyProductId);
+  return catalogProducts.find(
+    (product) => normalizeShopifyNumericId(product.shopifyProductId) === target
+  );
+}
+
+function stripSuffixFromTitle(title: string, suffix?: string | null): string {
+  const trimmedSuffix = suffix?.trim();
+  if (!trimmedSuffix) return title.trim();
+  const escaped = trimmedSuffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return title.trim().replace(new RegExp(`[,\\s]+${escaped}$`, 'iu'), '').trim();
+}
+
 function buildExpensePickerLineTitle(line: {
   productName: string;
   productAuthor: string;
@@ -550,6 +596,67 @@ function buildExpensePickerLineTitle(line: {
   const base = formatProductNameWithAuthor(line.productName, line.productAuthor);
   const variantName = line.variantName.trim();
   return variantName ? `${base} — ${variantName}` : base;
+}
+
+function resolveUnpaidVariantName(
+  item: Pick<VatReportUnpaidProductRow, 'shopifyProductId' | 'shopifyVariantId' | 'shopifyVariantTitle'>,
+  catalogProducts: ProductWithSuppliers[]
+): string {
+  const fromApi = item.shopifyVariantTitle?.trim() ?? '';
+  if (fromApi && fromApi !== 'Default Title') return fromApi;
+
+  const variantId = item.shopifyVariantId?.trim() ?? '';
+  if (!variantId) return '';
+
+  const product = findCatalogProduct(catalogProducts, item.shopifyProductId);
+  const targetVariantId = normalizeShopifyNumericId(variantId);
+  const variantName =
+    product?.variants
+      ?.find((variant) => normalizeShopifyNumericId(variant.variantId) === targetVariantId)
+      ?.variantName?.trim() ?? '';
+  return variantName && variantName !== 'Default Title' ? variantName : '';
+}
+
+function formatUnpaidProductLabel(
+  item: VatReportUnpaidProductRow,
+  catalogProducts: ProductWithSuppliers[] = []
+): { title: string; variantLabel: string | null } {
+  const variantName = resolveUnpaidVariantName(item, catalogProducts);
+  const product = findCatalogProduct(catalogProducts, item.shopifyProductId);
+  const title =
+    product?.productName?.trim() ||
+    stripSuffixFromTitle(
+      stripSuffixFromTitle(item.productTitle, item.supplierName),
+      product?.productAuthor
+    ) ||
+    item.shopifyProductId;
+
+  return { title, variantLabel: variantName || null };
+}
+
+function formatOrderItemLabel(item: {
+  productTitle: string;
+  variantTitle?: string;
+  shopifyVariantId?: string;
+}): { title: string; variantLabel: string | null } {
+  const fromApi = item.variantTitle?.trim() ?? '';
+  if (fromApi && fromApi !== 'Default Title') {
+    const title = item.productTitle.includes(' — ')
+      ? item.productTitle.split(' — ')[0]?.trim() || item.productTitle
+      : item.productTitle;
+    return { title, variantLabel: fromApi };
+  }
+
+  const dashIndex = item.productTitle.lastIndexOf(' — ');
+  if (dashIndex >= 0) {
+    const title = item.productTitle.slice(0, dashIndex).trim();
+    const variantLabel = item.productTitle.slice(dashIndex + 3).trim();
+    if (title && variantLabel) {
+      return { title, variantLabel };
+    }
+  }
+
+  return { title: item.productTitle, variantLabel: null };
 }
 
 function buildExpensePickerLinesFromSupply(
@@ -728,7 +835,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [addMode, setAddMode] = useState<'select' | 'manual'>('select');
   const [sourceOrderOptions, setSourceOrderOptions] = useState<VatReportSourceOrderOption[]>([]);
   const [sourceOrdersLoading, setSourceOrdersLoading] = useState(false);
-  const [selectedSourceKey, setSelectedSourceKey] = useState<string>('');
+  const [selectedSourceIndex, setSelectedSourceIndex] = useState('');
   const [addingRow, setAddingRow] = useState(false);
   const [addRowError, setAddRowError] = useState<string | null>(null);
   const [orderSearch, setOrderSearch] = useState('');
@@ -754,7 +861,19 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const [deletingCashSaleId, setDeletingCashSaleId] = useState<number | null>(null);
   const [cashProducts, setCashProducts] = useState<ProductWithSuppliers[]>([]);
   const [cashProductsLoading, setCashProductsLoading] = useState(false);
+  const [unpaidCatalogProducts, setUnpaidCatalogProducts] = useState<ProductWithSuppliers[]>([]);
   const [cashProductSearch, setCashProductSearch] = useState('');
+  const [unpaidLinkModalOpen, setUnpaidLinkModalOpen] = useState(false);
+  const [unpaidLinkTarget, setUnpaidLinkTarget] = useState<VatReportUnpaidProductRow | null>(null);
+  const [unpaidLinkMode, setUnpaidLinkMode] = useState<'replace' | 'link'>('replace');
+  const [unpaidLinkOptions, setUnpaidLinkOptions] = useState<VatReportUnpaidLinkOptions | null>(null);
+  const [unpaidLinkOptionsLoading, setUnpaidLinkOptionsLoading] = useState(false);
+  const [unpaidLinkError, setUnpaidLinkError] = useState<string | null>(null);
+  const [unpaidLinkSaving, setUnpaidLinkSaving] = useState(false);
+  const [selectedOverpaidProductId, setSelectedOverpaidProductId] = useState('');
+  const [unpaidLinkSource, setUnpaidLinkSource] = useState<'invoice' | 'payment'>('invoice');
+  const [selectedInvoiceExpenseId, setSelectedInvoiceExpenseId] = useState('');
+  const [selectedPaymentRecordExpenseId, setSelectedPaymentRecordExpenseId] = useState('');
   const [newCashSale, setNewCashSale] = useState({
     lineKey: '',
     shopifyProductId: '',
@@ -1041,7 +1160,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     [data]
   );
 
-  const activeDetailsPanel = useMemo<'poland' | 'foreign' | 'expense' | 'cash' | null>(() => {
+  const activeDetailsPanel = useMemo<'poland' | 'foreign' | 'expense' | 'cash' | 'unpaid' | null>(() => {
     if (isForeignReportOnly) {
       return expandedOrderId ? 'foreign' : null;
     }
@@ -1050,6 +1169,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     if (expandedRow.type === 'foreign' && foreignOrderRows.length > 0) return 'foreign';
     if (expandedRow.type === 'cash') return 'cash';
     if (expandedRow.type === 'expense') return 'expense';
+    if (expandedRow.type === 'unpaid') return 'unpaid';
     return null;
   }, [expandedRow, expandedOrderId, foreignOrderRows.length, isForeignReportOnly]);
 
@@ -1057,6 +1177,26 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     if (!expandedRow || expandedRow.type !== 'cash') return [];
     return expandedRow.cashSaleRows ?? [];
   }, [expandedRow]);
+
+  const visibleUnpaidRows = useMemo(() => {
+    if (!expandedRow || expandedRow.type !== 'unpaid') return [];
+    return expandedRow.unpaidProductRows ?? [];
+  }, [expandedRow]);
+
+  useEffect(() => {
+    if (visibleUnpaidRows.length === 0) return;
+    let cancelled = false;
+    fetchProductsWithSuppliers()
+      .then((rows) => {
+        if (!cancelled) setUnpaidCatalogProducts(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setUnpaidCatalogProducts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleUnpaidRows.length]);
 
   const expenseVatForTotal = useMemo(() => {
     const expenseRow = data?.rows.find((r) => r.type === 'expense');
@@ -1143,23 +1283,26 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       });
   }, [foreignOrderRows, foreignOrderSearch]);
 
-  const visibleForeignShopifyProducts = useMemo(() => {
+  const foreignPickerLines = useMemo(
+    () => buildCatalogPickerLines(foreignShopifyProducts),
+    [foreignShopifyProducts]
+  );
+
+  const visibleForeignPickerLines = useMemo(() => {
     const search = foreignProductSearch.trim().toLowerCase();
-    const sorted = [...foreignShopifyProducts].sort((a, b) =>
-      a.productName.localeCompare(b.productName, 'be')
-    );
-    if (!search) return sorted;
-    return sorted.filter((product) => {
+    if (!search) return foreignPickerLines;
+    return foreignPickerLines.filter((line) => {
       const haystack = [
-        product.productName,
-        product.productAuthor,
-        product.productType,
+        line.productName,
+        line.productAuthor,
+        line.variantName,
+        buildExpensePickerLineTitle(line),
       ]
         .join(' ')
         .toLowerCase();
       return haystack.includes(search);
     });
-  }, [foreignShopifyProducts, foreignProductSearch]);
+  }, [foreignPickerLines, foreignProductSearch]);
 
   const foreignProductGrossTotal = useMemo(
     () => calcExpenseProductGrossTotal(foreignProductLines),
@@ -1231,6 +1374,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const toSourceKey = (option: VatReportSourceOrderOption) =>
     `${option.shopifyOrderId}|${option.vatRatePercent}|${option.orderNumber}`;
 
+  const formatSourceOrderLabel = (option: VatReportSourceOrderOption) => {
+    const baseNumber = option.orderNumber.split(' || ')[0]?.trim() || option.orderNumber;
+    return `${baseNumber} · ${formatDate(option.orderDateUtc)} · VAT ${formatAmount(option.vatRatePercent)}%`;
+  };
+
   const resetNewRow = () => {
     setNewRow({
       orderNumber: '',
@@ -1240,7 +1388,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       vatAmount: 0,
       netAmount: 0,
     });
-    setSelectedSourceKey('');
+    setSelectedSourceIndex('');
     setAddRowError(null);
   };
 
@@ -1319,19 +1467,19 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     setForeignAddModalOpen(true);
   };
 
-  const toggleForeignProduct = (product: ProductWithSuppliers, selected: boolean) => {
+  const toggleForeignPickerLine = (line: CatalogPickerLine, selected: boolean) => {
+    const product = foreignShopifyProducts.find((p) => p.shopifyProductId === line.shopifyProductId);
     if (selected) {
       setForeignProductLines((prev) => {
-        const lineKey = makeSupplyLineKey(product.shopifyProductId);
-        if (prev.some((line) => line.lineKey === lineKey)) return prev;
+        if (prev.some((item) => item.lineKey === line.lineKey)) return prev;
         return [
           ...prev,
           {
-            lineKey,
-            shopifyProductId: product.shopifyProductId,
-            shopifyVariantId: '',
-            productTitle: formatProductNameWithAuthor(product.productName, product.productAuthor),
-            productType: product.productType,
+            lineKey: line.lineKey,
+            shopifyProductId: line.shopifyProductId,
+            shopifyVariantId: line.shopifyVariantId,
+            productTitle: buildExpensePickerLineTitle(line),
+            productType: product?.productType ?? '',
             quantity: 1,
             unitGrossPrice: 0,
             vatRatePercent: 23,
@@ -1340,26 +1488,20 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       });
       return;
     }
-    setForeignProductLines((prev) =>
-      prev.filter((line) => line.shopifyProductId !== product.shopifyProductId)
-    );
+    setForeignProductLines((prev) => prev.filter((item) => item.lineKey !== line.lineKey));
   };
 
-  const updateForeignProductQuantity = (shopifyProductId: string, quantity: number) => {
+  const updateForeignProductQuantity = (lineKey: string, quantity: number) => {
     const safeQuantity = Math.max(1, Math.trunc(quantity) || 1);
     setForeignProductLines((prev) =>
-      prev.map((line) =>
-        line.shopifyProductId === shopifyProductId ? { ...line, quantity: safeQuantity } : line
-      )
+      prev.map((line) => (line.lineKey === lineKey ? { ...line, quantity: safeQuantity } : line))
     );
   };
 
-  const updateForeignProductUnitPrice = (shopifyProductId: string, unitGrossPrice: number) => {
+  const updateForeignProductUnitPrice = (lineKey: string, unitGrossPrice: number) => {
     const safePrice = Math.max(0, unitGrossPrice);
     setForeignProductLines((prev) =>
-      prev.map((line) =>
-        line.shopifyProductId === shopifyProductId ? { ...line, unitGrossPrice: safePrice } : line
-      )
+      prev.map((line) => (line.lineKey === lineKey ? { ...line, unitGrossPrice: safePrice } : line))
     );
   };
 
@@ -1405,6 +1547,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         shippingGrossAmount: Math.max(0, Number(newForeignRow.shippingGrossAmount) || 0),
         items: foreignProductLines.map((line) => ({
           shopifyProductId: line.shopifyProductId,
+          shopifyVariantId: line.shopifyVariantId,
+          variantTitle: line.productTitle.includes(' — ')
+            ? line.productTitle.split(' — ').slice(1).join(' — ').trim()
+            : '',
           productTitle: line.productTitle,
           productType: line.productType,
           quantity: line.quantity,
@@ -1701,6 +1847,113 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       setError(err instanceof Error ? err.message : 'Памылка дадання наяўнай продажы');
     } finally {
       setCashSaving(false);
+    }
+  };
+
+  const openUnpaidLinkModal = async (item: VatReportUnpaidProductRow) => {
+    if (!data?.periodYear || !data?.periodMonth || !item.supplierId) return;
+    setUnpaidLinkTarget(item);
+    setUnpaidLinkModalOpen(true);
+    setUnpaidLinkError(null);
+    setUnpaidLinkOptions(null);
+    setSelectedOverpaidProductId('');
+    setSelectedInvoiceExpenseId('');
+    setSelectedPaymentRecordExpenseId('');
+    setUnpaidLinkSource('invoice');
+    setUnpaidLinkOptionsLoading(true);
+    try {
+      const options = await fetchUnpaidLinkOptions({
+        supplierId: item.supplierId,
+        periodYear: data.periodYear,
+        periodMonth: data.periodMonth,
+        shopifyProductId: item.shopifyProductId,
+        shopifyVariantId: item.shopifyVariantId,
+      });
+      setUnpaidLinkOptions(options);
+      if (options.overpaidProducts.length > 0) {
+        setUnpaidLinkMode('replace');
+        if (options.overpaidProducts.length === 1) {
+          setSelectedOverpaidProductId(String(options.overpaidProducts[0].expenseProductId));
+        }
+      } else {
+        setUnpaidLinkMode('link');
+        if (options.supplierInvoices.length > 0) {
+          setUnpaidLinkSource('invoice');
+          if (options.supplierInvoices.length === 1) {
+            setSelectedInvoiceExpenseId(String(options.supplierInvoices[0].expenseId));
+          }
+        } else if (options.supplierPaymentRecords.length > 0) {
+          setUnpaidLinkSource('payment');
+          if (options.supplierPaymentRecords.length === 1) {
+            setSelectedPaymentRecordExpenseId(String(options.supplierPaymentRecords[0].expenseId));
+          }
+        }
+      }
+    } catch (err: unknown) {
+      setUnpaidLinkError(err instanceof Error ? err.message : 'Памылка загрузкі варыянтаў');
+    } finally {
+      setUnpaidLinkOptionsLoading(false);
+    }
+  };
+
+  const submitUnpaidLink = async () => {
+    if (!data?.periodYear || !data?.periodMonth || !unpaidLinkTarget?.supplierId) return;
+    if (unpaidLinkMode === 'replace' && !selectedOverpaidProductId) {
+      setUnpaidLinkError('Выберыце пераплачаны тавар у фактуре.');
+      return;
+    }
+    if (unpaidLinkMode === 'link') {
+      if (unpaidLinkSource === 'invoice' && !selectedInvoiceExpenseId) {
+        setUnpaidLinkError('Выберыце фактуру пастаўшчыка.');
+        return;
+      }
+      if (unpaidLinkSource === 'payment' && !selectedPaymentRecordExpenseId) {
+        setUnpaidLinkError('Выберыце запіс аплаты.');
+        return;
+      }
+    }
+    const linkExpenseId =
+      unpaidLinkMode === 'link'
+        ? Number(unpaidLinkSource === 'invoice' ? selectedInvoiceExpenseId : selectedPaymentRecordExpenseId)
+        : undefined;
+    setUnpaidLinkSaving(true);
+    setUnpaidLinkError(null);
+    try {
+      await linkUnpaidProduct({
+        periodYear: (() => {
+          if (unpaidLinkTarget.saleOrderDateUtc) {
+            const saleDate = new Date(unpaidLinkTarget.saleOrderDateUtc);
+            if (!Number.isNaN(saleDate.getTime())) return saleDate.getUTCFullYear();
+          }
+          return data.periodYear;
+        })(),
+        periodMonth: (() => {
+          if (unpaidLinkTarget.saleOrderDateUtc) {
+            const saleDate = new Date(unpaidLinkTarget.saleOrderDateUtc);
+            if (!Number.isNaN(saleDate.getTime())) return saleDate.getUTCMonth() + 1;
+          }
+          return data.periodMonth;
+        })(),
+        shopifyProductId: unpaidLinkTarget.shopifyProductId,
+        shopifyVariantId: unpaidLinkTarget.shopifyVariantId,
+        productTitle: unpaidLinkTarget.productTitle,
+        supplierId: unpaidLinkTarget.supplierId,
+        quantity: unpaidLinkTarget.quantity,
+        mode: unpaidLinkMode,
+        linkSource: unpaidLinkMode === 'link' ? unpaidLinkSource : undefined,
+        expenseProductId:
+          unpaidLinkMode === 'replace' ? Number(selectedOverpaidProductId) : undefined,
+        expenseId: linkExpenseId,
+      });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+      setUnpaidLinkModalOpen(false);
+      setUnpaidLinkTarget(null);
+    } catch (err: unknown) {
+      setUnpaidLinkError(err instanceof Error ? err.message : 'Памылка прывязкі');
+    } finally {
+      setUnpaidLinkSaving(false);
     }
   };
 
@@ -2220,8 +2473,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   ]);
 
   useEffect(() => {
-    if (!addModalOpen || addMode !== 'select' || !selectedSourceKey) return;
-    const option = sourceOrderOptions.find((item) => toSourceKey(item) === selectedSourceKey);
+    if (!addModalOpen || addMode !== 'select' || !selectedSourceIndex) return;
+    const option = sourceOrderOptions[Number(selectedSourceIndex)];
     if (!option) return;
     setNewRow({
       orderNumber: option.orderNumber,
@@ -2231,7 +2484,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       vatAmount: option.vatAmount,
       netAmount: option.netAmount,
     });
-  }, [addModalOpen, addMode, selectedSourceKey, sourceOrderOptions]);
+  }, [addModalOpen, addMode, selectedSourceIndex, sourceOrderOptions]);
 
   useEffect(() => {
     if (!vatFilterOpen) return;
@@ -2275,8 +2528,8 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
           <div
             title={
               isLocked
-                ? 'Прыбытак пералічваецца пры дадаванні аплат пастаўшчыку ў наступных месяцах (себестаімасць прывязваецца да месяца продажу).'
-                : undefined
+                ? 'Прыбытак = выручка − расходы (без аплат пастаўшчыку) − сабестаімасць − аплаты асоб з раздзела «Фінансы» за месяц.'
+                : 'Прыбытак уключае аплаты асоб (Зоя, Міця і г.д.) з раздзела «Фінансы» за гэты месяц. Выплаты Кірмашу не аднімаюцца.'
             }
           >
             Усяго прыбытак:{' '}
@@ -2326,7 +2579,11 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 <Fragment key={`${row.type}-${row.shopifyOrderId}`}>
                   <tr
                     className={`transition ${
-                      row.type === 'poland' || row.type === 'foreign' || row.type === 'expense' || row.type === 'cash'
+                      row.type === 'poland' ||
+                      row.type === 'foreign' ||
+                      row.type === 'expense' ||
+                      row.type === 'cash' ||
+                      row.type === 'unpaid'
                         ? 'cursor-pointer hover:bg-primary/10'
                         : ''
                     } ${
@@ -2337,7 +2594,13 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                         : ''
                     }`}
                     onClick={() => {
-                      if (row.type === 'poland' || row.type === 'foreign' || row.type === 'expense' || row.type === 'cash') {
+                      if (
+                        row.type === 'poland' ||
+                        row.type === 'foreign' ||
+                        row.type === 'expense' ||
+                        row.type === 'cash' ||
+                        row.type === 'unpaid'
+                      ) {
                         setExpandedOrderId((prev) => {
                           const next = prev === row.shopifyOrderId ? null : row.shopifyOrderId;
                           if (next !== null) {
@@ -2439,14 +2702,20 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                         ? 'Замежжа'
                         : row.type === 'cash'
                           ? 'Наяўнымі'
-                          : 'Расход'}
+                          : row.type === 'unpaid'
+                            ? 'Неаплачанае'
+                            : 'Расход'}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums">
-                    {formatAmount(row.grossAmount ?? 0)}
+                    {row.type === 'unpaid' ? (
+                      <span title="Ацэнка сабакошту па пастаўках">{formatAmount(row.grossAmount ?? 0)}</span>
+                    ) : (
+                      formatAmount(row.grossAmount ?? 0)
+                    )}
                   </td>
                         <td className="px-4 py-3 text-right tabular-nums">{formatAmount(row.vat)}</td>
                         <td className="px-4 py-3 text-right">
-                          {row.type !== 'expense' && row.type !== 'cash' && (
+                          {row.type !== 'expense' && row.type !== 'cash' && row.type !== 'unpaid' && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -2492,9 +2761,15 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                 const rate = item.assignedVatRatePercent / 100;
                                 const vatAmount = rate > 0 ? round2((item.grossAmount * rate) / (1 + rate)) : 0;
                                 const netAmount = round2(item.grossAmount - vatAmount);
+                                const { title, variantLabel } = formatOrderItemLabel(item);
                                 return (
                                   <tr key={`${group.id}-${idx}`}>
-                                    <td className="px-2 py-1.5">{item.productTitle}</td>
+                                    <td className="px-2 py-1.5">
+                                      <div>{title}</div>
+                                      {variantLabel && (
+                                        <div className="text-[11px] text-primary">{variantLabel}</div>
+                                      )}
+                                    </td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
                                     <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
                                     <td className="px-2 py-1.5 text-right">
@@ -3402,9 +3677,15 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   const rate = item.assignedVatRatePercent / 100;
                                   const vatAmount = rate > 0 ? round2((item.grossAmount * rate) / (1 + rate)) : 0;
                                   const netAmount = round2(item.grossAmount - vatAmount);
+                                  const { title, variantLabel } = formatOrderItemLabel(item);
                                   return (
                                     <tr key={`${group.id}-${idx}`}>
-                                      <td className="px-2 py-1.5">{item.productTitle}</td>
+                                      <td className="px-2 py-1.5">
+                                        <div>{title}</div>
+                                        {variantLabel && (
+                                          <div className="text-[11px] text-primary">{variantLabel}</div>
+                                        )}
+                                      </td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{item.quantity}</td>
                                       <td className="px-2 py-1.5 text-right tabular-nums">{formatAmount(netAmount)}</td>
                                       <td className="px-2 py-1.5 text-right">
@@ -3547,6 +3828,96 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 <tr>
                   <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-500">
                     Наяўных продаж пакуль няма.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {activeDetailsPanel === 'unpaid' && (
+        <div className="w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h3 className="text-sm font-semibold text-gray-900">Неаплачаныя тавары</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Проданы ў гэтым месяцы (па даце продажы), але фактура пастаўшчыку не пакрыла гэты тавар.
+              Прывязаныя да аплаты пазначаны нумарам фактуры.
+            </p>
+          </div>
+          <table className="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                <th className="px-4 py-2.5">Дата продажы</th>
+                <th className="px-4 py-2.5">Тавар</th>
+                <th className="px-4 py-2.5">Пастаўшчык</th>
+                <th className="px-4 py-2.5">Прывязка</th>
+                <th className="px-4 py-2.5 text-right">Колькасць</th>
+                <th className="px-4 py-2.5 text-right">Цана з пастаўкі</th>
+                <th className="px-4 py-2.5 text-right">Ацэнка COGS</th>
+                <th className="px-4 py-2.5 text-right">Дзеянне</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {visibleUnpaidRows.map((item) => {
+                const productLabel = formatUnpaidProductLabel(item, unpaidCatalogProducts);
+                return (
+                <tr
+                  key={`unpaid-${item.shopifyProductId}-${item.shopifyVariantId ?? ''}-${item.supplierId ?? 0}-${item.linkedExpenseId ?? 0}`}
+                  className={item.isManuallyLinked ? 'bg-sky-50/60' : undefined}
+                >
+                  <td className="px-4 py-3">
+                    {item.saleOrderDateUtc ? formatDate(item.saleOrderDateUtc) : '—'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-gray-900">{productLabel.title}</div>
+                    {productLabel.variantLabel ? (
+                      <div className="mt-0.5 text-xs font-medium text-primary">{productLabel.variantLabel}</div>
+                    ) : null}
+                  </td>
+                  <td className="px-4 py-3">{item.supplierName || '—'}</td>
+                  <td className="px-4 py-3">
+                    {item.isManuallyLinked && item.linkedPaymentLabel ? (
+                      <span className="inline-flex rounded-md bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800">
+                        {item.linkedPaymentLabel}
+                      </span>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">{item.quantity}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {item.unitSupplyPrice > 0 ? formatAmount(item.unitSupplyPrice) : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {item.isManuallyLinked
+                      ? '—'
+                      : item.estimatedCogs > 0
+                        ? formatAmount(item.estimatedCogs)
+                        : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {item.isManuallyLinked ? (
+                      <span className="text-xs text-gray-500">Прывязана</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openUnpaidLinkModal(item)}
+                        disabled={isLocked || !item.supplierId}
+                        className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-800 transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        title={isLocked ? lockedTitle : 'Прывязаць да фактуры'}
+                      >
+                        Прывязаць
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+              })}
+              {visibleUnpaidRows.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
+                    Усе проданыя тавары аплачаны па фактурах.
                   </td>
                 </tr>
               )}
@@ -3748,7 +4119,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   type="button"
                   onClick={() => {
                     setAddMode('manual');
-                    setSelectedSourceKey('');
+                    setSelectedSourceIndex('');
                     setAddRowError(null);
                   }}
                   className={`rounded-md px-3 py-1 ${addMode === 'manual' ? 'bg-primary text-white' : 'text-gray-700 hover:bg-gray-50'}`}
@@ -3765,17 +4136,24 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
 
               {addMode === 'select' && (
                 <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">Нумар замовы (за гэты месяц)</span>
+                  <span className="text-sm font-medium text-gray-700">
+                    Нумар замовы (за гэты месяц)
+                    {sourceOrdersLoading && (
+                      <span className="ml-2 text-xs font-normal text-gray-500">Загрузка...</span>
+                    )}
+                  </span>
                   <select
-                    value={selectedSourceKey}
-                    onChange={(e) => setSelectedSourceKey(e.target.value)}
-                    disabled={sourceOrdersLoading || addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    value={selectedSourceIndex}
+                    onChange={(e) => setSelectedSourceIndex(e.target.value)}
+                    disabled={addingRow}
+                    className="relative z-[81] w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                   >
-                    <option value="">Выберыце заказ</option>
-                    {sourceOrderOptions.map((option) => (
-                      <option key={toSourceKey(option)} value={toSourceKey(option)}>
-                        {option.orderNumber} · {formatDate(option.orderDateUtc)} · VAT {formatAmount(option.vatRatePercent)}%
+                    <option value="">
+                      {sourceOrdersLoading ? 'Загрузка спісу замоў...' : 'Выберыце заказ'}
+                    </option>
+                    {sourceOrderOptions.map((option, index) => (
+                      <option key={toSourceKey(option) + index} value={String(index)}>
+                        {formatSourceOrderLabel(option)}
                       </option>
                     ))}
                   </select>
@@ -3887,7 +4265,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               <button
                 type="button"
                 onClick={submitAddRow}
-                disabled={addingRow || (addMode === 'select' && !selectedSourceKey) || sourceOrdersLoading}
+                disabled={addingRow || (addMode === 'select' && !selectedSourceIndex) || sourceOrdersLoading}
                 className="inline-flex min-w-24 items-center justify-center rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
               >
                 {addingRow ? (
@@ -4017,7 +4395,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                   {foreignShopifyProductsLoading && (
                     <div className="px-3 py-4 text-sm text-gray-500">Загрузка тавараў з Shopify...</div>
                   )}
-                  {!foreignShopifyProductsLoading && visibleForeignShopifyProducts.length === 0 && (
+                  {!foreignShopifyProductsLoading && visibleForeignPickerLines.length === 0 && (
                     <div className="px-3 py-4 text-sm text-gray-500">
                       {foreignProductSearch.trim()
                         ? 'Тавары не знойдзены'
@@ -4025,29 +4403,24 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     </div>
                   )}
                   {!foreignShopifyProductsLoading &&
-                    visibleForeignShopifyProducts.map((product) => {
-                      const line = foreignProductLines.find(
-                        (item) => item.shopifyProductId === product.shopifyProductId
-                      );
+                    visibleForeignPickerLines.map((pickerLine) => {
+                      const line = foreignProductLines.find((item) => item.lineKey === pickerLine.lineKey);
                       const selected = Boolean(line);
                       return (
                         <div
-                          key={product.shopifyProductId}
+                          key={pickerLine.lineKey}
                           className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-100 px-3 py-2 last:border-b-0"
                         >
                           <input
                             type="checkbox"
                             checked={selected}
-                            onChange={(e) => toggleForeignProduct(product, e.target.checked)}
+                            onChange={(e) => toggleForeignPickerLine(pickerLine, e.target.checked)}
                             className="size-4 shrink-0 rounded border-gray-300 accent-primary"
                           />
                           <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
                             <span className="line-clamp-2">
-                              {formatProductNameWithAuthor(product.productName, product.productAuthor)}
+                              {buildExpensePickerLineTitle(pickerLine)}
                             </span>
-                            {product.productType && (
-                              <span className="text-xs text-gray-500">{product.productType}</span>
-                            )}
                           </span>
                           {selected && (
                             <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
@@ -4059,10 +4432,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   step="1"
                                   value={line?.quantity ?? 1}
                                   onChange={(e) =>
-                                    updateForeignProductQuantity(
-                                      product.shopifyProductId,
-                                      Number(e.target.value)
-                                    )
+                                    updateForeignProductQuantity(pickerLine.lineKey, Number(e.target.value))
                                   }
                                   className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                                 />
@@ -4075,10 +4445,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                                   step="0.01"
                                   value={line?.unitGrossPrice || ''}
                                   onChange={(e) =>
-                                    updateForeignProductUnitPrice(
-                                      product.shopifyProductId,
-                                      Number(e.target.value)
-                                    )
+                                    updateForeignProductUnitPrice(pickerLine.lineKey, Number(e.target.value))
                                   }
                                   className="w-24 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                                 />
@@ -4255,6 +4622,195 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                 className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-60"
               >
                 {cashSaving ? 'Захаванне...' : 'Дадаць'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {unpaidLinkModalOpen && unpaidLinkTarget && (
+        <div className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-black/40 p-3 sm:items-center sm:p-4">
+          <div className="my-auto flex max-h-[min(640px,calc(100dvh-1.5rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl sm:my-0">
+            <div className="shrink-0 border-b border-gray-100 px-4 py-3 sm:px-5">
+              <div className="text-base font-semibold text-gray-900">Прывязаць да фактуры</div>
+              <p className="mt-1 text-sm text-gray-600">
+                {(() => {
+                  const label = formatUnpaidProductLabel(unpaidLinkTarget, unpaidCatalogProducts);
+                  return label.variantLabel
+                    ? `${label.title} — ${label.variantLabel}`
+                    : label.title;
+                })()}
+                {unpaidLinkTarget.supplierName ? ` · ${unpaidLinkTarget.supplierName}` : ''}
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 sm:px-5">
+              {unpaidLinkOptionsLoading && (
+                <div className="py-8 text-center text-sm text-gray-500">Загрузка варыянтаў...</div>
+              )}
+              {!unpaidLinkOptionsLoading && unpaidLinkOptions && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-gray-200 px-3 py-2.5">
+                      <input
+                        type="radio"
+                        name="unpaid-link-mode"
+                        checked={unpaidLinkMode === 'replace'}
+                        onChange={() => setUnpaidLinkMode('replace')}
+                        disabled={unpaidLinkOptions.overpaidProducts.length === 0}
+                        className="mt-0.5 accent-primary"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-gray-900">
+                          Замяніць пераплачаны тавар у фактуре
+                        </span>
+                        <span className="mt-0.5 block text-xs text-gray-500">
+                          Тавар, за які заплачана больш, чым прадана.
+                        </span>
+                      </span>
+                    </label>
+                    {unpaidLinkMode === 'replace' && (
+                      <select
+                        value={selectedOverpaidProductId}
+                        onChange={(e) => setSelectedOverpaidProductId(e.target.value)}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                      >
+                        <option value="">Выберыце радок фактуры</option>
+                        {unpaidLinkOptions.overpaidProducts.map((option) => {
+                          const variantName = option.shopifyVariantTitle?.trim() ?? '';
+                          const productTitle = variantName
+                            ? `${option.productTitle} — ${variantName}`
+                            : option.productTitle;
+                          const label = [
+                            formatDate(option.expenseDateUtc),
+                            option.invoiceNumber || option.comment || `Фактура #${option.expenseId}`,
+                            productTitle,
+                            `×${option.quantity}`,
+                            `(пераплата ${option.overpaidQuantity})`,
+                          ].join(' · ');
+                          return (
+                            <option key={option.expenseProductId} value={String(option.expenseProductId)}>
+                              {label}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    )}
+                    {unpaidLinkOptions.overpaidProducts.length === 0 && (
+                      <p className="text-xs text-gray-500">Пераплачаных тавараў у гэтага пастаўшчыка няма.</p>
+                    )}
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-gray-200 px-3 py-2.5">
+                      <input
+                        type="radio"
+                        name="unpaid-link-mode"
+                        checked={unpaidLinkMode === 'link'}
+                        onChange={() => setUnpaidLinkMode('link')}
+                        disabled={
+                          (unpaidLinkOptions.supplierInvoices.length === 0 &&
+                            unpaidLinkOptions.supplierPaymentRecords.length === 0)
+                        }
+                        className="mt-0.5 accent-primary"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-gray-900">
+                          Прывязаць да аплаты пастаўшчыка
+                        </span>
+                        <span className="mt-0.5 block text-xs text-gray-500">
+                          Неаплачаны тавар пакрываецца выбранай фактурай або іншым запісам аплаты.
+                        </span>
+                      </span>
+                    </label>
+                    {unpaidLinkMode === 'link' && (
+                      <div className="space-y-3 pl-1">
+                        <label className="block space-y-1.5">
+                          <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Фактура пастаўшчыка
+                          </span>
+                          <select
+                            value={selectedInvoiceExpenseId}
+                            onChange={(e) => {
+                              setSelectedInvoiceExpenseId(e.target.value);
+                              if (e.target.value) {
+                                setUnpaidLinkSource('invoice');
+                                setSelectedPaymentRecordExpenseId('');
+                              }
+                            }}
+                            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                          >
+                            <option value="">Выберыце фактуру</option>
+                            {unpaidLinkOptions.supplierInvoices.map((option) => (
+                              <option key={`invoice-${option.expenseId}`} value={String(option.expenseId)}>
+                                {formatSupplierExpenseOptionLabel(option)}
+                              </option>
+                            ))}
+                          </select>
+                          {unpaidLinkOptions.supplierInvoices.length === 0 && (
+                            <p className="text-xs text-gray-500">Фактур з нумарам або файлам няма.</p>
+                          )}
+                        </label>
+
+                        <label className="block space-y-1.5">
+                          <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Любая аплата пастаўшчыку
+                          </span>
+                          <select
+                            value={selectedPaymentRecordExpenseId}
+                            onChange={(e) => {
+                              setSelectedPaymentRecordExpenseId(e.target.value);
+                              if (e.target.value) {
+                                setUnpaidLinkSource('payment');
+                                setSelectedInvoiceExpenseId('');
+                              }
+                            }}
+                            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                          >
+                            <option value="">Выберыце аплату</option>
+                            {unpaidLinkOptions.supplierPaymentRecords.map((option) => (
+                              <option key={`payment-${option.expenseId}`} value={String(option.expenseId)}>
+                                {formatSupplierExpenseOptionLabel(option)}
+                              </option>
+                            ))}
+                          </select>
+                          {unpaidLinkOptions.supplierPaymentRecords.length === 0 && (
+                            <p className="text-xs text-gray-500">
+                              Запісаў аплаты пастаўшчыка не знойдзена.
+                            </p>
+                          )}
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  {unpaidLinkError && (
+                    <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {unpaidLinkError}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="shrink-0 flex justify-end gap-2 border-t border-gray-100 px-4 py-3 sm:px-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setUnpaidLinkModalOpen(false);
+                  setUnpaidLinkTarget(null);
+                  setUnpaidLinkError(null);
+                }}
+                disabled={unpaidLinkSaving}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                Скасаваць
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitUnpaidLink()}
+                disabled={unpaidLinkSaving || unpaidLinkOptionsLoading}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+              >
+                {unpaidLinkSaving ? 'Захаванне...' : 'Прывязаць'}
               </button>
             </div>
           </div>

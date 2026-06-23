@@ -174,6 +174,41 @@ export async function fetchSupplyCatalogProducts(
   });
 }
 
+export type SupplySupplierProductBalance = {
+  shopifyProductId: string;
+  shopifyVariantId: string;
+  netQuantity: number;
+};
+
+export async function fetchSupplierProductBalances(
+  supplierId: number,
+  excludeSupplyId?: number
+): Promise<SupplySupplierProductBalance[]> {
+  const params = new URLSearchParams({ supplierId: String(supplierId) });
+  if (excludeSupplyId && excludeSupplyId > 0) {
+    params.set('excludeSupplyId', String(excludeSupplyId));
+  }
+  const res = await fetch(`${getApiBaseUrl()}/Supply/supplier-product-balances?${params}`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць баланс тавараў пастаўшчыка');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
+      shopifyVariantId: String(r.shopifyVariantId ?? r.ShopifyVariantId ?? ''),
+      netQuantity: readInt(r.netQuantity ?? r.NetQuantity),
+    };
+  });
+}
+
 export async function deleteSupply(id: number): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Supply/${id}`, {
     method: 'DELETE',

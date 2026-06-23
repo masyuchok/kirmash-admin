@@ -100,12 +100,14 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
           const polandRowsRaw = r.polandRows ?? r.PolandRows;
           const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
           const cashSaleRowsRaw = r.cashSaleRows ?? r.CashSaleRows;
+          const unpaidProductRowsRaw = r.unpaidProductRows ?? r.UnpaidProductRows;
           return {
-            type: ((): 'poland' | 'foreign' | 'expense' | 'cash' => {
+            type: ((): 'poland' | 'foreign' | 'expense' | 'cash' | 'unpaid' => {
               const normalized = String(r.type ?? r.Type ?? 'poland').toLowerCase();
               if (normalized === 'foreign') return 'foreign';
               if (normalized === 'expense') return 'expense';
               if (normalized === 'cash') return 'cash';
+              if (normalized === 'unpaid') return 'unpaid';
               return 'poland';
             })(),
             name: String(r.name ?? r.Name ?? ''),
@@ -182,6 +184,39 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                   };
                 })
               : [],
+            unpaidProductRows: Array.isArray(unpaidProductRowsRaw)
+              ? unpaidProductRowsRaw.map((x: unknown) => {
+                  const u = x as Record<string, unknown>;
+                  return {
+                    shopifyProductId: String(u.shopifyProductId ?? u.ShopifyProductId ?? ''),
+                    shopifyVariantId: String(u.shopifyVariantId ?? u.ShopifyVariantId ?? ''),
+                    shopifyVariantTitle: String(u.shopifyVariantTitle ?? u.ShopifyVariantTitle ?? ''),
+                    shopifyOrderId: String(u.shopifyOrderId ?? u.ShopifyOrderId ?? ''),
+                    productTitle: String(u.productTitle ?? u.ProductTitle ?? ''),
+                    quantity: readInt(u.quantity ?? u.Quantity),
+                    supplierId: (() => {
+                      const raw = u.supplierId ?? u.SupplierId;
+                      if (raw == null) return null;
+                      const n = readInt(raw);
+                      return n > 0 ? n : null;
+                    })(),
+                    supplierName: String(u.supplierName ?? u.SupplierName ?? ''),
+                    unitSupplyPrice: readNumber(u.unitSupplyPrice ?? u.UnitSupplyPrice),
+                    estimatedCogs: readNumber(u.estimatedCogs ?? u.EstimatedCogs),
+                    saleOrderDateUtc: (u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
+                      ? String(u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
+                      : null,
+                    isManuallyLinked: Boolean(u.isManuallyLinked ?? u.IsManuallyLinked),
+                    linkedExpenseId: (() => {
+                      const raw = u.linkedExpenseId ?? u.LinkedExpenseId;
+                      if (raw == null) return null;
+                      const n = readInt(raw);
+                      return n > 0 ? n : null;
+                    })(),
+                    linkedPaymentLabel: String(u.linkedPaymentLabel ?? u.LinkedPaymentLabel ?? ''),
+                  };
+                })
+              : [],
             polandRows: Array.isArray(polandRowsRaw)
               ? polandRowsRaw.map((p) => {
                   const d = p as Record<string, unknown>;
@@ -202,6 +237,8 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                           const i = it as Record<string, unknown>;
                           return {
                             id: readInt(i.id ?? i.Id),
+                            shopifyVariantId: String(i.shopifyVariantId ?? i.ShopifyVariantId ?? ''),
+                            variantTitle: String(i.variantTitle ?? i.VariantTitle ?? ''),
                             productTitle: String(i.productTitle ?? i.ProductTitle ?? ''),
                             productType: String(i.productType ?? i.ProductType ?? ''),
                             quantity: readInt(i.quantity ?? i.Quantity),
@@ -524,6 +561,8 @@ export async function createVatReportForeignRow(
     shippingGrossAmount: number;
     items: Array<{
       shopifyProductId: string;
+      shopifyVariantId?: string;
+      variantTitle?: string;
       productTitle: string;
       productType?: string;
       quantity: number;
@@ -639,4 +678,100 @@ export async function downloadVatReportRowInvoice(rowId: number): Promise<{ blob
   const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(contentDisposition);
   const fileName = match ? decodeURIComponent(match[1]) : `invoice-${rowId}.pdf`;
   return { blob, fileName };
+}
+
+function mapOverpaidOption(row: Record<string, unknown>) {
+  return {
+    expenseProductId: readInt(row.expenseProductId ?? row.ExpenseProductId),
+    expenseId: readInt(row.expenseId ?? row.ExpenseId),
+    expenseDateUtc: String(row.expenseDateUtc ?? row.ExpenseDateUtc ?? ''),
+    invoiceNumber: String(row.invoiceNumber ?? row.InvoiceNumber ?? ''),
+    comment: String(row.comment ?? row.Comment ?? ''),
+    productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
+    shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
+    shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
+    shopifyVariantTitle: String(row.shopifyVariantTitle ?? row.ShopifyVariantTitle ?? ''),
+    quantity: readInt(row.quantity ?? row.Quantity),
+    overpaidQuantity: readInt(row.overpaidQuantity ?? row.OverpaidQuantity),
+  };
+}
+
+function mapSupplierPaymentOption(row: Record<string, unknown>) {
+  return {
+    expenseId: readInt(row.expenseId ?? row.ExpenseId),
+    expenseDateUtc: String(row.expenseDateUtc ?? row.ExpenseDateUtc ?? ''),
+    invoiceNumber: String(row.invoiceNumber ?? row.InvoiceNumber ?? ''),
+    comment: String(row.comment ?? row.Comment ?? ''),
+    expenseInvoiceTypeName: String(row.expenseInvoiceTypeName ?? row.ExpenseInvoiceTypeName ?? ''),
+    grossAmount: readNumber(row.grossAmount ?? row.GrossAmount),
+    totalProductUnits: readInt(row.totalProductUnits ?? row.TotalProductUnits),
+    hasInvoice: Boolean(row.hasInvoice ?? row.HasInvoice),
+  };
+}
+
+export async function fetchUnpaidLinkOptions(params: {
+  supplierId: number;
+  periodYear: number;
+  periodMonth: number;
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+}) {
+  const query = new URLSearchParams({
+    supplierId: String(params.supplierId),
+    periodYear: String(params.periodYear),
+    periodMonth: String(params.periodMonth),
+    shopifyProductId: params.shopifyProductId,
+  });
+  if (params.shopifyVariantId?.trim()) {
+    query.set('shopifyVariantId', params.shopifyVariantId.trim());
+  }
+  const res = await fetch(`${getApiBaseUrl()}/Reports/unpaid/link-options?${query.toString()}`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць варыянты прывязкі');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  const overpaidRaw = data.overpaidProducts ?? data.OverpaidProducts;
+  const invoicesRaw = data.supplierInvoices ?? data.SupplierInvoices;
+  const paymentsRaw = data.supplierPaymentRecords ?? data.SupplierPaymentRecords;
+  return {
+    overpaidProducts: Array.isArray(overpaidRaw)
+      ? overpaidRaw.map((row) => mapOverpaidOption(row as Record<string, unknown>))
+      : [],
+    supplierInvoices: Array.isArray(invoicesRaw)
+      ? invoicesRaw.map((row) => mapSupplierPaymentOption(row as Record<string, unknown>))
+      : [],
+    supplierPaymentRecords: Array.isArray(paymentsRaw)
+      ? paymentsRaw.map((row) => mapSupplierPaymentOption(row as Record<string, unknown>))
+      : [],
+  };
+}
+
+export async function linkUnpaidProduct(payload: {
+  periodYear: number;
+  periodMonth: number;
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+  productTitle: string;
+  supplierId: number;
+  quantity: number;
+  mode: 'replace' | 'link';
+  linkSource?: 'invoice' | 'payment';
+  expenseProductId?: number;
+  expenseId?: number;
+}): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/unpaid/link`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося прывязаць неаплачаны тавар');
+    throw new Error(msg);
+  }
 }

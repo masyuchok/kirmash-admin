@@ -14,6 +14,8 @@ public sealed class ShopifyOrderDto
 public sealed class ShopifyLineItemDto
 {
     public string ShopifyProductId { get; set; } = string.Empty;
+    public string ShopifyVariantId { get; set; } = string.Empty;
+    public string VariantTitle { get; set; } = string.Empty;
     public int Quantity { get; set; }
     public decimal UnitPrice { get; set; }
     public decimal LineTotalGross { get; set; }

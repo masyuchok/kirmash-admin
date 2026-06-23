@@ -107,10 +107,6 @@ public class SupplyService
                 {
                     throw new InvalidOperationException( "Тавар без Shopify ID не можа быць захаваны." );
                 }
-                if (item.Quantity <= 0)
-                {
-                    throw new InvalidOperationException( "Колькасць павінна быць больш за 0." );
-                }
                 if (item.SupplierPrice < 0 || item.MarginPercent < 0 || item.SalePrice < 0)
                 {
                     throw new InvalidOperationException( "Цэны і працэнт не могуць быць адмоўнымі." );
@@ -119,6 +115,11 @@ public class SupplyService
                 {
                     throw new InvalidOperationException( "Працэнт VAT можа быць толькі 5 або 23." );
                 }
+            }
+
+            if (requestProducts.Count == 0 && !(request.SupplyId.HasValue && request.SupplyId.Value > 0))
+            {
+                throw new InvalidOperationException( "Дадайце хаця б адзін тавар." );
             }
 
             bool supplierExists = await _db.Suppliers.AnyAsync( s => s.Id == request.SupplierId );
@@ -131,6 +132,7 @@ public class SupplyService
 
             Supply supply;
             Dictionary<string, int> previousQuantities = new( StringComparer.OrdinalIgnoreCase );
+            Dictionary<string, int> previousAllLineQuantities = new( StringComparer.OrdinalIgnoreCase );
             if (request.SupplyId.HasValue && request.SupplyId.Value > 0)
             {
                 supply = await _db.Supplies
@@ -140,6 +142,10 @@ public class SupplyService
 
                 previousQuantities = supply.SupplyProducts
                     .Where( p => p.SyncWithShopify )
+                    .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
+                    .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
+
+                previousAllLineQuantities = supply.SupplyProducts
                     .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                     .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
@@ -155,6 +161,39 @@ public class SupplyService
                     Date = request.Date,
                 };
                 _db.Supplies.Add( supply );
+            }
+
+            Dictionary<string, int> netExcludingCurrent = await GetSupplierProductNetQuantitiesAsync(
+                request.SupplierId,
+                request.SupplyId.HasValue && request.SupplyId.Value > 0 ? request.SupplyId.Value : null
+            );
+
+            foreach (SupplyProductSaveItem item in requestProducts)
+            {
+                if (item.Quantity == 0)
+                {
+                    throw new InvalidOperationException( "Колькасць не можа быць роўнай 0." );
+                }
+
+                string lineKey = BuildShopifySyncKey( item.ShopifyProductId, item.ShopifyVariantId );
+                if (item.Quantity < 0)
+                {
+                    int previousInCurrent = previousAllLineQuantities.GetValueOrDefault( lineKey );
+                    int maxReturnable = netExcludingCurrent.GetValueOrDefault( lineKey ) + previousInCurrent;
+                    if (maxReturnable <= 0)
+                    {
+                        throw new InvalidOperationException(
+                            "Адмоўная колькасць даступная толькі для тавараў, якія раней былі ў пастаўках гэтага пастаўшчыка."
+                        );
+                    }
+
+                    if (Math.Abs( item.Quantity ) > maxReturnable)
+                    {
+                        throw new InvalidOperationException(
+                            $"Нельга вернуць больш за {maxReturnable} шт. (атрымана ад пастаўшчыка)."
+                        );
+                    }
+                }
             }
 
             Dictionary<string, int> newQuantities = requestProducts
@@ -240,6 +279,72 @@ public class SupplyService
         string productId = shopifyProductId.Trim();
         string variantId = (shopifyVariantId ?? string.Empty).Trim();
         return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
+    }
+
+    public async Task<List<SupplySupplierProductBalanceItem>> GetSupplierProductBalancesAsync(
+        int supplierId,
+        int? excludeSupplyId = null )
+    {
+        if (supplierId <= 0)
+        {
+            return new List<SupplySupplierProductBalanceItem>();
+        }
+
+        Dictionary<string, int> netByLine = await GetSupplierProductNetQuantitiesAsync( supplierId, excludeSupplyId );
+        List<SupplySupplierProductBalanceItem> result = new();
+        foreach ((string lineKey, int netQuantity) in netByLine.OrderBy( x => x.Key, StringComparer.OrdinalIgnoreCase ))
+        {
+            (string productId, string variantId) = ParseShopifySyncKey( lineKey );
+            result.Add( new SupplySupplierProductBalanceItem
+            {
+                ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                NetQuantity = netQuantity
+            } );
+        }
+
+        return result;
+    }
+
+    private async Task<Dictionary<string, int>> GetSupplierProductNetQuantitiesAsync(
+        int supplierId,
+        int? excludeSupplyId )
+    {
+        IQueryable<SupplyProduct> query = _db.SupplyProducts
+            .AsNoTracking()
+            .Where( sp => sp.Supply.SupplierId == supplierId );
+        if (excludeSupplyId.HasValue && excludeSupplyId.Value > 0)
+        {
+            query = query.Where( sp => sp.SupplyId != excludeSupplyId.Value );
+        }
+
+        List<SupplyProductNetRow> rows = await query
+            .Select( sp => new SupplyProductNetRow
+            {
+                ShopifyProductId = sp.ShopifyProductId,
+                ShopifyVariantId = sp.ShopifyVariantId,
+                Quantity = sp.Quantity
+            } )
+            .ToListAsync();
+
+        return rows
+            .GroupBy(
+                row => BuildShopifySyncKey( row.ShopifyProductId, row.ShopifyVariantId ),
+                StringComparer.OrdinalIgnoreCase
+            )
+            .ToDictionary( g => g.Key, g => g.Sum( x => x.Quantity ), StringComparer.OrdinalIgnoreCase );
+    }
+
+    private static (string ProductId, string VariantId) ParseShopifySyncKey( string lineKey )
+    {
+        const string separator = "::";
+        int idx = lineKey.IndexOf( separator, StringComparison.Ordinal );
+        if (idx < 0)
+        {
+            return (lineKey, string.Empty);
+        }
+
+        return (lineKey[..idx], lineKey[(idx + separator.Length)..]);
     }
 
     public async Task<List<SupplyCatalogProductItem>> GetCatalogProductsAsync( int? supplierId )
@@ -359,6 +464,13 @@ public class SupplyService
         }
 
         return names;
+    }
+
+    private sealed class SupplyProductNetRow
+    {
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public int Quantity { get; set; }
     }
 
     private sealed class SupplyCatalogRow

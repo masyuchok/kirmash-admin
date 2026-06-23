@@ -7,6 +7,7 @@ import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
+import { fetchSupplierProductBalances } from '@/lib/api/supplies';
 import { formatProductNameWithAuthor, readFieldValue } from '@/lib/supply-draft';
 import { makeSupplyLineKey } from '@/lib/supply-line-key';
 import type { ProductWithSuppliers, ProductVariant } from '@/types/product';
@@ -77,6 +78,10 @@ export default function SupplyProductPickerClient({
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
   const [typeTriggerEl, setTypeTriggerEl] = useState<HTMLButtonElement | null>(null);
   const [typeMenuEl, setTypeMenuEl] = useState<HTMLDivElement | null>(null);
+  const [supplierNetBalances, setSupplierNetBalances] = useState<Record<string, number>>({});
+
+  const getMaxReturnableQuantity = (lineKey: string): number =>
+    Math.max(0, supplierNetBalances[lineKey] ?? 0);
 
   useEffect(() => {
     setTopbarPage({ title: 'Выбар тавару для пастаўкі' });
@@ -107,6 +112,34 @@ export default function SupplyProductPickerClient({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const supplierIdNumber = Number(supplierId);
+    if (!Number.isFinite(supplierIdNumber) || supplierIdNumber <= 0) {
+      setSupplierNetBalances({});
+      return;
+    }
+    let cancelled = false;
+    fetchSupplierProductBalances(
+      supplierIdNumber,
+      supplyId ? Number(supplyId) : undefined
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, number> = {};
+        for (const row of rows) {
+          const key = makeSupplyLineKey(row.shopifyProductId, row.shopifyVariantId || undefined);
+          map[key] = row.netQuantity;
+        }
+        setSupplierNetBalances(map);
+      })
+      .catch(() => {
+        if (!cancelled) setSupplierNetBalances({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [supplierId, supplyId]);
 
   const typeOptions = useMemo(
     () =>
@@ -343,23 +376,37 @@ export default function SupplyProductPickerClient({
                       </div>
                     </td>
                     <td className="px-4 py-3.5 text-center">
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={draftQuantities[lineKey] ?? ''}
-                        onChange={(e) => updateQuantity(lineKey, readFieldValue(e))}
-                        onFocus={() => {
-                          if (!selectedIds.includes(lineKey)) {
-                            setSelectedIds((prev) => [...prev, lineKey]);
-                          }
-                          setDraftQuantities((prev) =>
-                            prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
-                          );
-                        }}
-                        className="mx-auto w-20 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-                        placeholder="0"
-                      />
+                      {(() => {
+                        const maxReturnable = getMaxReturnableQuantity(lineKey);
+                        const quantityValue = Number(draftQuantities[lineKey] ?? '');
+                        const isReturn = Number.isFinite(quantityValue) && quantityValue < 0;
+                        return (
+                          <input
+                            type="number"
+                            min={maxReturnable > 0 ? -maxReturnable : 0}
+                            step="1"
+                            value={draftQuantities[lineKey] ?? ''}
+                            onChange={(e) => updateQuantity(lineKey, readFieldValue(e))}
+                            onFocus={() => {
+                              if (!selectedIds.includes(lineKey)) {
+                                setSelectedIds((prev) => [...prev, lineKey]);
+                              }
+                              setDraftQuantities((prev) =>
+                                prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
+                              );
+                            }}
+                            title={
+                              maxReturnable > 0
+                                ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
+                                : undefined
+                            }
+                            className={`mx-auto w-20 rounded-lg border bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 ${
+                              isReturn ? 'border-amber-300' : 'border-gray-200'
+                            }`}
+                            placeholder="0"
+                          />
+                        );
+                      })()}
                     </td>
                     <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">
                       {variant ? variant.quantityInStock : row.shopifyQuantityInStock}

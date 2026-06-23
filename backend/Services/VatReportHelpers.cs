@@ -1,9 +1,101 @@
 using backend.Models;
+using backend.Services.Shopify;
 
 namespace backend.Services;
 
 internal static class VatReportHelpers
 {
+    public static string BuildProductLineKey( string shopifyProductId, string? shopifyVariantId )
+    {
+        string productId = ShopifyIds.NormalizeProductId( shopifyProductId.Trim() );
+        string variantId = string.IsNullOrWhiteSpace( shopifyVariantId )
+            ? string.Empty
+            : ShopifyIds.NormalizeVariantId( shopifyVariantId.Trim() );
+        return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
+    }
+
+    public static bool ProductLineKeysEqual(
+        string productIdA,
+        string? variantIdA,
+        string productIdB,
+        string? variantIdB ) =>
+        string.Equals(
+            BuildProductLineKey( productIdA, variantIdA ),
+            BuildProductLineKey( productIdB, variantIdB ),
+            StringComparison.OrdinalIgnoreCase );
+
+    public static bool ProductLinesCompatible(
+        string productIdA,
+        string? variantIdA,
+        string productIdB,
+        string? variantIdB )
+    {
+        string productA = ShopifyIds.NormalizeProductId( productIdA.Trim() );
+        string productB = ShopifyIds.NormalizeProductId( productIdB.Trim() );
+        if (string.IsNullOrWhiteSpace( productA ) || string.IsNullOrWhiteSpace( productB ))
+        {
+            return false;
+        }
+
+        if (!string.Equals( productA, productB, StringComparison.OrdinalIgnoreCase ))
+        {
+            return false;
+        }
+
+        if (ProductLineKeysEqual( productIdA, variantIdA, productIdB, variantIdB ))
+        {
+            return true;
+        }
+
+        string variantA = string.IsNullOrWhiteSpace( variantIdA )
+            ? string.Empty
+            : ShopifyIds.NormalizeVariantId( variantIdA.Trim() );
+        string variantB = string.IsNullOrWhiteSpace( variantIdB )
+            ? string.Empty
+            : ShopifyIds.NormalizeVariantId( variantIdB.Trim() );
+        return string.IsNullOrEmpty( variantA ) || string.IsNullOrEmpty( variantB );
+    }
+
+    public static string ExtractVariantTitleFromProductLineTitle( string? productTitle )
+    {
+        if (string.IsNullOrWhiteSpace( productTitle ))
+        {
+            return string.Empty;
+        }
+
+        string title = productTitle.Trim();
+        foreach (string separator in new[] { " — ", " – ", " - " })
+        {
+            int index = title.LastIndexOf( separator, StringComparison.Ordinal );
+            if (index < 0)
+            {
+                continue;
+            }
+
+            string variantTitle = title[(index + separator.Length)..].Trim();
+            if (!string.IsNullOrWhiteSpace( variantTitle ))
+            {
+                return variantTitle;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    public static void ParseProductLineKey( string lineKey, out string productId, out string variantId )
+    {
+        int separator = lineKey.IndexOf( "::", StringComparison.Ordinal );
+        if (separator < 0)
+        {
+            productId = lineKey;
+            variantId = string.Empty;
+            return;
+        }
+
+        productId = lineKey[..separator];
+        variantId = lineKey[(separator + 2)..];
+    }
+
     public static decimal Round2( decimal value ) =>
         Math.Round( value, 2, MidpointRounding.AwayFromZero );
 

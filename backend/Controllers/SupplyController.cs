@@ -73,6 +73,23 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet("supplier-product-balances")]
+        public async Task<ActionResult<List<SupplySupplierProductBalanceItem>>> GetSupplierProductBalances(
+            [FromQuery] int supplierId,
+            [FromQuery] int? excludeSupplyId )
+        {
+            try
+            {
+                List<SupplySupplierProductBalanceItem> balances =
+                    await _service.GetSupplierProductBalancesAsync( supplierId, excludeSupplyId );
+                return Ok( balances );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання балансу тавараў", details = ex.Message } );
+            }
+        }
+
         [HttpGet("catalog-products")]
         public async Task<ActionResult<List<SupplyCatalogProductItem>>> GetCatalogProducts( [FromQuery] int? supplierId )
         {

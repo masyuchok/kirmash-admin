@@ -67,6 +67,71 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet( "unpaid/link-options" )]
+        public async Task<ActionResult<VatReportUnpaidLinkOptionsResponse>> GetUnpaidLinkOptions(
+            [FromQuery] int supplierId,
+            [FromQuery] int periodYear,
+            [FromQuery] int periodMonth,
+            [FromQuery] string shopifyProductId )
+        {
+            try
+            {
+                VatReportUnpaidLinkOptionsResponse options = await _service.GetUnpaidLinkOptionsAsync(
+                    supplierId,
+                    periodYear,
+                    periodMonth,
+                    shopifyProductId );
+                return Ok( options );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання варыянтаў прывязкі", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "unpaid/link" )]
+        public async Task<IActionResult> LinkUnpaidProduct( [FromBody] VatReportUnpaidLinkRequest request )
+        {
+            try
+            {
+                await _service.LinkUnpaidProductAsync( request );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка прывязкі неаплачанага тавару", details = ex.Message } );
+            }
+        }
+
+        [HttpGet( "allocation-debug" )]
+        public async Task<ActionResult<VatReportProductAllocationDebugResponse>> GetAllocationDebug(
+            [FromQuery] string title )
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace( title ))
+                {
+                    return BadRequest( new { error = "Параметр title абавязковы." } );
+                }
+
+                VatReportProductAllocationDebugResponse debug =
+                    await _service.GetProductAllocationDebugAsync( title );
+                return Ok( debug );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка дыягностыкі размеркавання", details = ex.Message } );
+            }
+        }
+
         [HttpGet( "{id:int}/combined-details" )]
         public async Task<ActionResult<VatReportCombinedDetailsResponse>> GetCombinedDetails( int id )
         {

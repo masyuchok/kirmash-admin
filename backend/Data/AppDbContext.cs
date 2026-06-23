@@ -18,6 +18,7 @@ namespace backend.Data
         public DbSet<VatReportExpense> VatReportExpenses { get; set; } = default!;
         public DbSet<VatReportExpenseProduct> VatReportExpenseProducts { get; set; } = default!;
         public DbSet<VatReportCashSale> VatReportCashSales { get; set; } = default!;
+        public DbSet<VatReportUnpaidAllocation> VatReportUnpaidAllocations { get; set; } = default!;
         public DbSet<InvoiceSettings> InvoiceSettings { get; set; } = default!;
         public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
         public DbSet<InventoryProductSale> InventoryProductSales { get; set; } = default!;
@@ -183,6 +184,35 @@ namespace backend.Data
                     .IsRequired();
             } );
 
+            modelBuilder.Entity<VatReportUnpaidAllocation>( entity =>
+            {
+                entity.HasOne( x => x.VatReportExpense )
+                    .WithMany()
+                    .HasForeignKey( x => x.VatReportExpenseId )
+                    .OnDelete( DeleteBehavior.Cascade );
+
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ProductTitle )
+                    .IsRequired()
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+
+                entity.HasIndex( x => new
+                {
+                    x.SalePeriodYear,
+                    x.SalePeriodMonth,
+                    x.ShopifyProductId,
+                    x.ShopifyVariantId,
+                    x.SupplierId
+                } ).IsUnique();
+            } );
+
             modelBuilder.Entity<VatReportRow>( entity =>
             {
                 entity.HasOne( r => r.VatReport )
@@ -228,6 +258,12 @@ namespace backend.Data
                 entity.Property( i => i.ShopifyProductId )
                     .IsRequired()
                     .HasMaxLength( 64 );
+                entity.Property( i => i.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( i => i.VariantTitle )
+                    .IsRequired()
+                    .HasMaxLength( 256 );
                 entity.Property( i => i.ProductTitle )
                     .IsRequired()
                     .HasMaxLength( 512 );

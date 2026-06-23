@@ -54,6 +54,14 @@ public class VatReportQueryService
             .OrderByDescending( g => g.Key.PeriodYear )
             .ThenByDescending( g => g.Key.PeriodMonth );
 
+        Dictionary<(int Year, int Month), PeriodRollup> rollups = await LoadPeriodRollupsAsync();
+        Dictionary<(int Year, int Month), decimal> cogsByPeriod =
+            await _profitService.GetCogsByPeriodCachedAsync();
+        Dictionary<(int Year, int Month), decimal> nonSupplierByPeriod =
+            await _profitService.GetNonSupplierExpenseGrossByPeriodCachedAsync();
+        Dictionary<(int Year, int Month), decimal> financeByPeriod =
+            await _profitService.GetFinancePaymentsByPeriodCachedAsync();
+
         List<VatReportPeriodListItem> result = new();
         foreach (IGrouping<(int PeriodYear, int PeriodMonth), VatReportListItem> group in periodGroups)
         {
@@ -65,19 +73,43 @@ public class VatReportQueryService
             );
             int baseReportId = polandReport?.Id ?? periodReports[0].Id;
 
-            VatReportCombinedDetailsResponse combined = await GetCombinedDetailsAsync( baseReportId );
-            List<VatReportDetailsSummaryRow> summaryRows = combined.Details.Rows;
+            (int Year, int Month) periodKey = (group.Key.PeriodYear, group.Key.PeriodMonth);
+            if (!rollups.TryGetValue( periodKey, out PeriodRollup? rollup ))
+            {
+                rollup = new PeriodRollup();
+            }
+            List<VatReportDetailsSummaryRow> summaryRows =
+            [
+                new VatReportDetailsSummaryRow
+                {
+                    Type = VatReportType.Poland,
+                    GrossAmount = rollup.PolandGross
+                },
+                new VatReportDetailsSummaryRow
+                {
+                    Type = VatReportType.Foreign,
+                    GrossAmount = rollup.ForeignGross
+                },
+                new VatReportDetailsSummaryRow
+                {
+                    Type = VatReportType.Cash,
+                    GrossAmount = rollup.CashGross
+                }
+            ];
 
             result.Add(
                 new VatReportPeriodListItem
                 {
                     PeriodYear = group.Key.PeriodYear,
                     PeriodMonth = group.Key.PeriodMonth,
-                    TotalVat = combined.Details.Vat,
-                    Profit = await _profitService.ComputePeriodProfitAsync(
+                    TotalVat = rollup.TotalVat,
+                    Profit = _profitService.ComputePeriodProfit(
                         group.Key.PeriodYear,
                         group.Key.PeriodMonth,
-                        summaryRows ),
+                        summaryRows,
+                        cogsByPeriod,
+                        nonSupplierByPeriod,
+                        financeByPeriod ),
                     IsLocked = periodReports.Any( r => r.IsLocked ),
                     PrimaryReportId = baseReportId,
                     Reports = periodReports
@@ -86,6 +118,137 @@ public class VatReportQueryService
         }
 
         return result;
+    }
+
+    private async Task<Dictionary<(int Year, int Month), PeriodRollup>> LoadPeriodRollupsAsync()
+    {
+        List<ReportPeriodAggregateRow> rowAggregates = await _db.VatReportRows
+            .AsNoTracking()
+            .Select( r => new ReportPeriodAggregateRow
+            {
+                PeriodYear = r.VatReport.PeriodYear,
+                PeriodMonth = r.VatReport.PeriodMonth,
+                ReportType = r.VatReport.Type,
+                VatAmount = r.VatAmount,
+                GrossAmount = r.GrossAmount
+            } )
+            .ToListAsync();
+
+        List<CashPeriodAggregateRow> cashAggregates = await _db.VatReportCashSales
+            .AsNoTracking()
+            .GroupBy( x => new { x.VatReport.PeriodYear, x.VatReport.PeriodMonth } )
+            .Select( g => new CashPeriodAggregateRow
+            {
+                PeriodYear = g.Key.PeriodYear,
+                PeriodMonth = g.Key.PeriodMonth,
+                GrossAmount = g.Sum( x => x.GrossAmount )
+            } )
+            .ToListAsync();
+
+        List<ExpensePeriodVatRow> expenseVatRows = await _db.VatReportExpenses
+            .AsNoTracking()
+            .Where( e => e.IncludeVatInTotal )
+            .GroupBy( e => new { e.VatReport.PeriodYear, e.VatReport.PeriodMonth } )
+            .Select( g => new ExpensePeriodVatRow
+            {
+                PeriodYear = g.Key.PeriodYear,
+                PeriodMonth = g.Key.PeriodMonth,
+                VatAmount = g.Sum( e => e.VatAmount )
+            } )
+            .ToListAsync();
+
+        Dictionary<(int Year, int Month), PeriodRollup> rollups = new();
+        foreach (ReportPeriodAggregateRow row in rowAggregates)
+        {
+            (int Year, int Month) key = (row.PeriodYear, row.PeriodMonth);
+            if (!rollups.TryGetValue( key, out PeriodRollup? rollup ))
+            {
+                rollup = new PeriodRollup();
+                rollups[key] = rollup;
+            }
+
+            if (string.Equals( row.ReportType, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+            {
+                rollup.PolandGross += row.GrossAmount;
+                rollup.PolandVat += row.VatAmount;
+            }
+            else if (string.Equals( row.ReportType, VatReportType.Foreign, StringComparison.OrdinalIgnoreCase ))
+            {
+                rollup.ForeignGross += row.GrossAmount;
+                rollup.ForeignVat += row.VatAmount;
+            }
+        }
+
+        foreach (CashPeriodAggregateRow cash in cashAggregates)
+        {
+            (int Year, int Month) key = (cash.PeriodYear, cash.PeriodMonth);
+            if (!rollups.TryGetValue( key, out PeriodRollup? rollup ))
+            {
+                rollup = new PeriodRollup();
+                rollups[key] = rollup;
+            }
+
+            rollup.CashGross += cash.GrossAmount;
+        }
+
+        foreach (ExpensePeriodVatRow expense in expenseVatRows)
+        {
+            (int Year, int Month) key = (expense.PeriodYear, expense.PeriodMonth);
+            if (!rollups.TryGetValue( key, out PeriodRollup? rollup ))
+            {
+                rollup = new PeriodRollup();
+                rollups[key] = rollup;
+            }
+
+            rollup.ExpenseVatForTotal += expense.VatAmount;
+        }
+
+        foreach (PeriodRollup rollup in rollups.Values)
+        {
+            rollup.PolandGross = VatReportHelpers.Round2( rollup.PolandGross );
+            rollup.ForeignGross = VatReportHelpers.Round2( rollup.ForeignGross );
+            rollup.CashGross = VatReportHelpers.Round2( rollup.CashGross );
+            rollup.PolandVat = VatReportHelpers.Round2( rollup.PolandVat );
+            rollup.ForeignVat = VatReportHelpers.Round2( rollup.ForeignVat );
+            rollup.ExpenseVatForTotal = VatReportHelpers.Round2( rollup.ExpenseVatForTotal );
+            rollup.TotalVat = VatReportHelpers.Round2( rollup.PolandVat + rollup.ForeignVat - rollup.ExpenseVatForTotal );
+        }
+
+        return rollups;
+    }
+
+    private sealed class PeriodRollup
+    {
+        public decimal PolandGross { get; set; }
+        public decimal ForeignGross { get; set; }
+        public decimal CashGross { get; set; }
+        public decimal PolandVat { get; set; }
+        public decimal ForeignVat { get; set; }
+        public decimal ExpenseVatForTotal { get; set; }
+        public decimal TotalVat { get; set; }
+    }
+
+    private sealed class ReportPeriodAggregateRow
+    {
+        public int PeriodYear { get; set; }
+        public int PeriodMonth { get; set; }
+        public string ReportType { get; set; } = string.Empty;
+        public decimal VatAmount { get; set; }
+        public decimal GrossAmount { get; set; }
+    }
+
+    private sealed class CashPeriodAggregateRow
+    {
+        public int PeriodYear { get; set; }
+        public int PeriodMonth { get; set; }
+        public decimal GrossAmount { get; set; }
+    }
+
+    private sealed class ExpensePeriodVatRow
+    {
+        public int PeriodYear { get; set; }
+        public int PeriodMonth { get; set; }
+        public decimal VatAmount { get; set; }
     }
 
     public async Task<VatReportDetailsResponse> GetDetailsAsync( int id )
@@ -151,9 +314,23 @@ public class VatReportQueryService
 
         if (!siblingId.HasValue)
         {
+            List<VatReportDetailsSummaryRow> rowsWithUnpaid =
+            [
+                ..baseDetails.Rows,
+                await BuildUnpaidSummaryRowAsync( baseDetails.PeriodYear, baseDetails.PeriodMonth )
+            ];
             return new VatReportCombinedDetailsResponse
             {
-                Details = baseDetails,
+                Details = new VatReportDetailsResponse
+                {
+                    Id = baseDetails.Id,
+                    PeriodYear = baseDetails.PeriodYear,
+                    PeriodMonth = baseDetails.PeriodMonth,
+                    IsLocked = baseDetails.IsLocked,
+                    Vat = baseDetails.Vat,
+                    Profit = baseDetails.Profit,
+                    Rows = rowsWithUnpaid
+                },
                 ForeignRows = baseDetails.Rows
                     .Where( r => r.Type == VatReportType.Foreign )
                     .ToList()
@@ -195,7 +372,8 @@ public class VatReportQueryService
                 PolandRows = []
             },
             ..cashSummaryRows,
-            ..expenseSummaryRows
+            ..expenseSummaryRows,
+            await BuildUnpaidSummaryRowAsync( polandDetails.PeriodYear, polandDetails.PeriodMonth )
         ];
 
         bool periodLocked = await _db.VatReports
@@ -247,6 +425,8 @@ public class VatReportQueryService
                     .Select( i => new ReportRowItemData
                     {
                         Id = i.Id,
+                        ShopifyVariantId = i.ShopifyVariantId,
+                        VariantTitle = i.VariantTitle,
                         ProductTitle = i.ProductTitle,
                         ProductType = i.ProductType,
                         Quantity = i.Quantity,
@@ -315,6 +495,26 @@ public class VatReportQueryService
                 CreatedAtUtc = x.CreatedAtUtc
             } )
             .ToListAsync();
+    }
+
+    private async Task<VatReportDetailsSummaryRow> BuildUnpaidSummaryRowAsync( int periodYear, int periodMonth )
+    {
+        List<VatReportUnpaidProductRow> unpaidProducts =
+            await _profitService.GetUnpaidProductsForPeriodAsync( periodYear, periodMonth );
+        decimal estimatedCogs = VatReportHelpers.Round2(
+            unpaidProducts.Where( row => !row.IsManuallyLinked ).Sum( row => row.EstimatedCogs )
+        );
+
+        return new VatReportDetailsSummaryRow
+        {
+            Type = VatReportType.Unpaid,
+            Name = "Неаплачанае",
+            ShopifyOrderId = "unpaid-summary",
+            Vat = 0m,
+            GrossAmount = estimatedCogs,
+            NetAmount = estimatedCogs,
+            UnpaidProductRows = unpaidProducts
+        };
     }
 
     private static decimal ComputeTotalVatFromSummaryRows( IEnumerable<VatReportDetailsSummaryRow> rows )
@@ -511,6 +711,8 @@ public class VatReportQueryService
                 .Select( i => new VatReportDetailsPolandItem
                 {
                     Id = i.Id,
+                    ShopifyVariantId = i.ShopifyVariantId,
+                    VariantTitle = i.VariantTitle,
                     ProductTitle = i.ProductTitle,
                     ProductType = i.ProductType,
                     Quantity = i.Quantity,
@@ -573,6 +775,8 @@ public class VatReportQueryService
     private sealed class ReportRowItemData
     {
         public int Id { get; set; }
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public int Quantity { get; set; }

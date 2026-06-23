@@ -2,11 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
+import { FiClock, FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import { fetchProductsWithSuppliers, syncUnsyncedProductRow } from '@/lib/api/products';
+import ProductHistoryModal from '@/components/products/ProductHistoryModal';
+import { fetchProductHistory, fetchProductsWithSuppliers, syncUnsyncedProductRow } from '@/lib/api/products';
+import { getRowOverpaidQuantity } from '@/lib/products/overpaid';
 import type { ProductWithSuppliers } from '@/types/product';
+import type { ProductHistory } from '@/types/product-history';
 
 type ProductTableRow = ProductWithSuppliers & {
   supplierId: number | null;
@@ -15,6 +18,15 @@ type ProductTableRow = ProductWithSuppliers & {
   rowSource: 'shopify' | 'supply';
   isVariantChild: boolean;
   variantName: string;
+  shopifyVariantId: string;
+};
+
+type ProductHistoryTarget = {
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+  variantTitle?: string;
+  supplierId?: number;
+  subtitle?: string;
 };
 
 const isDefaultVariantTitle = (name: string) => name.trim().toLowerCase() === 'default title';
@@ -40,6 +52,11 @@ export default function ProductsClient() {
   const [syncingRowKey, setSyncingRowKey] = useState<string | null>(null);
   const [recentSyncedQty, setRecentSyncedQty] = useState<Record<string, number>>({});
   const [collapsedProducts, setCollapsedProducts] = useState<Record<string, boolean>>({});
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyData, setHistoryData] = useState<ProductHistory | null>(null);
+  const [historySubtitle, setHistorySubtitle] = useState<string | undefined>(undefined);
   const supplierTriggerRef = useRef<HTMLButtonElement | null>(null);
   const typeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
@@ -57,6 +74,7 @@ export default function ProductsClient() {
         rowKey: `${row.shopifyProductId}::shopify`,
         isVariantChild: false,
         variantName: '',
+        shopifyVariantId: '',
       });
 
       for (const unsynced of row.unsyncedSuppliers) {
@@ -69,6 +87,7 @@ export default function ProductsClient() {
           quantityInStock: unsynced.quantity,
           isVariantChild: false,
           variantName: '',
+          shopifyVariantId: '',
         });
       }
       const expanded: ProductTableRow[] = [];
@@ -83,6 +102,7 @@ export default function ProductsClient() {
           rowKey: item.rowKey,
           isVariantChild: false,
           variantName: '',
+          shopifyVariantId: '',
         };
         expanded.push(baseRow);
 
@@ -93,6 +113,7 @@ export default function ProductsClient() {
             ...baseRow,
             isVariantChild: true,
             variantName: name,
+            shopifyVariantId: variant.variantId,
             quantityInStock: variant.quantityInStock,
             shopifyQuantityInStock: variant.quantityInStock,
             rowKey: `${baseRow.rowKey}::variant::${variant.variantId || name}`,
@@ -416,6 +437,49 @@ export default function ProductsClient() {
     setCollapsedProducts((prev) => ({ ...prev, [productId]: !prev[productId] }));
   };
 
+  const closeHistory = () => {
+    setHistoryOpen(false);
+    setHistoryError(null);
+    setHistoryData(null);
+    setHistorySubtitle(undefined);
+  };
+
+  const openHistory = async (row: ProductTableRow) => {
+    const isVariantScope = row.isVariantChild;
+    const target: ProductHistoryTarget = {
+      shopifyProductId: row.shopifyProductId,
+      shopifyVariantId: isVariantScope && row.shopifyVariantId.trim() ? row.shopifyVariantId : undefined,
+      variantTitle: isVariantScope && row.variantName.trim() ? row.variantName.trim() : undefined,
+      supplierId: row.rowSource === 'supply' && row.supplierId ? row.supplierId : undefined,
+    };
+    const subtitleParts: string[] = [];
+    if (row.isVariantChild && row.variantName.trim()) {
+      subtitleParts.push(row.variantName.trim());
+    }
+    if (target.supplierId && row.supplierName.trim() && row.supplierName !== '—') {
+      subtitleParts.push(row.supplierName.trim());
+    }
+
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    setHistoryData(null);
+    setHistorySubtitle(subtitleParts.length > 0 ? subtitleParts.join(' · ') : undefined);
+
+    try {
+      const history = await fetchProductHistory(target.shopifyProductId, {
+        shopifyVariantId: target.shopifyVariantId,
+        variantTitle: target.variantTitle,
+        supplierId: target.supplierId,
+      });
+      setHistoryData(history);
+    } catch (err: unknown) {
+      setHistoryError(err instanceof Error ? err.message : 'Памылка загрузкі гісторыі');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   if (loading) {
     return <LoadingSpinner label="Загрузка прадуктаў..." />;
   }
@@ -488,6 +552,13 @@ export default function ProductsClient() {
               <span className="inline-block size-2 rounded-full bg-amber-500" />
               Радкі з пастаўкі без Shopify sync
             </div>
+            <div
+              className="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-800"
+              title="Падсветка радка азначае: пастаўшчыку аплачана больш, чым прадана."
+            >
+              <span className="inline-block size-2 rounded-full bg-violet-500" />
+              Пераплачаныя тавары
+            </div>
           </div>
         </div>
         {visibleRows.length === 0 ? (
@@ -539,15 +610,28 @@ export default function ProductsClient() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {pagedRows.map((row) => (
+                {pagedRows.map((row) => {
+                  const overpaidQty = getRowOverpaidQuantity(row.overpaidLines ?? [], {
+                    shopifyProductId: row.shopifyProductId,
+                    shopifyVariantId: row.shopifyVariantId,
+                    supplierId: row.supplierId,
+                    isVariantChild: row.isVariantChild,
+                    rowSource: row.rowSource,
+                  });
+                  const isOverpaid = overpaidQty > 0;
+                  const isSupplyOverride = row.rowSource === 'supply' && row.hasSupplyQuantityOverride;
+
+                  return (
                   <tr
                     key={row.rowKey}
                     className={`transition hover:bg-gray-50/80 ${
-                      row.rowSource === 'supply' && row.hasSupplyQuantityOverride
-                        ? 'bg-amber-50/70'
-                        : row.isVariantChild
-                          ? 'bg-gray-50/40'
-                          : ''
+                      isOverpaid
+                        ? 'bg-violet-50/80'
+                        : isSupplyOverride
+                          ? 'bg-amber-50/70'
+                          : row.isVariantChild
+                            ? 'bg-gray-50/40'
+                            : ''
                     }`}
                   >
                     <td className={`py-3.5 font-medium text-gray-900 ${row.isVariantChild ? 'pl-12 pr-6' : 'px-6'}`}>
@@ -599,20 +683,38 @@ export default function ProductsClient() {
                         ) : (
                           <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
                         )}
-                        <div className="space-y-1">
-                          {row.productAdminUrl ? (
-                            <a
-                              href={row.productAdminUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1 hover:underline"
-                            >
-                              {row.isVariantChild ? row.variantName : row.productName}
-                              <FiExternalLink className="size-3.5 text-gray-500" aria-hidden />
-                            </a>
-                          ) : (
-                            <span>{row.isVariantChild ? row.variantName : row.productName}</span>
-                          )}
+                        <div className="flex min-w-0 flex-1 items-start gap-2">
+                          <div className="min-w-0 space-y-1">
+                            {row.productAdminUrl ? (
+                              <a
+                                href={row.productAdminUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 hover:underline"
+                              >
+                                {row.isVariantChild ? row.variantName : row.productName}
+                                <FiExternalLink className="size-3.5 shrink-0 text-gray-500" aria-hidden />
+                              </a>
+                            ) : (
+                              <span>{row.isVariantChild ? row.variantName : row.productName}</span>
+                            )}
+                            {isOverpaid && (
+                              <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
+                                пераплата {overpaidQty}
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void openHistory(row);
+                            }}
+                            className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                            aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
+                            title="Гісторыя прадукту"
+                          >
+                            <FiClock className="size-3.5" aria-hidden />
+                          </button>
                         </div>
                       </div>
                     </td>
@@ -639,24 +741,37 @@ export default function ProductsClient() {
                       {row.supplierName}
                     </td>
                     <td className="whitespace-nowrap px-6 py-3.5 text-right">
-                      {row.rowSource === 'supply' && row.supplierId ? (
+                      <div className="inline-flex flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => handleSyncRow(row)}
-                          disabled={syncingRowKey === row.rowKey}
-                          className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:opacity-50"
+                          onClick={() => {
+                            void openHistory(row);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                          aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
+                          title="Гісторыя прадукту"
                         >
-                          {syncingRowKey === row.rowKey && (
-                            <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-                          )}
-                          Сінхранізаваць з Shopify
+                          <FiClock className="size-3.5 shrink-0" aria-hidden />
+                          Гісторыя
                         </button>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
+                        {row.rowSource === 'supply' && row.supplierId ? (
+                          <button
+                            type="button"
+                            onClick={() => handleSyncRow(row)}
+                            disabled={syncingRowKey === row.rowKey}
+                            className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:opacity-50"
+                          >
+                            {syncingRowKey === row.rowKey && (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+                            )}
+                            Сінхранізаваць
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -759,6 +874,14 @@ export default function ProductsClient() {
           </div>,
           document.body
         )}
+      <ProductHistoryModal
+        open={historyOpen}
+        loading={historyLoading}
+        error={historyError}
+        history={historyData}
+        subtitle={historySubtitle}
+        onClose={closeHistory}
+      />
     </div>
   );
 }

@@ -22,6 +22,15 @@ namespace backend.Models
         public int QuantityInStock { get; set; }
     }
 
+    public class ProductOverpaidLineItem
+    {
+        public int SupplierId { get; set; }
+        public string SupplierName { get; set; } = string.Empty;
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public int OverpaidQuantity { get; set; }
+    }
+
     public class ProductWithSuppliersListItem
     {
         public string ShopifyProductId { get; set; } = string.Empty;
@@ -38,5 +47,6 @@ namespace backend.Models
         public List<ProductUnsyncedSupplierItem> UnsyncedSuppliers { get; set; } = new();
         public List<ProductVariantItem> Variants { get; set; } = new();
         public List<ProductSupplierPriceItem> SupplierPrices { get; set; } = new();
+        public List<ProductOverpaidLineItem> OverpaidLines { get; set; } = new();
     }
 }

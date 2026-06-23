@@ -14,6 +14,8 @@ export type VatReportPolandDetailRow = {
 
 export type VatReportPolandDetailItem = {
   id: number;
+  shopifyVariantId?: string;
+  variantTitle?: string;
   productTitle: string;
   productType: string;
   quantity: number;
@@ -34,8 +36,56 @@ export type VatReportCashSaleRow = {
   createdAtUtc: string;
 };
 
+export type VatReportUnpaidProductRow = {
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+  shopifyVariantTitle?: string;
+  shopifyOrderId?: string;
+  productTitle: string;
+  quantity: number;
+  supplierId?: number | null;
+  supplierName: string;
+  unitSupplyPrice: number;
+  estimatedCogs: number;
+  saleOrderDateUtc?: string | null;
+  isManuallyLinked?: boolean;
+  linkedExpenseId?: number | null;
+  linkedPaymentLabel?: string;
+};
+
+export type VatReportOverpaidExpenseProductOption = {
+  expenseProductId: number;
+  expenseId: number;
+  expenseDateUtc: string;
+  invoiceNumber: string;
+  comment: string;
+  productTitle: string;
+  shopifyProductId: string;
+  shopifyVariantId?: string;
+  shopifyVariantTitle?: string;
+  quantity: number;
+  overpaidQuantity: number;
+};
+
+export type VatReportSupplierExpenseOption = {
+  expenseId: number;
+  expenseDateUtc: string;
+  invoiceNumber: string;
+  comment: string;
+  expenseInvoiceTypeName: string;
+  grossAmount: number;
+  totalProductUnits: number;
+  hasInvoice: boolean;
+};
+
+export type VatReportUnpaidLinkOptions = {
+  overpaidProducts: VatReportOverpaidExpenseProductOption[];
+  supplierInvoices: VatReportSupplierExpenseOption[];
+  supplierPaymentRecords: VatReportSupplierExpenseOption[];
+};
+
 export type VatReportSummaryRow = {
-  type: 'poland' | 'foreign' | 'expense' | 'cash';
+  type: 'poland' | 'foreign' | 'expense' | 'cash' | 'unpaid';
   name: string;
   shopifyOrderId: string;
   orderDateUtc?: string | null;
@@ -51,6 +101,7 @@ export type VatReportSummaryRow = {
   polandRows: VatReportPolandDetailRow[];
   expenseRows?: VatReportExpenseRow[];
   cashSaleRows?: VatReportCashSaleRow[];
+  unpaidProductRows?: VatReportUnpaidProductRow[];
 };
 
 export type VatReportExpenseProductRow = {

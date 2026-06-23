@@ -29,6 +29,26 @@ namespace backend.Models
         public List<VatReportDetailsPolandRow> PolandRows { get; set; } = new();
         public List<VatReportExpenseRow> ExpenseRows { get; set; } = new();
         public List<VatReportCashSaleRow> CashSaleRows { get; set; } = new();
+        public List<VatReportUnpaidProductRow> UnpaidProductRows { get; set; } = new();
+    }
+
+    public class VatReportUnpaidProductRow
+    {
+        public string ShopifyProductId { get; set; } = string.Empty;
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public string ShopifyVariantTitle { get; set; } = string.Empty;
+        public string ShopifyOrderId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public int? SupplierId { get; set; }
+        public string SupplierName { get; set; } = string.Empty;
+        public decimal UnitSupplyPrice { get; set; }
+        public decimal EstimatedCogs { get; set; }
+        public DateTime? SaleOrderDateUtc { get; set; }
+        public int? SourceSaleRowItemId { get; set; }
+        public bool IsManuallyLinked { get; set; }
+        public int? LinkedExpenseId { get; set; }
+        public string LinkedPaymentLabel { get; set; } = string.Empty;
     }
 
     public class VatReportCashSaleRow
@@ -61,6 +81,8 @@ namespace backend.Models
     public class VatReportDetailsPolandItem
     {
         public int Id { get; set; }
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
         public int Quantity { get; set; }

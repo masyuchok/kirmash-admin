@@ -8,17 +8,23 @@ public class VatReportService
     private readonly VatReportGenerationService _generation;
     private readonly VatReportMutationService _mutations;
     private readonly VatReportLockService _locks;
+    private readonly VatReportProfitService _profit;
+    private readonly VatReportUnpaidLinkService _unpaidLinks;
 
     public VatReportService(
         VatReportQueryService query,
         VatReportGenerationService generation,
         VatReportMutationService mutations,
-        VatReportLockService locks )
+        VatReportLockService locks,
+        VatReportProfitService profit,
+        VatReportUnpaidLinkService unpaidLinks )
     {
         _query = query;
         _generation = generation;
         _mutations = mutations;
         _locks = locks;
+        _profit = profit;
+        _unpaidLinks = unpaidLinks;
     }
 
     public Task<List<VatReportListItem>> GetAllAsync() => _query.GetAllAsync();
@@ -29,6 +35,19 @@ public class VatReportService
 
     public Task<VatReportCombinedDetailsResponse> GetCombinedDetailsAsync( int id ) =>
         _query.GetCombinedDetailsAsync( id );
+
+    public Task<VatReportProductAllocationDebugResponse> GetProductAllocationDebugAsync( string titleFragment ) =>
+        _profit.GetProductAllocationDebugAsync( titleFragment );
+
+    public Task<VatReportUnpaidLinkOptionsResponse> GetUnpaidLinkOptionsAsync(
+        int supplierId,
+        int periodYear,
+        int periodMonth,
+        string shopifyProductId ) =>
+        _unpaidLinks.GetLinkOptionsAsync( supplierId, periodYear, periodMonth, shopifyProductId );
+
+    public Task LinkUnpaidProductAsync( VatReportUnpaidLinkRequest request ) =>
+        _unpaidLinks.LinkUnpaidAsync( request );
 
     public Task<VatReportListItem> GenerateAsync( int periodYear, int periodMonth, string reportType ) =>
         _generation.GenerateAsync( periodYear, periodMonth, reportType );

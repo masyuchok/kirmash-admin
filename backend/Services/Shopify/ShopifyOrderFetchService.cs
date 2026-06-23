@@ -171,6 +171,81 @@ public class ShopifyOrderFetchService
         return result;
     }
 
+    public async Task<Dictionary<string, ShopifyOrderDto>> FetchOrdersByIdsAsync( IEnumerable<string> orderIds )
+    {
+        Dictionary<string, ShopifyOrderDto> result = new( StringComparer.OrdinalIgnoreCase );
+        List<string> ids = orderIds
+            .Select( id => ShopifyIds.NormalizeOrderId( id ) )
+            .Where( id => !string.IsNullOrWhiteSpace( id ) )
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .ToList();
+        if (ids.Count == 0)
+        {
+            return result;
+        }
+
+        if (!ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
+        {
+            return result;
+        }
+
+        const int batchSize = 50;
+        for (int i = 0; i < ids.Count; i += batchSize)
+        {
+            List<string> batch = ids.Skip( i ).Take( batchSize ).ToList();
+            string[] gids = batch.Select( id => $"gid://shopify/Order/{id}" ).ToArray();
+            (bool success, JsonDocument? json, string? error) = await _graphql.TryExecuteAsync(
+                session.Shop,
+                session.AccessToken,
+                ShopifyGraphqlQueries.OrderLineItemNodes,
+                new { ids = gids }
+            );
+            if (!success || json is null)
+            {
+                _logger.LogWarning( "Shopify order line items request failed: {Error}", error );
+                continue;
+            }
+
+            using (json)
+            {
+                if (!json.RootElement.TryGetProperty( "data", out JsonElement dataEl ) ||
+                    !dataEl.TryGetProperty( "nodes", out JsonElement nodesEl ) ||
+                    nodesEl.ValueKind != JsonValueKind.Array)
+                {
+                    _logger.LogWarning( "Shopify order line items response has unexpected shape." );
+                    continue;
+                }
+
+                foreach (JsonElement node in nodesEl.EnumerateArray())
+                {
+                    if (node.ValueKind != JsonValueKind.Object) continue;
+                    if (!node.TryGetProperty( "id", out JsonElement idEl ) || idEl.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
+
+                    string orderId = ShopifyIds.NormalizeOrderId( idEl.GetString() ?? string.Empty );
+                    if (string.IsNullOrWhiteSpace( orderId ))
+                    {
+                        continue;
+                    }
+
+                    DateTime createdAtUtc = DateTime.UtcNow;
+                    TryParseCreatedAt( node, out createdAtUtc, out _ );
+
+                    result[orderId] = new ShopifyOrderDto
+                    {
+                        OrderId = orderId,
+                        CreatedAtUtc = createdAtUtc,
+                        Items = ParseLineItems( node )
+                    };
+                }
+            }
+        }
+
+        return result;
+    }
+
     private Task<List<ShopifyOrderDto>> FetchOrdersAsync( int year, int month, ShopifyOrderScope scope )
     {
         (string shop, string accessToken) = GetShopifyCredentials();
@@ -479,6 +554,7 @@ public class ShopifyOrderFetchService
                 : string.Empty;
 
             (string productId, string productType) = ParseProductFromLineItem( itemNode );
+            (string variantId, string variantTitle) = ParseVariantFromLineItem( itemNode );
             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
             decimal discountedTotal = ReadMoney( itemNode, "discountedTotalSet" );
@@ -515,6 +591,8 @@ public class ShopifyOrderFetchService
             items.Add( new ShopifyLineItemDto
             {
                 ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                VariantTitle = variantTitle,
                 Quantity = currentQuantity,
                 UnitPrice = unitPrice,
                 LineTotalGross = Round2( lineTotalGross ),
@@ -569,6 +647,31 @@ public class ShopifyOrderFetchService
         }
 
         return (productId, productType);
+    }
+
+    private static (string VariantId, string VariantTitle) ParseVariantFromLineItem( JsonElement itemNode )
+    {
+        if (!itemNode.TryGetProperty( "variant", out JsonElement variantEl ) ||
+            variantEl.ValueKind != JsonValueKind.Object)
+        {
+            return (string.Empty, string.Empty);
+        }
+
+        string variantId = string.Empty;
+        if (variantEl.TryGetProperty( "id", out JsonElement variantIdEl ) &&
+            variantIdEl.ValueKind == JsonValueKind.String)
+        {
+            variantId = ShopifyIds.NormalizeVariantId( variantIdEl.GetString() ?? string.Empty );
+        }
+
+        string variantTitle = string.Empty;
+        if (variantEl.TryGetProperty( "title", out JsonElement variantTitleEl ) &&
+            variantTitleEl.ValueKind == JsonValueKind.String)
+        {
+            variantTitle = (variantTitleEl.GetString() ?? string.Empty).Trim();
+        }
+
+        return (variantId, variantTitle);
     }
 
     private static decimal SumDiscountAllocations( JsonElement itemNode )

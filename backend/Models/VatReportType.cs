@@ -6,5 +6,6 @@ namespace backend.Models
         public const string Foreign = "foreign";
         public const string Expense = "expense";
         public const string Cash = "cash";
+        public const string Unpaid = "unpaid";
     }
 }
