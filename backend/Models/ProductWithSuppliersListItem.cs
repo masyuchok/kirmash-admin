@@ -28,6 +28,7 @@ namespace backend.Models
         public string SupplierName { get; set; } = string.Empty;
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ShopifyVariantId { get; set; } = string.Empty;
+        public string ShopifyVariantTitle { get; set; } = string.Empty;
         public int OverpaidQuantity { get; set; }
     }
 

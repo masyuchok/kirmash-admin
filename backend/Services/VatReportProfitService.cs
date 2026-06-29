@@ -14,6 +14,8 @@ public class VatReportProfitService
     private Dictionary<(int Year, int Month), decimal>? _nonSupplierExpenseByPeriodCache;
     private Dictionary<(int Year, int Month), decimal>? _financePaymentsByPeriodCache;
     private SaleCostAllocationResult? _allocationCache;
+    private Dictionary<string, int>? _totalSoldByLineKeyCache;
+    private List<SaleUnit>? _saleUnitsWithSuppliersCache;
 
     public VatReportProfitService(
         AppDbContext db,
@@ -171,39 +173,125 @@ public class VatReportProfitService
 
     public async Task<Dictionary<string, int>> GetSoldQuantityBySupplierLineKeyAsync( int supplierId )
     {
-        List<SaleUnit> sales = await LoadSaleUnitsAsync();
-        Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
-        Dictionary<string, int> sold = new( StringComparer.OrdinalIgnoreCase );
-        foreach (SaleUnit sale in sales.Where( sale =>
-                     sale.SupplierId == supplierId && sale.Quantity > 0 ))
+        List<SaleUnit> sales = await GetSaleUnitsWithSuppliersCachedAsync();
+        return await BuildSoldQuantityByLineKeyAsync(
+            sales.Where( sale => sale.SupplierId == supplierId && sale.Quantity > 0 ) );
+    }
+
+    public async Task<Dictionary<string, int>> GetTotalSoldQuantityByLineKeyAsync()
+    {
+        if (_totalSoldByLineKeyCache is not null)
         {
-            string catalogProductId = ResolveCatalogProductIdForLineKey(
+            return _totalSoldByLineKeyCache;
+        }
+
+        _totalSoldByLineKeyCache = await BuildSoldQuantityByLineKeyAsync(
+            await LoadSaleUnitsAsync( deduplicate: true ) );
+        return _totalSoldByLineKeyCache;
+    }
+
+    private async Task<Dictionary<string, int>> BuildSoldQuantityByLineKeyAsync(
+        IEnumerable<SaleUnit> sales )
+    {
+        QuantityLineKeyMaps lineKeyMaps = await GetQuantityLineKeyMapsAsync();
+        Dictionary<string, int> sold = new( StringComparer.OrdinalIgnoreCase );
+        foreach (SaleUnit sale in sales)
+        {
+            if (sale.Quantity <= 0)
+            {
+                continue;
+            }
+
+            string lineKey = ResolveQuantityLineKey(
                 sale.ProductId,
                 sale.VariantId,
-                variantToProduct );
-            string lineKey = VatReportHelpers.BuildProductLineKey( catalogProductId, sale.VariantId );
+                sale.VariantTitle,
+                sale.ProductTitle,
+                lineKeyMaps );
+            if (string.IsNullOrWhiteSpace( lineKey ))
+            {
+                continue;
+            }
+
             sold[lineKey] = sold.GetValueOrDefault( lineKey ) + sale.Quantity;
         }
 
         return sold;
     }
 
-    public async Task<Dictionary<string, int>> GetTotalSoldQuantityByLineKeyAsync()
+    public async Task<QuantityLineKeyMaps> GetQuantityLineKeyMapsAsync()
     {
-        List<SaleUnit> sales = await LoadSaleUnitsAsync();
-        Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
-        Dictionary<string, int> sold = new( StringComparer.OrdinalIgnoreCase );
-        foreach (SaleUnit sale in sales.Where( sale => sale.Quantity > 0 ))
+        IReadOnlyDictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
+        return new QuantityLineKeyMaps
         {
-            string catalogProductId = ResolveCatalogProductIdForLineKey(
-                sale.ProductId,
-                sale.VariantId,
-                variantToProduct );
-            string lineKey = VatReportHelpers.BuildProductLineKey( catalogProductId, sale.VariantId );
-            sold[lineKey] = sold.GetValueOrDefault( lineKey ) + sale.Quantity;
+            VariantToProduct = variantToProduct,
+            VariantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync(),
+            MultiVariantProductIds = await LoadMultiVariantProductIdsAsync( variantToProduct )
+        };
+    }
+
+    public static string ResolveQuantityLineKey(
+        string productIdRaw,
+        string variantIdRaw,
+        string? variantTitleRaw,
+        string? productTitleRaw,
+        QuantityLineKeyMaps maps )
+    {
+        string variantId = NormalizeVariantId( variantIdRaw );
+        string catalogProductId = ResolveCatalogProductIdForLineKey(
+            NormalizeProductId( productIdRaw ),
+            variantId,
+            maps.VariantToProduct );
+
+        if (string.IsNullOrWhiteSpace( variantId ))
+        {
+            string variantTitle = NormalizeVariantTitle( variantTitleRaw ?? string.Empty );
+            if (string.IsNullOrWhiteSpace( variantTitle ))
+            {
+                variantTitle = NormalizeVariantTitle(
+                    VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitleRaw ?? string.Empty ) );
+            }
+
+            if (!string.IsNullOrWhiteSpace( variantTitle ) && !string.IsNullOrWhiteSpace( catalogProductId ))
+            {
+                string resolved = ShopifyVariantLookupService.ResolveVariantIdByProductTitle(
+                    catalogProductId,
+                    variantTitle,
+                    maps.VariantIdByTitle );
+                if (!string.IsNullOrWhiteSpace( resolved ))
+                {
+                    variantId = NormalizeVariantId( resolved );
+                }
+            }
         }
 
-        return sold;
+        string normalizedProductId = NormalizeProductId( catalogProductId );
+        if (!string.IsNullOrWhiteSpace( normalizedProductId ) &&
+            !maps.MultiVariantProductIds.Contains( normalizedProductId ))
+        {
+            variantId = string.Empty;
+        }
+
+        return VatReportHelpers.BuildProductLineKey( catalogProductId, variantId );
+    }
+
+    private async Task<List<SaleUnit>> GetSaleUnitsWithSuppliersCachedAsync()
+    {
+        if (_saleUnitsWithSuppliersCache is not null)
+        {
+            return _saleUnitsWithSuppliersCache;
+        }
+
+        _saleUnitsWithSuppliersCache = await LoadSaleUnitsAsync();
+        return _saleUnitsWithSuppliersCache;
+    }
+
+    private void InvalidateDerivedCaches()
+    {
+        _allocationCache = null;
+        _cogsByPeriodCache = null;
+        _totalSoldByLineKeyCache = null;
+        _saleUnitsWithSuppliersCache = null;
     }
 
     private static string ResolveCatalogProductIdForLineKey(
@@ -372,11 +460,7 @@ public class VatReportProfitService
         List<OrderLineVariantRow> lineRows = await LoadOrderLineVariantRowsForUnpaidAsync( rows );
         foreach (VatReportUnpaidProductRow row in rows)
         {
-            if (string.IsNullOrWhiteSpace( row.ShopifyVariantTitle ) ||
-                string.IsNullOrWhiteSpace( row.ShopifyVariantId ))
-            {
-                ApplyVariantFromOrderLines( row, lineRows );
-            }
+            ApplyVariantFromOrderLines( row, lineRows );
         }
 
         await EnrichUnpaidVariantsFromShopifyOrderIdsAsync( rows, lineRows );
@@ -414,6 +498,20 @@ public class VatReportProfitService
             if (titles.TryGetValue( variantId, out string? title ) && !string.IsNullOrWhiteSpace( title ))
             {
                 row.ShopifyVariantTitle = title;
+            }
+        }
+
+        foreach (VatReportUnpaidProductRow row in rows)
+        {
+            if (!string.IsNullOrWhiteSpace( row.ShopifyVariantTitle ))
+            {
+                continue;
+            }
+
+            string fromTitle = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( row.ProductTitle );
+            if (!string.IsNullOrWhiteSpace( fromTitle ))
+            {
+                row.ShopifyVariantTitle = NormalizeVariantTitle( fromTitle );
             }
         }
     }
@@ -772,8 +870,6 @@ public class VatReportProfitService
                 MatchSaleUnitsToOrderLines( productGroup.ToList(), linesForProduct );
             }
         }
-
-        await EnrichSaleVariantsFromShopifyOrdersAsync( sales );
     }
 
     private async Task EnrichSaleVariantsFromShopifyOrdersAsync( List<SaleUnit> sales )
@@ -847,7 +943,7 @@ public class VatReportProfitService
         if (persistUpdates.Count > 0)
         {
             await PersistRowItemVariantBackfillAsync( persistUpdates );
-            _allocationCache = null;
+            InvalidateDerivedCaches();
         }
     }
 
@@ -1361,6 +1457,11 @@ public class VatReportProfitService
         HashSet<int> includedIds = sales.Select( s => s.Id ).ToHashSet();
         Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
         List<PaymentUnit> paymentUnits = await LoadPaymentUnitsAsync();
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
+            await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+        IReadOnlyDictionary<string, string> variantTitleById =
+            await _variantLookup.GetVariantTitleByIdMapCachedAsync();
+        EnrichPaymentUnitVariants( paymentUnits, variantIdByTitle, variantTitleById );
 
         bool MatchesSearch( string title ) =>
             string.IsNullOrWhiteSpace( search ) ||
@@ -1378,6 +1479,7 @@ public class VatReportProfitService
                     SaleId = s.Id,
                     ShopifyOrderId = s.ShopifyOrderId,
                     ProductId = s.ProductId,
+                    VariantId = s.VariantId,
                     ProductTitle = s.ProductTitle,
                     ReportType = s.ReportType,
                     PeriodYear = s.PeriodYear,
@@ -1406,18 +1508,16 @@ public class VatReportProfitService
         List<VatReportAllocationDebugStepRow> steps = [];
         List<SupplyPriceRow> supplyPrices = await LoadSupplyPriceRowsAsync();
         List<ManualAllocationPool> manualPools = await LoadManualAllocationPoolsAsync();
-        List<SupplyEventRow> supplyEvents = await LoadSupplyEventsAsync();
-        Dictionary<int, int> fallbackSupplierBySaleId = BuildFallbackSupplierBySaleId(
-            sales,
-            supplyEvents,
-            variantToProduct );
+        Dictionary<string, string> productCoreTitleById = await LoadProductCoreTitleByIdMapAsync();
+        HashSet<string> multiVariantProductIds = await LoadMultiVariantProductIdsAsync( variantToProduct );
         RunSalePaymentAllocation(
             sales,
             paymentUnits,
             supplyPrices,
             variantToProduct,
+            productCoreTitleById,
+            multiVariantProductIds,
             manualPools,
-            fallbackSupplierBySaleId,
             steps,
             search );
         response.Steps = steps;
@@ -1461,20 +1561,135 @@ public class VatReportProfitService
         List<SaleUnit> saleUnits = await LoadSaleUnitsAsync();
         Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
         List<PaymentUnit> paymentUnits = await LoadPaymentUnitsAsync();
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
+            await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+        IReadOnlyDictionary<string, string> variantTitleById =
+            await _variantLookup.GetVariantTitleByIdMapCachedAsync();
+        EnrichPaymentUnitVariants( paymentUnits, variantIdByTitle, variantTitleById );
         List<SupplyPriceRow> supplyPriceRows = await LoadSupplyPriceRowsAsync();
         List<ManualAllocationPool> manualPools = await LoadManualAllocationPoolsAsync();
-        List<SupplyEventRow> supplyEvents = await LoadSupplyEventsAsync();
-        Dictionary<int, int> fallbackSupplierBySaleId = BuildFallbackSupplierBySaleId(
-            saleUnits,
-            supplyEvents,
-            variantToProduct );
+        Dictionary<string, string> productCoreTitleById = await LoadProductCoreTitleByIdMapAsync();
+        HashSet<string> multiVariantProductIds = await LoadMultiVariantProductIdsAsync( variantToProduct );
         return RunSalePaymentAllocation(
             saleUnits,
             paymentUnits,
             supplyPriceRows,
             variantToProduct,
-            manualPools,
-            fallbackSupplierBySaleId );
+            productCoreTitleById,
+            multiVariantProductIds,
+            manualPools );
+    }
+
+    private async Task<HashSet<string>> LoadMultiVariantProductIdsAsync(
+        IReadOnlyDictionary<string, string> variantToProduct )
+    {
+        HashSet<string> productIds = new( StringComparer.OrdinalIgnoreCase );
+        foreach (IGrouping<string, KeyValuePair<string, string>> group in variantToProduct
+                     .GroupBy( entry => NormalizeProductId( entry.Value ) ))
+        {
+            string productId = group.Key;
+            if (string.IsNullOrWhiteSpace( productId ))
+            {
+                continue;
+            }
+
+            if (group.Select( entry => NormalizeVariantId( entry.Key ) ).Distinct( StringComparer.OrdinalIgnoreCase ).Count() > 1)
+            {
+                productIds.Add( productId );
+            }
+        }
+
+        try
+        {
+            IReadOnlySet<string> catalogProductIds = await _variantLookup.GetMultiVariantProductIdsCachedAsync();
+            foreach (string productId in catalogProductIds)
+            {
+                string normalized = NormalizeProductId( productId );
+                if (!string.IsNullOrWhiteSpace( normalized ))
+                {
+                    productIds.Add( normalized );
+                }
+            }
+        }
+        catch
+        {
+            // Shopify catalog unavailable — keep DB-derived ids only.
+        }
+
+        return productIds;
+    }
+
+    private async Task<Dictionary<string, string>> LoadProductCoreTitleByIdMapAsync()
+    {
+        Dictionary<string, string> map = new( StringComparer.OrdinalIgnoreCase );
+
+        void Add( string? productIdRaw, string? productTitle )
+        {
+            string productId = NormalizeProductId( productIdRaw ?? string.Empty );
+            string coreTitle = ExtractCoreProductTitleForMatch( productTitle ?? string.Empty );
+            if (string.IsNullOrWhiteSpace( productId ) || coreTitle.Length < 3)
+            {
+                return;
+            }
+
+            if (map.TryGetValue( productId, out string? existingCore ))
+            {
+                if (coreTitle.Length > existingCore.Length )
+                {
+                    map[productId] = coreTitle;
+                }
+            }
+            else
+            {
+                map[productId] = coreTitle;
+            }
+        }
+
+        List<VariantProductTitleRow> rowItems = await _db.VatReportRowItems
+            .AsNoTracking()
+            .Where( item => !string.IsNullOrWhiteSpace( item.ShopifyProductId ) )
+            .Select( item => new VariantProductTitleRow
+            {
+                ProductId = item.ShopifyProductId,
+                ProductTitle = item.ProductTitle
+            } )
+            .ToListAsync();
+        foreach (VariantProductTitleRow row in rowItems)
+        {
+            Add( row.ProductId, row.ProductTitle );
+        }
+
+        List<VariantProductTitleRow> cashSales = await _db.VatReportCashSales
+            .AsNoTracking()
+            .Where( sale => !string.IsNullOrWhiteSpace( sale.ShopifyProductId ) )
+            .Select( sale => new VariantProductTitleRow
+            {
+                ProductId = sale.ShopifyProductId,
+                ProductTitle = sale.ProductTitle
+            } )
+            .ToListAsync();
+        foreach (VariantProductTitleRow row in cashSales)
+        {
+            Add( row.ProductId, row.ProductTitle );
+        }
+
+        List<VariantProductTitleRow> expenseProducts = await _db.VatReportExpenseProducts
+            .AsNoTracking()
+            .Where( product =>
+                !string.IsNullOrWhiteSpace( product.ShopifyProductId ) ||
+                !string.IsNullOrWhiteSpace( product.ProductTitle ) )
+            .Select( product => new VariantProductTitleRow
+            {
+                ProductId = product.ShopifyProductId,
+                ProductTitle = product.ProductTitle
+            } )
+            .ToListAsync();
+        foreach (VariantProductTitleRow row in expenseProducts)
+        {
+            Add( row.ProductId, row.ProductTitle );
+        }
+
+        return map;
     }
 
     private async Task<List<ManualAllocationPool>> LoadManualAllocationPoolsAsync()
@@ -1507,8 +1722,9 @@ public class VatReportProfitService
         IReadOnlyList<PaymentUnit> paymentUnitsSource,
         IReadOnlyList<SupplyPriceRow> supplyPriceRows,
         IReadOnlyDictionary<string, string> variantToProduct,
+        IReadOnlyDictionary<string, string> productCoreTitleById,
+        IReadOnlySet<string> multiVariantProductIds,
         IReadOnlyList<ManualAllocationPool> manualAllocationPools,
-        IReadOnlyDictionary<int, int>? fallbackSupplierBySaleId = null,
         List<VatReportAllocationDebugStepRow>? traceSteps = null,
         string? traceTitleFilter = null )
     {
@@ -1532,11 +1748,14 @@ public class VatReportProfitService
                 Id = p.Id,
                 ExpenseId = p.ExpenseId,
                 DateUtc = p.DateUtc,
+                CatalogProductId = p.CatalogProductId,
                 ProductId = p.ProductId,
                 VariantId = p.VariantId,
+                VariantTitle = p.VariantTitle,
                 ProductTitle = p.ProductTitle,
                 SupplierId = p.SupplierId,
                 UnitGrossPrice = p.UnitGrossPrice,
+                Quantity = p.Quantity,
                 Remaining = p.Remaining
             } )
             .ToList();
@@ -1591,8 +1810,10 @@ public class VatReportProfitService
                     line,
                     productId,
                     variantId,
+                    variantTitle,
                     shopifyOrderId,
-                    supplierId ) );
+                    supplierId,
+                    sourceSaleRowItemId ) );
             if (existing is null)
             {
                 lines.Add( new UnpaidAccumulator
@@ -1642,12 +1863,24 @@ public class VatReportProfitService
             }
         }
 
+        static (int Year, int Month) ResolveUnpaidPeriod( SaleUnit sale )
+        {
+            if (string.Equals( sale.ReportType, VatReportType.Cash, StringComparison.OrdinalIgnoreCase ))
+            {
+                return (sale.PeriodYear, sale.PeriodMonth);
+            }
+
+            return VatReportHelpers.ResolveSaleCalendarPeriod( sale.DateUtc );
+        }
+
         static bool UnpaidAccumulatorKeysMatch(
             UnpaidAccumulator line,
             string productId,
             string variantId,
+            string variantTitle,
             string shopifyOrderId,
-            int? supplierId )
+            int? supplierId,
+            int sourceSaleRowItemId )
         {
             if (line.SupplierId != supplierId)
             {
@@ -1657,6 +1890,11 @@ public class VatReportProfitService
             if (!ProductIdsEqual( line.ShopifyProductId, productId ))
             {
                 return false;
+            }
+
+            if (line.SourceSaleRowItemId.HasValue && sourceSaleRowItemId > 0)
+            {
+                return line.SourceSaleRowItemId.Value == sourceSaleRowItemId;
             }
 
             string existingVariantId = NormalizeVariantId( line.ShopifyVariantId );
@@ -1670,7 +1908,17 @@ public class VatReportProfitService
                     variantId );
             }
 
-            return NormalizeOrderId( line.ShopifyOrderId ) == NormalizeOrderId( shopifyOrderId );
+            string existingVariantTitle = NormalizeVariantTitle( line.ShopifyVariantTitle );
+            string incomingVariantTitle = NormalizeVariantTitle( variantTitle );
+            if (!string.IsNullOrWhiteSpace( existingVariantTitle ) || !string.IsNullOrWhiteSpace( incomingVariantTitle ))
+            {
+                return string.Equals(
+                    existingVariantTitle,
+                    incomingVariantTitle,
+                    StringComparison.OrdinalIgnoreCase );
+            }
+
+            return false;
         }
 
         (decimal Cost, int UnpaidQuantity) AllocateFromPayments(
@@ -1679,13 +1927,14 @@ public class VatReportProfitService
         {
             decimal allocatedCost = 0m;
             int remaining = quantity;
+            (int unpaidPeriodYear, int unpaidPeriodMonth) = ResolveUnpaidPeriod( sale );
 
             if (sale.SupplierId.HasValue && sale.SupplierId.Value > 0)
             {
                 foreach (ManualAllocationPool pool in manualPools.Where( pool =>
                              pool.Remaining > 0 &&
-                             pool.SalePeriodYear == sale.DateUtc.Year &&
-                             pool.SalePeriodMonth == sale.DateUtc.Month &&
+                             pool.SalePeriodYear == unpaidPeriodYear &&
+                             pool.SalePeriodMonth == unpaidPeriodMonth &&
                              pool.SupplierId == sale.SupplierId.Value &&
                              VatReportHelpers.ProductLinesCompatible(
                                  pool.ShopifyProductId,
@@ -1727,10 +1976,17 @@ public class VatReportProfitService
 
             IEnumerable<PaymentUnit> ProductPaymentCandidates( bool sameSupplierOnly )
             {
+                // Payments are not gated by expense date vs sale date: an invoice dated 30 June
+                // must still cover sales earlier in the same month (e.g. 13 June).
                 IEnumerable<PaymentUnit> query = availablePayments
                     .Where( p =>
                         p.Remaining > 0 &&
-                        PaymentMatchesProduct( p, sale, variantToProduct ) );
+                        PaymentMatchesProduct(
+                            p,
+                            sale,
+                            variantToProduct,
+                            productCoreTitleById,
+                            multiVariantProductIds ) );
 
                 if (!sale.SupplierId.HasValue || sale.SupplierId.Value <= 0)
                 {
@@ -1739,9 +1995,9 @@ public class VatReportProfitService
 
                 return sameSupplierOnly
                     ? query.Where( p =>
-                        p.SupplierId.HasValue && p.SupplierId.Value == sale.SupplierId.Value )
+                        !p.SupplierId.HasValue || p.SupplierId.Value == sale.SupplierId.Value )
                     : query.Where( p =>
-                        !p.SupplierId.HasValue || p.SupplierId.Value != sale.SupplierId.Value );
+                        p.SupplierId.HasValue && p.SupplierId.Value != sale.SupplierId.Value );
             }
 
             void ConsumePayment( PaymentUnit payment, int take, string traceKind )
@@ -1773,10 +2029,31 @@ public class VatReportProfitService
 
             if (ShouldTrace( sale.ProductTitle ))
             {
+                int matchingRemaining = availablePayments.Count( p =>
+                    p.Remaining > 0 &&
+                    PaymentMatchesProduct(
+                        p,
+                        sale,
+                        variantToProduct,
+                        productCoreTitleById,
+                        multiVariantProductIds ) );
+                string paymentPool = string.Join(
+                    ", ",
+                    availablePayments
+                        .Where( p => PaymentMatchesProduct(
+                            p,
+                            sale,
+                            variantToProduct,
+                            productCoreTitleById,
+                            multiVariantProductIds ) )
+                        .OrderBy( p => p.DateUtc )
+                        .ThenBy( p => p.Id )
+                        .Select( p => $"#{p.Id}:{p.Remaining}/{p.Quantity}" ) );
                 Trace(
                     "sale",
                     $"saleId={sale.Id} order={sale.ShopifyOrderId} product={sale.ProductId} " +
-                    $"supplier={sale.SupplierId} qty={quantity} candidates={sameSupplierCandidates.Count}" );
+                    $"variant={sale.VariantId} supplier={sale.SupplierId} qty={quantity} " +
+                    $"candidates={sameSupplierCandidates.Count} matchingRemaining={matchingRemaining} pool=[{paymentPool}]" );
             }
 
             foreach (PaymentUnit payment in sameSupplierCandidates)
@@ -1810,22 +2087,15 @@ public class VatReportProfitService
 
         foreach (SaleUnit sale in saleUnits.OrderBy( s => s.DateUtc ).ThenBy( s => s.Id ))
         {
+            (int unpaidPeriodYear, int unpaidPeriodMonth) = ResolveUnpaidPeriod( sale );
             (decimal cost, int unpaidQuantity) = AllocateFromPayments( sale, sale.Quantity );
 
             if (unpaidQuantity > 0)
             {
-                int? supplierForUnpaid = sale.SupplierId;
-                if ((!supplierForUnpaid.HasValue || supplierForUnpaid.Value <= 0) &&
-                    fallbackSupplierBySaleId is not null &&
-                    fallbackSupplierBySaleId.TryGetValue( sale.Id, out int fallbackSupplierId ))
-                {
-                    supplierForUnpaid = fallbackSupplierId;
-                }
-
                 decimal supplyUnitPrice = ResolveSupplyFallbackUnitPrice(
                     supplyPriceRows,
                     sale.ProductId,
-                    supplierForUnpaid,
+                    sale.SupplierId,
                     sale.DateUtc );
                 if (supplyUnitPrice > 0m)
                 {
@@ -1833,14 +2103,14 @@ public class VatReportProfitService
                 }
 
                 AddUnpaid(
-                    sale.DateUtc.Year,
-                    sale.DateUtc.Month,
+                    unpaidPeriodYear,
+                    unpaidPeriodMonth,
                     sale.ShopifyOrderId,
                     sale.ProductId,
                     sale.VariantId,
                     sale.VariantTitle,
                     sale.ProductTitle,
-                    supplierForUnpaid,
+                    sale.SupplierId,
                     unpaidQuantity,
                     supplyUnitPrice,
                     sale.DateUtc,
@@ -1850,7 +2120,7 @@ public class VatReportProfitService
                 {
                     Trace(
                         "unpaid",
-                        $"saleId={sale.Id} period={sale.DateUtc.Year}-{sale.DateUtc.Month:D2} unpaidQty={unpaidQuantity}" );
+                        $"saleId={sale.Id} period={unpaidPeriodYear}-{unpaidPeriodMonth:D2} unpaidQty={unpaidQuantity}" );
                 }
             }
 
@@ -1999,7 +2269,7 @@ public class VatReportProfitService
                 VariantTitle = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( row.ProductTitle ),
                 ProductTitle = row.ProductTitle,
                 Quantity = row.Quantity,
-                DateUtc = ResolveCashSaleDateUtc( row.PeriodYear, row.PeriodMonth ),
+                DateUtc = VatReportHelpers.ResolveCashSaleDateUtc( row.PeriodYear, row.PeriodMonth ),
                 PeriodYear = row.PeriodYear,
                 PeriodMonth = row.PeriodMonth,
                 SupplierId = null
@@ -2009,14 +2279,36 @@ public class VatReportProfitService
         List<SupplyEventRow> supplyEvents = await LoadSupplyEventsAsync();
         Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
         await EnrichSaleVariantsFromRowItemsAsync( sales );
-        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
-            await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
-        IReadOnlyDictionary<string, string> variantTitleById =
-            await _variantLookup.GetVariantTitleByIdMapCachedAsync();
-        EnrichMissingSaleVariantIds( sales, variantIdByTitle, variantTitleById );
+        bool needsCatalogVariantLookup = sales.Any( sale => string.IsNullOrWhiteSpace( sale.VariantId ) );
+        if (needsCatalogVariantLookup)
+        {
+            IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
+                await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            IReadOnlyDictionary<string, string> variantTitleById =
+                await _variantLookup.GetVariantTitleByIdMapCachedAsync();
+            EnrichMissingSaleVariantIds( sales, variantIdByTitle, variantTitleById );
+        }
+        else if (sales.Any( sale =>
+                     string.IsNullOrWhiteSpace( sale.VariantTitle ) && !string.IsNullOrWhiteSpace( sale.VariantId ) ))
+        {
+            IReadOnlyDictionary<string, string> variantTitleById =
+                await _variantLookup.GetVariantTitleByIdMapCachedAsync();
+            foreach (SaleUnit sale in sales)
+            {
+                if (string.IsNullOrWhiteSpace( sale.VariantTitle ) && !string.IsNullOrWhiteSpace( sale.VariantId ) &&
+                    variantTitleById.TryGetValue( sale.VariantId, out string? title ) &&
+                    !string.IsNullOrWhiteSpace( title ))
+                {
+                    sale.VariantTitle = NormalizeVariantTitle( title );
+                }
+            }
+        }
+
         AssignSuppliersFromSupplyFifo( sales, supplyEvents, variantToProduct );
 
-        return deduplicate ? DeduplicateSales( sales ) : sales;
+        List<SaleUnit> result = deduplicate ? DeduplicateSales( sales ) : sales;
+        _saleUnitsWithSuppliersCache = result;
+        return result;
     }
 
     private static List<SaleUnit> DeduplicateSales( List<SaleUnit> sales )
@@ -2025,13 +2317,39 @@ public class VatReportProfitService
             string.Equals( reportType, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ) ? 0 :
             string.Equals( reportType, VatReportType.Foreign, StringComparison.OrdinalIgnoreCase ) ? 1 : 2;
 
-        return sales
-            .GroupBy( BuildSaleDedupKey )
-            .Select( group => group
+        List<SaleUnit> result = new();
+        foreach (IGrouping<string, SaleUnit> group in sales.GroupBy( BuildSaleDedupKey ))
+        {
+            SaleUnit representative = group
                 .OrderBy( sale => ReportTypePriority( sale.ReportType ) )
+                .ThenByDescending( sale => string.IsNullOrWhiteSpace( sale.VariantId ) ? 0 : 1 )
+                .ThenByDescending( sale => string.IsNullOrWhiteSpace( sale.VariantTitle ) ? 0 : 1 )
                 .ThenBy( sale => sale.Id )
-                .First() )
-            .ToList();
+                .First();
+            int totalQuantity = group.Sum( sale => sale.Quantity );
+            if (totalQuantity != representative.Quantity)
+            {
+                representative = new SaleUnit
+                {
+                    Id = representative.Id,
+                    ShopifyOrderId = representative.ShopifyOrderId,
+                    ReportType = representative.ReportType,
+                    ProductId = representative.ProductId,
+                    VariantId = representative.VariantId,
+                    VariantTitle = representative.VariantTitle,
+                    ProductTitle = representative.ProductTitle,
+                    Quantity = totalQuantity,
+                    DateUtc = representative.DateUtc,
+                    PeriodYear = representative.PeriodYear,
+                    PeriodMonth = representative.PeriodMonth,
+                    SupplierId = representative.SupplierId
+                };
+            }
+
+            result.Add( representative );
+        }
+
+        return result;
     }
 
     private static string BuildSaleDedupKey( SaleUnit sale )
@@ -2041,9 +2359,18 @@ public class VatReportProfitService
             return $"cash:{sale.Id}";
         }
 
-        string variantPart = string.IsNullOrWhiteSpace( sale.VariantId )
-            ? $"row:{sale.Id}"
-            : sale.VariantId;
+        // One Shopify order line per product/variant/period — do not key on row-item id or
+        // Poland + Foreign copies of the same order consume two payment units.
+        string variantPart = NormalizeVariantId( sale.VariantId );
+        if (string.IsNullOrWhiteSpace( variantPart ))
+        {
+            string variantTitle = NormalizeVariantTitle( sale.VariantTitle );
+            if (!string.IsNullOrWhiteSpace( variantTitle ))
+            {
+                variantPart = $"title:{variantTitle.ToLowerInvariant()}";
+            }
+        }
+
         return $"{sale.ShopifyOrderId}|{sale.ProductId}|{variantPart}|{sale.PeriodYear:D4}-{sale.PeriodMonth:D2}";
     }
 
@@ -2124,18 +2451,22 @@ public class VatReportProfitService
             if (string.IsNullOrWhiteSpace( sale.VariantId ))
             {
                 string variantTitleCandidate = sale.VariantTitle;
-                if (string.IsNullOrWhiteSpace( variantTitleCandidate ))
+                if (string.IsNullOrWhiteSpace( variantTitleCandidate ) &&
+                    string.IsNullOrWhiteSpace( sale.ShopifyOrderId ))
                 {
                     variantTitleCandidate = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( sale.ProductTitle );
                 }
 
-                string resolved = ShopifyVariantLookupService.ResolveVariantIdByProductTitle(
-                    sale.ProductId,
-                    variantTitleCandidate,
-                    variantIdByTitle );
-                if (!string.IsNullOrWhiteSpace( resolved ))
+                if (!string.IsNullOrWhiteSpace( variantTitleCandidate ))
                 {
-                    sale.VariantId = resolved;
+                    string resolved = ShopifyVariantLookupService.ResolveVariantIdByProductTitle(
+                        sale.ProductId,
+                        variantTitleCandidate,
+                        variantIdByTitle );
+                    if (!string.IsNullOrWhiteSpace( resolved ))
+                    {
+                        sale.VariantId = resolved;
+                    }
                 }
             }
 
@@ -2212,59 +2543,6 @@ public class VatReportProfitService
         }
     }
 
-    private static Dictionary<int, int> BuildFallbackSupplierBySaleId(
-        IReadOnlyList<SaleUnit> sales,
-        List<SupplyEventRow> supplyEvents,
-        IReadOnlyDictionary<string, string> variantToProduct )
-    {
-        Dictionary<int, int> fallback = new();
-        List<SupplyEventRow> positiveSupplies = supplyEvents
-            .Where( supplyEvent => supplyEvent.Quantity > 0 )
-            .ToList();
-        if (positiveSupplies.Count == 0)
-        {
-            return fallback;
-        }
-
-        foreach (SaleUnit sale in sales.Where( sale => !sale.SupplierId.HasValue || sale.SupplierId.Value <= 0 ))
-        {
-            HashSet<int> supplierIds = new();
-            foreach (SupplyEventRow supplyEvent in positiveSupplies)
-            {
-                if (!SupplyEventMatchesSale( sale, supplyEvent, variantToProduct ))
-                {
-                    continue;
-                }
-
-                supplierIds.Add( supplyEvent.SupplierId );
-            }
-
-            if (supplierIds.Count == 1)
-            {
-                fallback[sale.Id] = supplierIds.First();
-            }
-        }
-
-        return fallback;
-    }
-
-    private static bool SupplyEventMatchesSale(
-        SaleUnit sale,
-        SupplyEventRow supplyEvent,
-        IReadOnlyDictionary<string, string> variantToProduct )
-    {
-        SupplyBatchRow batch = new()
-        {
-            SupplierId = supplyEvent.SupplierId,
-            ProductId = supplyEvent.ProductId,
-            VariantId = supplyEvent.VariantId,
-            Quantity = supplyEvent.Quantity,
-            Remaining = supplyEvent.Quantity,
-            SupplyDate = supplyEvent.SupplyDate
-        };
-        return SupplyLineMatchesProduct( sale, batch, variantToProduct );
-    }
-
     private static void ApplySupplyReturn(
         List<SupplyBatchRow> batches,
         SupplyEventRow supplyReturn,
@@ -2331,17 +2609,6 @@ public class VatReportProfitService
 
             batch.Remaining -= take;
             remaining -= take;
-        }
-
-        if (!sale.SupplierId.HasValue)
-        {
-            SupplyBatchRow? fallbackBatch = batches.FirstOrDefault( batch =>
-                batch.Remaining > 0 &&
-                SupplyLineMatchesProduct( sale, batch, variantToProduct ) );
-            if (fallbackBatch is not null)
-            {
-                sale.SupplierId = fallbackBatch.SupplierId;
-            }
         }
     }
 
@@ -2438,8 +2705,11 @@ public class VatReportProfitService
                 {
                     Id = row.Id,
                     ExpenseId = row.ExpenseId,
+                    CatalogProductId = NormalizeProductId( row.ProductId ),
                     ProductId = ResolvePaymentProductId( row.ProductId, row.VariantId ),
                     VariantId = NormalizeVariantId( row.VariantId ),
+                    VariantTitle = NormalizeVariantTitle(
+                        VatReportHelpers.ExtractVariantTitleFromProductLineTitle( row.ProductTitle ) ),
                     ProductTitle = row.ProductTitle?.Trim() ?? string.Empty,
                     Quantity = row.Quantity,
                     Remaining = row.Quantity,
@@ -2519,19 +2789,21 @@ public class VatReportProfitService
         return NormalizeVariantId( variantIdRaw );
     }
 
-    private static DateTime ResolveCashSaleDateUtc( int periodYear, int periodMonth )
-    {
-        int lastDay = DateTime.DaysInMonth( periodYear, periodMonth );
-        return new DateTime( periodYear, periodMonth, lastDay, 12, 0, 0, DateTimeKind.Utc );
-    }
-
     private static string NormalizeOrderId( string raw ) =>
         ShopifyIds.NormalizeOrderId( raw?.Trim() ?? string.Empty ).Trim();
+
+    private static bool ProductHasNamedVariants(
+        string catalogProductId,
+        IReadOnlySet<string> multiVariantProductIds ) =>
+        !string.IsNullOrWhiteSpace( catalogProductId ) &&
+        multiVariantProductIds.Contains( NormalizeProductId( catalogProductId ) );
 
     private static bool PaymentMatchesProduct(
         PaymentUnit payment,
         SaleUnit sale,
-        IReadOnlyDictionary<string, string> variantToProduct )
+        IReadOnlyDictionary<string, string> variantToProduct,
+        IReadOnlyDictionary<string, string> productCoreTitleById,
+        IReadOnlySet<string> multiVariantProductIds )
     {
         string saleProductId = ResolveCatalogProductId( sale.ProductId, variantToProduct );
         if (string.IsNullOrWhiteSpace( saleProductId ))
@@ -2546,34 +2818,290 @@ public class VatReportProfitService
             paymentProductIdResolved = paymentProductId;
         }
 
-        if (VatReportHelpers.ProductLinesCompatible(
-                saleProductId,
-                sale.VariantId,
-                paymentProductIdResolved,
-                payment.VariantId ))
+        string paymentCatalogProductId = string.IsNullOrWhiteSpace( payment.CatalogProductId )
+            ? paymentProductIdResolved
+            : payment.CatalogProductId;
+
+        if (!ProductIdsEqual( saleProductId, paymentCatalogProductId ) &&
+            !ProductIdsEqual( saleProductId, paymentProductIdResolved ))
+        {
+            if (!string.IsNullOrWhiteSpace( payment.CatalogProductId ))
+            {
+                return false;
+            }
+
+            if (ProductTitlesCompatibleLoosely( payment.ProductTitle, sale.ProductTitle ))
+            {
+                return true;
+            }
+
+            string saleCoreTitle = ResolveProductCoreTitle( sale.ProductId, sale.ProductTitle, productCoreTitleById );
+            string paymentCoreTitle = ResolveProductCoreTitle(
+                payment.ProductId,
+                payment.ProductTitle,
+                productCoreTitleById );
+            return CoreProductTitlesOverlap( saleCoreTitle, paymentCoreTitle );
+        }
+
+        if (!ProductHasNamedVariants( saleProductId, multiVariantProductIds ))
         {
             return true;
         }
 
-        string paymentVariantProductId = ResolveVariantMappedProductId( payment.VariantId, variantToProduct );
+        return PaymentVariantLinesMatch(
+            saleProductId,
+            sale,
+            paymentCatalogProductId,
+            payment );
+    }
 
-        if (!string.IsNullOrWhiteSpace( saleProductId ))
+    private static bool PaymentVariantLinesMatch(
+        string saleCatalogProductId,
+        SaleUnit sale,
+        string paymentCatalogProductId,
+        PaymentUnit payment )
+    {
+        string saleVariantId = NormalizeVariantId( sale.VariantId );
+        string paymentVariantId = NormalizeVariantId( payment.VariantId );
+
+        if (!string.IsNullOrWhiteSpace( saleVariantId ) && !string.IsNullOrWhiteSpace( paymentVariantId ))
         {
-            if (!string.IsNullOrWhiteSpace( paymentVariantProductId ) &&
-                ProductIdsEqual( paymentVariantProductId, saleProductId ))
+            return VatReportHelpers.ProductLineKeysEqual(
+                saleCatalogProductId,
+                saleVariantId,
+                paymentCatalogProductId,
+                paymentVariantId );
+        }
+
+        string saleTitle = ResolvePaymentMatchVariantTitle( sale.VariantTitle, sale.ProductTitle );
+        string paymentTitle = ResolvePaymentMatchVariantTitle( payment.VariantTitle, payment.ProductTitle );
+        if (string.IsNullOrWhiteSpace( saleTitle ) || string.IsNullOrWhiteSpace( paymentTitle ))
+        {
+            return false;
+        }
+
+        return string.Equals( saleTitle, paymentTitle, StringComparison.OrdinalIgnoreCase );
+    }
+
+    private static string ResolvePaymentMatchVariantTitle( string variantTitle, string productTitle )
+    {
+        if (!string.IsNullOrWhiteSpace( variantTitle ))
+        {
+            return NormalizeVariantTitle( variantTitle );
+        }
+
+        return NormalizeVariantTitle(
+            VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitle ) );
+    }
+
+    private static void EnrichPaymentUnitVariants(
+        List<PaymentUnit> payments,
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle,
+        IReadOnlyDictionary<string, string> variantTitleById )
+    {
+        foreach (PaymentUnit payment in payments)
+        {
+            if (string.IsNullOrWhiteSpace( payment.VariantTitle ))
             {
-                return true;
+                string fromTitle = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( payment.ProductTitle );
+                if (!string.IsNullOrWhiteSpace( fromTitle ))
+                {
+                    payment.VariantTitle = NormalizeVariantTitle( fromTitle );
+                }
             }
 
-            long? saleNumeric = ShopifyIds.TryParseNumericProductId( saleProductId );
-            long? paymentNumeric = ShopifyIds.TryParseNumericProductId( paymentProductIdResolved );
-            if (saleNumeric.HasValue && paymentNumeric.HasValue && saleNumeric.Value == paymentNumeric.Value)
+            string catalogProductId = !string.IsNullOrWhiteSpace( payment.CatalogProductId )
+                ? NormalizeProductId( payment.CatalogProductId )
+                : NormalizeProductId( payment.ProductId );
+
+            if (string.IsNullOrWhiteSpace( payment.VariantId ) &&
+                !string.IsNullOrWhiteSpace( payment.VariantTitle ) &&
+                !string.IsNullOrWhiteSpace( catalogProductId ))
             {
-                return true;
+                string resolved = ShopifyVariantLookupService.ResolveVariantIdByProductTitle(
+                    catalogProductId,
+                    payment.VariantTitle,
+                    variantIdByTitle );
+                if (!string.IsNullOrWhiteSpace( resolved ))
+                {
+                    payment.VariantId = NormalizeVariantId( resolved );
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace( payment.VariantTitle ) &&
+                !string.IsNullOrWhiteSpace( payment.VariantId ) &&
+                variantTitleById.TryGetValue( NormalizeVariantId( payment.VariantId ), out string? title ) &&
+                !string.IsNullOrWhiteSpace( title ))
+            {
+                payment.VariantTitle = NormalizeVariantTitle( title );
+            }
+        }
+    }
+
+    private static string ResolveProductCoreTitle(
+        string productId,
+        string productTitle,
+        IReadOnlyDictionary<string, string> productCoreTitleById )
+    {
+        string normalizedProductId = NormalizeProductId( productId );
+        if (!string.IsNullOrWhiteSpace( normalizedProductId ) &&
+            productCoreTitleById.TryGetValue( normalizedProductId, out string? mappedCoreTitle ) &&
+            !string.IsNullOrWhiteSpace( mappedCoreTitle ))
+        {
+            return mappedCoreTitle;
+        }
+
+        return ExtractCoreProductTitleForMatch( productTitle );
+    }
+
+    private static bool ProductIdsShareCoreTitle(
+        string saleProductIdRaw,
+        string paymentProductIdRaw,
+        IReadOnlyDictionary<string, string> productCoreTitleById )
+    {
+        string saleProductId = NormalizeProductId( saleProductIdRaw );
+        string paymentProductId = NormalizeProductId( paymentProductIdRaw );
+        if (string.IsNullOrWhiteSpace( saleProductId ) || string.IsNullOrWhiteSpace( paymentProductId ))
+        {
+            return false;
+        }
+
+        if (ProductIdsEqual( saleProductId, paymentProductId ))
+        {
+            return true;
+        }
+
+        if (!productCoreTitleById.TryGetValue( saleProductId, out string? saleCore ) ||
+            !productCoreTitleById.TryGetValue( paymentProductId, out string? paymentCore ))
+        {
+            return false;
+        }
+
+        return CoreProductTitlesOverlap( saleCore, paymentCore );
+    }
+
+    private static bool ProductTitlesCompatibleLoosely( string left, string right )
+    {
+        if (ProductTitlesEqual( left, right ))
+        {
+            return true;
+        }
+
+        string coreLeft = ExtractCoreProductTitleForMatch( left );
+        string coreRight = ExtractCoreProductTitleForMatch( right );
+        if (CoreProductTitlesOverlap( coreLeft, coreRight ))
+        {
+            return true;
+        }
+
+        string fullLeft = NormalizeProductTitle( left );
+        string fullRight = NormalizeProductTitle( right );
+        if (fullLeft.Length >= 8 && fullRight.Length >= 8)
+        {
+            return fullLeft.Contains( fullRight, StringComparison.OrdinalIgnoreCase ) ||
+                   fullRight.Contains( fullLeft, StringComparison.OrdinalIgnoreCase );
+        }
+
+        return false;
+    }
+
+    private static bool CoreProductTitlesOverlap( string coreLeft, string coreRight )
+    {
+        if (coreLeft.Length < 3 || coreRight.Length < 3)
+        {
+            return false;
+        }
+
+        if (string.Equals( coreLeft, coreRight, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        return coreLeft.Contains( coreRight, StringComparison.OrdinalIgnoreCase ) ||
+               coreRight.Contains( coreLeft, StringComparison.OrdinalIgnoreCase );
+    }
+
+    private static string ExtractCoreProductTitleForMatch( string raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return string.Empty;
+        }
+
+        // Split on dash/comma in the raw title first: NormalizeProductTitle turns dashes into
+        // spaces, so "Наступны прыпынак — смерць" must be split before normalization.
+        string title = raw.Trim();
+        foreach (string separator in new[] { " — ", " – ", " - ", "—", "–" })
+        {
+            int index = title.LastIndexOf( separator, StringComparison.Ordinal );
+            if (index < 0)
+            {
+                continue;
+            }
+
+            string after = title[(index + separator.Length)..].Trim();
+            if (after.Length >= 3)
+            {
+                title = after;
+                break;
             }
         }
 
-        return ProductTitlesEqual( payment.ProductTitle, sale.ProductTitle );
+        int comma = title.IndexOf( ',', StringComparison.Ordinal );
+        if (comma >= 0)
+        {
+            title = title[..comma].Trim();
+        }
+
+        return NormalizeProductTitle( title );
+    }
+
+    private static string ResolveSaleVariantTitleForPaymentMatch( SaleUnit sale )
+    {
+        if (!string.IsNullOrWhiteSpace( sale.VariantTitle ))
+        {
+            return sale.VariantTitle.Trim();
+        }
+
+        return VatReportHelpers.ExtractVariantTitleFromProductLineTitle( sale.ProductTitle );
+    }
+
+    private static string ResolvePaymentVariantTitleForPaymentMatch( PaymentUnit payment )
+    {
+        return VatReportHelpers.ExtractVariantTitleFromProductLineTitle( payment.ProductTitle );
+    }
+
+    private static bool PaymentVariantTitlesConflict( SaleUnit sale, PaymentUnit payment )
+    {
+        if (string.IsNullOrWhiteSpace( sale.VariantId ) && string.IsNullOrWhiteSpace( payment.VariantId ))
+        {
+            return false;
+        }
+
+        string saleProductId = NormalizeProductId( sale.ProductId );
+        string paymentProductId = NormalizeProductId(
+            ResolvePaymentProductId( payment.ProductId, payment.VariantId ) );
+        if (ProductIdsEqual( saleProductId, paymentProductId ))
+        {
+            return false;
+        }
+
+        if (ProductTitlesCompatibleLoosely( payment.ProductTitle, sale.ProductTitle ))
+        {
+            return false;
+        }
+
+        string saleVariantTitle = ResolveSaleVariantTitleForPaymentMatch( sale );
+        string paymentVariantTitle = ResolvePaymentVariantTitleForPaymentMatch( payment );
+        if (string.IsNullOrWhiteSpace( saleVariantTitle ) || string.IsNullOrWhiteSpace( paymentVariantTitle ))
+        {
+            return false;
+        }
+
+        return !string.Equals(
+            saleVariantTitle,
+            paymentVariantTitle,
+            StringComparison.OrdinalIgnoreCase );
     }
 
     private static string ResolveCatalogProductId(
@@ -2680,8 +3208,10 @@ public class VatReportProfitService
     {
         public int Id { get; set; }
         public int ExpenseId { get; set; }
+        public string CatalogProductId { get; set; } = string.Empty;
         public string ProductId { get; set; } = string.Empty;
         public string VariantId { get; set; } = string.Empty;
+        public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public int Remaining { get; set; }
@@ -2834,6 +3364,12 @@ public class VatReportProfitService
         public int Remaining { get; set; }
     }
 
+    private sealed class VariantProductTitleRow
+    {
+        public string ProductId { get; set; } = string.Empty;
+        public string ProductTitle { get; set; } = string.Empty;
+    }
+
     private sealed class VariantProductRow
     {
         public string VariantId { get; set; } = string.Empty;
@@ -2845,4 +3381,16 @@ public class VatReportProfitService
         public Dictionary<(int Year, int Month), decimal> CogsByPeriod { get; set; } = new();
         public Dictionary<(int Year, int Month), List<UnpaidAccumulator>> UnpaidByPeriod { get; set; } = new();
     }
+}
+
+public sealed class QuantityLineKeyMaps
+{
+    public IReadOnlyDictionary<string, string> VariantToProduct { get; init; } =
+        new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+
+    public IReadOnlyDictionary<string, Dictionary<string, string>> VariantIdByTitle { get; init; } =
+        new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+
+    public IReadOnlySet<string> MultiVariantProductIds { get; init; } =
+        new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 }

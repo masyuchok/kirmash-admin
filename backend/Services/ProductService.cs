@@ -395,14 +395,9 @@ public class ProductService
                 string variantTitle = !string.IsNullOrWhiteSpace( variantTitleFromProduct )
                     ? variantTitleFromProduct
                     : ResolveVariantTitle( variantId, variantTitles );
-                DateTime saleDateUtc = new DateTime(
+                DateTime saleDateUtc = VatReportHelpers.ResolveCashSaleDateUtc(
                     s.VatReport.PeriodYear,
-                    s.VatReport.PeriodMonth,
-                    DateTime.DaysInMonth( s.VatReport.PeriodYear, s.VatReport.PeriodMonth ),
-                    12,
-                    0,
-                    0,
-                    DateTimeKind.Utc );
+                    s.VatReport.PeriodMonth );
                 return new ProductHistorySaleEvent
                 {
                     DateUtc = saleDateUtc.ToString( "O" ),

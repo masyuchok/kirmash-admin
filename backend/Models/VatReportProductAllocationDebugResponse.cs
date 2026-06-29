@@ -13,6 +13,7 @@ public class VatReportAllocationDebugSaleRow
     public int SaleId { get; set; }
     public string ShopifyOrderId { get; set; } = string.Empty;
     public string ProductId { get; set; } = string.Empty;
+    public string VariantId { get; set; } = string.Empty;
     public string ProductTitle { get; set; } = string.Empty;
     public string ReportType { get; set; } = string.Empty;
     public int PeriodYear { get; set; }

@@ -18,9 +18,31 @@ function normalizeVariantId(id: string): string {
   return trimmed;
 }
 
+function normalizeVariantName(name: string): string {
+  return name.trim().toLocaleLowerCase('be');
+}
+
+function variantLinesMatch(
+  rowVariantId: string,
+  rowVariantName: string,
+  lineVariantId: string,
+  lineVariantName: string
+): boolean {
+  if (rowVariantId && lineVariantId) {
+    return rowVariantId === lineVariantId;
+  }
+
+  if (rowVariantName && lineVariantName) {
+    return normalizeVariantName(rowVariantName) === normalizeVariantName(lineVariantName);
+  }
+
+  return false;
+}
+
 type OverpaidRowScope = {
   shopifyProductId: string;
   shopifyVariantId?: string;
+  variantName?: string;
   supplierId?: number | null;
   isVariantChild?: boolean;
   rowSource?: 'shopify' | 'supply';
@@ -38,11 +60,15 @@ export function getRowOverpaidQuantity(
     if (normalizeProductId(line.shopifyProductId) !== productId) return sum;
     if (scope.supplierId != null && line.supplierId !== scope.supplierId) return sum;
 
-    const lineVariant = normalizeVariantId(line.shopifyVariantId);
     if (scope.isVariantChild) {
       const rowVariant = normalizeVariantId(scope.shopifyVariantId ?? '');
-      if (!lineVariant) return sum;
-      if (!rowVariant || lineVariant !== rowVariant) return sum;
+      const lineVariant = normalizeVariantId(line.shopifyVariantId);
+      const rowVariantName = scope.variantName?.trim() ?? '';
+      const lineVariantName = line.shopifyVariantTitle?.trim() ?? '';
+
+      if (!variantLinesMatch(rowVariant, rowVariantName, lineVariant, lineVariantName)) {
+        return sum;
+      }
     }
 
     return sum + line.overpaidQuantity;

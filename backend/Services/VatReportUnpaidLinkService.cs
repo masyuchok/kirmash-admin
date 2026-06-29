@@ -47,6 +47,7 @@ public class VatReportUnpaidLinkService
 
         Dictionary<string, int> totalPaidByLineKey = await LoadTotalPaidQuantityByLineKeyAsync();
         Dictionary<string, int> totalSoldByLineKey = await _profit.GetTotalSoldQuantityByLineKeyAsync();
+        Dictionary<string, string> variantTitles = await _profit.GetVariantTitleLookupAsync();
 
         List<ProductOverpaidLineItem> result = new();
         foreach (int supplierId in supplierIds)
@@ -70,6 +71,7 @@ public class VatReportUnpaidLinkService
                     SupplierName = supplierName ?? string.Empty,
                     ShopifyProductId = productId,
                     ShopifyVariantId = variantId,
+                    ShopifyVariantTitle = variantTitles.GetValueOrDefault( variantId ) ?? string.Empty,
                     OverpaidQuantity = entry.Value
                 } );
             }
@@ -182,14 +184,13 @@ public class VatReportUnpaidLinkService
 
         ValidateSupplierPaymentExpense( expenseProduct.VatReportExpense, request.SupplierId );
 
-        Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
-        string lineProductId = ResolveCatalogProductId(
+        QuantityLineKeyMaps lineKeyMaps = await _profit.GetQuantityLineKeyMapsAsync();
+        string expenseLineKey = VatReportProfitService.ResolveQuantityLineKey(
             expenseProduct.ShopifyProductId,
             expenseProduct.ShopifyVariantId,
-            variantToProduct );
-        string expenseLineKey = VatReportHelpers.BuildProductLineKey(
-            lineProductId,
-            expenseProduct.ShopifyVariantId );
+            string.Empty,
+            expenseProduct.ProductTitle,
+            lineKeyMaps );
         Dictionary<string, int> overpaidByLineKey = await BuildOverpaidQuantityByLineKeyAsync( request.SupplierId );
         if (!overpaidByLineKey.TryGetValue( expenseLineKey, out int overpaidQty ) || overpaidQty <= 0)
         {
@@ -518,7 +519,7 @@ public class VatReportUnpaidLinkService
                 }
 
                 VatReportHelpers.ParseProductLineKey( entry.Key, out string paidProductId, out string paidVariantId );
-                if (!VatReportHelpers.ProductLinesCompatible(
+                if (!VatReportHelpers.ProductLineKeysEqual(
                         link.ShopifyProductId,
                         link.ShopifyVariantId,
                         paidProductId,
@@ -553,7 +554,7 @@ public class VatReportUnpaidLinkService
 
     private async Task<Dictionary<string, int>> LoadTotalPaidQuantityByLineKeyAsync()
     {
-        Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
+        QuantityLineKeyMaps lineKeyMaps = await _profit.GetQuantityLineKeyMapsAsync();
         var rows = await _db.VatReportExpenseProducts
             .AsNoTracking()
             .Where( p =>
@@ -567,6 +568,7 @@ public class VatReportUnpaidLinkService
             {
                 p.ShopifyProductId,
                 p.ShopifyVariantId,
+                p.ProductTitle,
                 p.Quantity
             } )
             .ToListAsync();
@@ -574,12 +576,12 @@ public class VatReportUnpaidLinkService
         Dictionary<string, int> paid = new( StringComparer.OrdinalIgnoreCase );
         foreach (var row in rows)
         {
-            string catalogProductId = ResolveCatalogProductId(
+            string lineKey = VatReportProfitService.ResolveQuantityLineKey(
                 row.ShopifyProductId,
                 row.ShopifyVariantId,
-                variantToProduct );
-            string variantId = ShopifyIds.NormalizeVariantId( row.ShopifyVariantId );
-            string lineKey = VatReportHelpers.BuildProductLineKey( catalogProductId, variantId );
+                string.Empty,
+                row.ProductTitle,
+                lineKeyMaps );
             if (string.IsNullOrWhiteSpace( lineKey )) continue;
             paid[lineKey] = paid.GetValueOrDefault( lineKey ) + row.Quantity;
         }
@@ -589,7 +591,7 @@ public class VatReportUnpaidLinkService
 
     private async Task<List<SupplierPaymentLineRow>> LoadSupplierPaymentLinesAsync( int supplierId )
     {
-        Dictionary<string, string> variantToProduct = await LoadVariantToProductMapAsync();
+        QuantityLineKeyMaps lineKeyMaps = await _profit.GetQuantityLineKeyMapsAsync();
         List<SupplierPaymentLineRow> rows = await _db.VatReportExpenseProducts
             .AsNoTracking()
             .Where( p =>
@@ -616,9 +618,15 @@ public class VatReportUnpaidLinkService
 
         foreach (SupplierPaymentLineRow row in rows)
         {
-            row.CatalogProductId = ResolveCatalogProductId( row.ProductId, row.VariantId, variantToProduct );
-            row.VariantId = ShopifyIds.NormalizeVariantId( row.VariantId );
-            row.LineKey = VatReportHelpers.BuildProductLineKey( row.CatalogProductId, row.VariantId );
+            row.LineKey = VatReportProfitService.ResolveQuantityLineKey(
+                row.ProductId,
+                row.VariantId,
+                string.Empty,
+                row.ProductTitle,
+                lineKeyMaps );
+            VatReportHelpers.ParseProductLineKey( row.LineKey, out string catalogProductId, out string variantId );
+            row.CatalogProductId = catalogProductId;
+            row.VariantId = variantId;
         }
 
         return rows;

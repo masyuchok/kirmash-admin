@@ -22,6 +22,7 @@ export type ProductOverpaidLine = {
   supplierName: string;
   shopifyProductId: string;
   shopifyVariantId: string;
+  shopifyVariantTitle: string;
   overpaidQuantity: number;
 };
 

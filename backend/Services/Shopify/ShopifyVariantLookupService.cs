@@ -33,6 +33,25 @@ public class ShopifyVariantLookupService
         return idByTitleByProduct;
     }
 
+    /// <summary>
+    /// Shopify products with at least one named variant (not "Default Title").
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetMultiVariantProductIdsCachedAsync()
+    {
+        (_, Dictionary<string, Dictionary<string, string>> idByTitleByProduct) =
+            await GetVariantCatalogMapsCachedAsync();
+        HashSet<string> productIds = new( StringComparer.OrdinalIgnoreCase );
+        foreach (KeyValuePair<string, Dictionary<string, string>> entry in idByTitleByProduct)
+        {
+            if (entry.Value.Count > 0)
+            {
+                productIds.Add( entry.Key );
+            }
+        }
+
+        return productIds;
+    }
+
     public static string ResolveVariantIdByProductTitle(
         string shopifyProductId,
         string variantTitle,

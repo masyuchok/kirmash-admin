@@ -614,6 +614,7 @@ export default function ProductsClient() {
                   const overpaidQty = getRowOverpaidQuantity(row.overpaidLines ?? [], {
                     shopifyProductId: row.shopifyProductId,
                     shopifyVariantId: row.shopifyVariantId,
+                    variantName: row.variantName,
                     supplierId: row.supplierId,
                     isVariantChild: row.isVariantChild,
                     rowSource: row.rowSource,

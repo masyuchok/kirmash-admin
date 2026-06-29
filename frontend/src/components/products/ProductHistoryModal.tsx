@@ -24,7 +24,7 @@ type ProductHistoryModalProps = {
 function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString('be-BY');
+  return date.toLocaleDateString('be-BY', { timeZone: 'Europe/Warsaw' });
 }
 
 function formatVariantSuffix(event: { variantTitle: string }): string {

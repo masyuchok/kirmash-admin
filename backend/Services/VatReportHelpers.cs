@@ -79,7 +79,39 @@ internal static class VatReportHelpers
             }
         }
 
+        foreach (string separator in new[] { " · ", " ·", "· " })
+        {
+            int index = title.LastIndexOf( separator, StringComparison.Ordinal );
+            if (index < 0)
+            {
+                continue;
+            }
+
+            string variantTitle = title[(index + separator.Length)..].Trim();
+            if (LooksLikePinVariantSuffix( variantTitle ))
+            {
+                return variantTitle;
+            }
+        }
+
         return string.Empty;
+    }
+
+    private static bool LooksLikePinVariantSuffix( string suffix )
+    {
+        if (string.IsNullOrWhiteSpace( suffix ) || suffix.Length > 50)
+        {
+            return false;
+        }
+
+        if (suffix.Contains( '.', StringComparison.Ordinal ) ||
+            suffix.Contains( "частка", StringComparison.OrdinalIgnoreCase ) ||
+            suffix.Contains( "том", StringComparison.OrdinalIgnoreCase ))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     public static void ParseProductLineKey( string lineKey, out string productId, out string variantId )
@@ -264,5 +296,33 @@ internal static class VatReportHelpers
         string clippedAddress = address[..Math.Min( address.Length, available )];
         encoded = $"{order}{sep}{clippedName}{sep}{clippedAddress}";
         return encoded.Length <= maxLen ? encoded : order[..Math.Min( order.Length, maxLen )];
+    }
+
+    public static (int Year, int Month) ResolveSaleCalendarPeriod( DateTime dateUtc )
+    {
+        DateTime utc = DateTime.SpecifyKind( dateUtc, DateTimeKind.Utc );
+        DateTime local = TimeZoneInfo.ConvertTimeFromUtc( utc, GetBusinessTimeZone() );
+        return (local.Year, local.Month);
+    }
+
+    public static DateTime ResolveCashSaleDateUtc( int periodYear, int periodMonth )
+    {
+        int lastDay = DateTime.DaysInMonth( periodYear, periodMonth );
+        // End of the report month in business time so FIFO sorts after same-day payments
+        // and the date does not roll into the next month when displayed in Europe/Warsaw.
+        DateTime localEnd = new DateTime( periodYear, periodMonth, lastDay, 23, 59, 59, DateTimeKind.Unspecified );
+        return TimeZoneInfo.ConvertTimeToUtc( localEnd, GetBusinessTimeZone() );
+    }
+
+    private static TimeZoneInfo GetBusinessTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById( "Europe/Warsaw" );
+        }
+        catch
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById( "Central European Standard Time" );
+        }
     }
 }

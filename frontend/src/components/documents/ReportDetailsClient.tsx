@@ -1,7 +1,8 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import OverpaidExpenseProductSearchSelect from '@/components/ui/OverpaidExpenseProductSearchSelect';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import {
   createVatReportCashSale,
@@ -15,11 +16,13 @@ import {
   downloadVatReportRowInvoice,
   fetchVatReportCombinedDetails,
   fetchVatReportDetails,
+  fetchVatReportPeriods,
   fetchVatReports,
   fetchVatReportSourceOrders,
   fetchUnpaidLinkOptions,
   linkUnpaidProduct,
   regenerateVatReport,
+  setVatReportLocked,
   moveVatReportRowToForeign,
   updateVatReportExpense,
   uploadVatReportExpenseInvoice,
@@ -43,17 +46,22 @@ import type {
 } from '@/types/report-details';
 import type { ProductVariant, ProductWithSuppliers } from '@/types/product';
 import type { Supplier } from '@/types/supplier';
+import type { VatReportPeriod } from '@/types/report';
 import { FiRefreshCw } from 'react-icons/fi';
 import { FiChevronDown } from 'react-icons/fi';
 import {
   FiArrowLeft,
+  FiChevronLeft,
+  FiChevronRight,
   FiCornerUpRight,
   FiDownload,
   FiEdit2,
   FiEye,
+  FiLock,
   FiPlus,
   FiPrinter,
   FiTrash2,
+  FiUnlock,
   FiUpload,
   FiX,
 } from 'react-icons/fi';
@@ -66,7 +74,7 @@ function formatAmount(value: number): string {
 function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  return date.toLocaleDateString('ru-RU');
+  return date.toLocaleDateString('ru-RU', { timeZone: 'Europe/Warsaw' });
 }
 
 function formatSupplierExpenseOptionLabel(option: {
@@ -362,6 +370,20 @@ function formatMonthYearBe(month: number, year: number): string {
   return `${name} ${year}`;
 }
 
+function shiftReportPeriod(month: number, year: number, deltaMonths: number): { month: number; year: number } {
+  const date = new Date(year, month - 1 + deltaMonths, 1);
+  return { month: date.getMonth() + 1, year: date.getFullYear() };
+}
+
+function findPrimaryReportId(
+  periods: VatReportPeriod[],
+  year: number,
+  month: number
+): number | null {
+  const match = periods.find((period) => period.periodYear === year && period.periodMonth === month);
+  return match?.primaryReportId ?? null;
+}
+
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -598,12 +620,23 @@ function buildExpensePickerLineTitle(line: {
   return variantName ? `${base} — ${variantName}` : base;
 }
 
+function extractPinVariantFromTitle(productTitle: string): string {
+  const trimmed = productTitle.trim();
+  const dotSep = trimmed.lastIndexOf(' · ');
+  if (dotSep < 0) return '';
+  const variant = trimmed.slice(dotSep + 3).trim();
+  return variant && variant !== 'Default Title' ? variant : '';
+}
+
 function resolveUnpaidVariantName(
-  item: Pick<VatReportUnpaidProductRow, 'shopifyProductId' | 'shopifyVariantId' | 'shopifyVariantTitle'>,
+  item: Pick<VatReportUnpaidProductRow, 'shopifyProductId' | 'shopifyVariantId' | 'shopifyVariantTitle' | 'productTitle'>,
   catalogProducts: ProductWithSuppliers[]
 ): string {
   const fromApi = item.shopifyVariantTitle?.trim() ?? '';
   if (fromApi && fromApi !== 'Default Title') return fromApi;
+
+  const fromTitle = extractPinVariantFromTitle(item.productTitle);
+  if (fromTitle) return fromTitle;
 
   const variantId = item.shopifyVariantId?.trim() ?? '';
   if (!variantId) return '';
@@ -911,6 +944,62 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   >({});
 
   const loadCombinedDetails = (baseReportId: number) => fetchVatReportCombinedDetails(baseReportId);
+  const [reportPeriods, setReportPeriods] = useState<VatReportPeriod[]>([]);
+  const [lockingReport, setLockingReport] = useState(false);
+
+  const handleToggleLock = useCallback(async () => {
+    if (!data || lockingReport) return;
+
+    const nextLocked = !data.isLocked;
+    setLockingReport(true);
+    setError(null);
+    try {
+      await setVatReportLocked(reportId, nextLocked);
+      setData((prev) => (prev ? { ...prev, isLocked: nextLocked } : prev));
+      setReportPeriods((prev) =>
+        prev.map((period) =>
+          period.periodYear === data.periodYear && period.periodMonth === data.periodMonth
+            ? {
+                ...period,
+                isLocked: nextLocked,
+                reports: period.reports.map((report) => ({ ...report, isLocked: nextLocked })),
+              }
+            : period
+        )
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка змены блакавання');
+    } finally {
+      setLockingReport(false);
+    }
+  }, [data, lockingReport, reportId]);
+
+  const adjacentReportIds = useMemo(() => {
+    if (!data) {
+      return { prev: null as number | null, next: null as number | null };
+    }
+
+    const previous = shiftReportPeriod(data.periodMonth, data.periodYear, -1);
+    const next = shiftReportPeriod(data.periodMonth, data.periodYear, 1);
+    return {
+      prev: findPrimaryReportId(reportPeriods, previous.year, previous.month),
+      next: findPrimaryReportId(reportPeriods, next.year, next.month),
+    };
+  }, [data, reportPeriods]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchVatReportPeriods()
+      .then((rows) => {
+        if (!cancelled) setReportPeriods(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setReportPeriods([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const monthYearTitle = data ? formatMonthYearBe(data.periodMonth, data.periodYear) : 'Справаздача';
@@ -924,12 +1013,34 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
         iconOnly: true,
         position: 'left',
       },
+      {
+        label: 'Папярэдні месяц',
+        icon: <FiChevronLeft />,
+        onClick: adjacentReportIds.prev
+          ? () => router.push(`/documents/reports/${adjacentReportIds.prev}`)
+          : undefined,
+        variant: 'secondary',
+        iconOnly: true,
+        position: 'left',
+        disabled: !adjacentReportIds.prev,
+      },
+      {
+        label: 'Наступны месяц',
+        icon: <FiChevronRight />,
+        onClick: adjacentReportIds.next
+          ? () => router.push(`/documents/reports/${adjacentReportIds.next}`)
+          : undefined,
+        variant: 'secondary',
+        iconOnly: true,
+        position: 'left',
+        disabled: !adjacentReportIds.next,
+      },
     ]);
     return () => {
       setTopbarButtons([]);
       setTopbarPage(null);
     };
-  }, [data, router, setTopbarButtons, setTopbarPage]);
+  }, [adjacentReportIds.next, adjacentReportIds.prev, data, router, setTopbarButtons, setTopbarPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1183,6 +1294,14 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     return expandedRow.unpaidProductRows ?? [];
   }, [expandedRow]);
 
+  const unpaidCatalogKey = useMemo(
+    () =>
+      visibleUnpaidRows
+        .map((row) => `${row.shopifyProductId}:${row.shopifyVariantId ?? ''}`)
+        .join('|'),
+    [visibleUnpaidRows]
+  );
+
   useEffect(() => {
     if (visibleUnpaidRows.length === 0) return;
     let cancelled = false;
@@ -1196,7 +1315,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     return () => {
       cancelled = true;
     };
-  }, [visibleUnpaidRows.length]);
+  }, [unpaidCatalogKey, visibleUnpaidRows.length]);
 
   const expenseVatForTotal = useMemo(() => {
     const expenseRow = data?.rows.find((r) => r.type === 'expense');
@@ -2510,13 +2629,50 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   if (!data) return null;
 
   const isLocked = data.isLocked;
-  const lockedTitle = 'Справаздача заблакавана. Разблакуйце ў спісе справаздач.';
+  const lockedTitle = 'Справаздача заблакавана.';
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
-      {isLocked && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Перыяд заблакаваны — змяненні, выдаленне і перагенерацыя адключаны.
+      {isLocked ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 sm:gap-4">
+          <div
+            className="flex size-10 shrink-0 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-amber-800"
+            aria-hidden
+          >
+            <FiLock className="size-5" />
+          </div>
+          <p className="min-w-0 flex-1 text-sm text-amber-900">
+            Перыяд заблакаваны — змяненні, выдаленне і перагенерацыя адключаны.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleToggleLock()}
+            disabled={lockingReport}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-amber-300 bg-white px-3.5 py-2 text-sm font-medium text-amber-900 shadow-sm transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {lockingReport ? (
+              <span className="size-4 animate-spin rounded-full border-2 border-amber-200 border-t-amber-800" />
+            ) : (
+              <FiUnlock className="size-4" aria-hidden />
+            )}
+            Разблакаваць
+          </button>
+        </div>
+      ) : (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void handleToggleLock()}
+            disabled={lockingReport}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {lockingReport ? (
+              <span className="size-4 animate-spin rounded-full border-2 border-gray-200 border-t-gray-700" />
+            ) : (
+              <FiLock className="size-4" aria-hidden />
+            )}
+            Заблакаваць перыяд
+          </button>
         </div>
       )}
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -4669,31 +4825,12 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       </span>
                     </label>
                     {unpaidLinkMode === 'replace' && (
-                      <select
+                      <OverpaidExpenseProductSearchSelect
+                        options={unpaidLinkOptions.overpaidProducts}
                         value={selectedOverpaidProductId}
-                        onChange={(e) => setSelectedOverpaidProductId(e.target.value)}
-                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                      >
-                        <option value="">Выберыце радок фактуры</option>
-                        {unpaidLinkOptions.overpaidProducts.map((option) => {
-                          const variantName = option.shopifyVariantTitle?.trim() ?? '';
-                          const productTitle = variantName
-                            ? `${option.productTitle} — ${variantName}`
-                            : option.productTitle;
-                          const label = [
-                            formatDate(option.expenseDateUtc),
-                            option.invoiceNumber || option.comment || `Фактура #${option.expenseId}`,
-                            productTitle,
-                            `×${option.quantity}`,
-                            `(пераплата ${option.overpaidQuantity})`,
-                          ].join(' · ');
-                          return (
-                            <option key={option.expenseProductId} value={String(option.expenseProductId)}>
-                              {label}
-                            </option>
-                          );
-                        })}
-                      </select>
+                        onChange={setSelectedOverpaidProductId}
+                        formatDate={formatDate}
+                      />
                     )}
                     {unpaidLinkOptions.overpaidProducts.length === 0 && (
                       <p className="text-xs text-gray-500">Пераплачаных тавараў у гэтага пастаўшчыка няма.</p>

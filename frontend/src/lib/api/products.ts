@@ -91,6 +91,7 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
             supplierName: readString(o.supplierName ?? o.SupplierName),
             shopifyProductId: readString(o.shopifyProductId ?? o.ShopifyProductId),
             shopifyVariantId: readString(o.shopifyVariantId ?? o.ShopifyVariantId),
+            shopifyVariantTitle: readString(o.shopifyVariantTitle ?? o.ShopifyVariantTitle),
             overpaidQuantity: readInt(o.overpaidQuantity ?? o.OverpaidQuantity),
           };
         })
