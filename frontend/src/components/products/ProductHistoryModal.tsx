@@ -54,6 +54,13 @@ function SaleSourceLabel({ sale }: { sale: ProductHistorySaleEvent }) {
   if (sale.source === 'cash') {
     return <span className="text-gray-600">Гатоўка</span>;
   }
+  if (sale.source === 'shopify') {
+    return sale.orderNumber.trim() ? (
+      <span className="text-gray-600">Shopify · Заказ {sale.orderNumber}</span>
+    ) : (
+      <span className="text-gray-600">Shopify</span>
+    );
+  }
   if (sale.orderNumber.trim()) {
     return <span className="text-gray-600">Заказ {sale.orderNumber}</span>;
   }

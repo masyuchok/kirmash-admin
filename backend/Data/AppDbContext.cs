@@ -23,6 +23,7 @@ namespace backend.Data
         public DbSet<ExpenseInvoiceType> ExpenseInvoiceTypes { get; set; } = default!;
         public DbSet<InventoryProductSale> InventoryProductSales { get; set; } = default!;
         public DbSet<InventorySalesSyncState> InventorySalesSyncStates { get; set; } = default!;
+        public DbSet<SupplierInventoryPriceOverride> SupplierInventoryPriceOverrides { get; set; } = default!;
         public DbSet<FinancePerson> FinancePersons { get; set; } = default!;
         public DbSet<FinanceMovement> FinanceMovements { get; set; } = default!;
         public DbSet<FinanceRecurringExpense> FinanceRecurringExpenses { get; set; } = default!;
@@ -322,9 +323,16 @@ namespace backend.Data
                 entity.Property( x => x.ShopifyProductId )
                     .IsRequired()
                     .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.PeriodYear )
+                    .IsRequired();
+                entity.Property( x => x.PeriodMonth )
+                    .IsRequired();
                 entity.Property( x => x.UpdatedAtUtc )
                     .IsRequired();
-                entity.HasIndex( x => x.ShopifyProductId )
+                entity.HasIndex( x => new { x.PeriodYear, x.PeriodMonth, x.ShopifyProductId, x.ShopifyVariantId } )
                     .IsUnique();
             } );
 
@@ -334,6 +342,28 @@ namespace backend.Data
                     .IsRequired();
                 entity.Property( x => x.UpdatedAtUtc )
                     .IsRequired();
+            } );
+
+            modelBuilder.Entity<SupplierInventoryPriceOverride>( entity =>
+            {
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.NetUnitPrice )
+                    .HasPrecision( 18, 2 );
+                entity.Property( x => x.VatRatePercent )
+                    .HasPrecision( 5, 2 );
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+                entity.HasIndex( x => new { x.SupplierId, x.ShopifyProductId, x.ShopifyVariantId } )
+                    .IsUnique();
+                entity.HasOne( x => x.Supplier )
+                    .WithMany()
+                    .HasForeignKey( x => x.SupplierId )
+                    .OnDelete( DeleteBehavior.Cascade );
             } );
 
             modelBuilder.Entity<FinancePerson>( entity =>

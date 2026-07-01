@@ -94,7 +94,136 @@ internal static class VatReportHelpers
             }
         }
 
+        int commaIndex = title.LastIndexOf( ',' );
+        if (commaIndex > 0 && commaIndex < title.Length - 1 &&
+            title.Count( ch => ch == ',' ) == 1)
+        {
+            string variantTitle = title[(commaIndex + 1)..].Trim();
+            if (LooksLikeCommaSeparatedVariantSuffix( variantTitle ))
+            {
+                return variantTitle;
+            }
+        }
+
         return string.Empty;
+    }
+
+    /// <summary>
+    /// Books and other products may appear under different Shopify product IDs over time.
+    /// Match titles loosely: exact, prefix, or the segment before the first comma.
+    /// </summary>
+    public static string NormalizeProductTitleForMatch( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return string.Empty;
+        }
+
+        string title = raw.Trim()
+            .Replace( '«', '"' )
+            .Replace( '»', '"' )
+            .Replace( '„', '"' )
+            .Replace( '“', '"' )
+            .Replace( '”', '"' );
+        return string.Join(
+            ' ',
+            title.Split( (char[]?)null, StringSplitOptions.RemoveEmptyEntries ) );
+    }
+
+    public static string ExtractProductTitleSearchToken( string? productTitle )
+    {
+        string normalized = NormalizeProductTitleForMatch( productTitle );
+        if (string.IsNullOrWhiteSpace( normalized ))
+        {
+            return string.Empty;
+        }
+
+        int commaIndex = normalized.IndexOf( ',' );
+        string primary = commaIndex > 0 ? normalized[..commaIndex].Trim() : normalized;
+        if (primary.Length >= 6)
+        {
+            return primary;
+        }
+
+        return normalized.Length >= 6 ? normalized : string.Empty;
+    }
+
+    public static bool ProductTitlesMatch( string? leftRaw, string? rightRaw )
+    {
+        string left = NormalizeProductTitleForMatch( leftRaw );
+        string right = NormalizeProductTitleForMatch( rightRaw );
+        if (string.IsNullOrWhiteSpace( left ) || string.IsNullOrWhiteSpace( right ))
+        {
+            return false;
+        }
+
+        if (string.Equals( left, right, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (left.Length >= 8 && right.StartsWith( left, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (right.Length >= 8 && left.StartsWith( right, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        static string PrimarySegment( string title )
+        {
+            int commaIndex = title.IndexOf( ',' );
+            return commaIndex > 0 ? title[..commaIndex].Trim() : title;
+        }
+
+        string leftPrimary = PrimarySegment( left );
+        string rightPrimary = PrimarySegment( right );
+        if (leftPrimary.Length >= 6 &&
+            string.Equals( leftPrimary, rightPrimary, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (leftPrimary.Length >= 6 && rightPrimary.StartsWith( leftPrimary, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        return rightPrimary.Length >= 6 &&
+               leftPrimary.StartsWith( rightPrimary, StringComparison.OrdinalIgnoreCase );
+    }
+
+    /// <summary>
+    /// VAT report order lines may store only a fragment of the catalog title without a product id.
+    /// </summary>
+    public static bool ProductTitleContainedIn( string? fragmentRaw, string? fullRaw )
+    {
+        string fragment = NormalizeProductTitleForMatch( fragmentRaw );
+        string full = NormalizeProductTitleForMatch( fullRaw );
+        if (fragment.Length < 8 || full.Length < fragment.Length)
+        {
+            return false;
+        }
+
+        return full.Contains( fragment, StringComparison.OrdinalIgnoreCase );
+    }
+
+    private static bool LooksLikeCommaSeparatedVariantSuffix( string suffix )
+    {
+        if (string.IsNullOrWhiteSpace( suffix ) || suffix.Length > 80)
+        {
+            return false;
+        }
+
+        if (suffix.Contains( "частка", StringComparison.OrdinalIgnoreCase ) ||
+            suffix.Contains( "том", StringComparison.OrdinalIgnoreCase ))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool LooksLikePinVariantSuffix( string suffix )
@@ -112,6 +241,92 @@ internal static class VatReportHelpers
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Pin variants are often "style / color". Invoice text may use a different grammatical
+    /// form than Shopify (e.g. Радкова vs Радковай) while still referring to the same variant.
+    /// </summary>
+    public static bool VariantTitlesEquivalentForPaymentMatch( string? leftRaw, string? rightRaw )
+    {
+        string left = (leftRaw ?? string.Empty).Trim();
+        string right = (rightRaw ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( left ) || string.IsNullOrWhiteSpace( right ))
+        {
+            return false;
+        }
+
+        if (string.Equals( left, right, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (!TryParsePinStyleColorVariant( left, out string leftStyle, out string leftColor ) ||
+            !TryParsePinStyleColorVariant( right, out string rightStyle, out string rightColor ))
+        {
+            return string.Equals(
+                NormalizeLooseVariantLabel( left ),
+                NormalizeLooseVariantLabel( right ),
+                StringComparison.OrdinalIgnoreCase );
+        }
+
+        return string.Equals( leftColor, rightColor, StringComparison.OrdinalIgnoreCase ) &&
+               PinVariantStyleKeysEquivalent( leftStyle, rightStyle );
+    }
+
+    private static string NormalizeLooseVariantLabel( string raw )
+    {
+        string s = (raw ?? string.Empty).Trim().ToLowerInvariant();
+        return string.Join(
+            ' ',
+            s.Split( ' ', StringSplitOptions.RemoveEmptyEntries ) );
+    }
+
+    private static bool TryParsePinStyleColorVariant( string title, out string style, out string color )
+    {
+        style = string.Empty;
+        color = string.Empty;
+        int slash = title.IndexOf( '/', StringComparison.Ordinal );
+        if (slash <= 0 || slash >= title.Length - 1)
+        {
+            return false;
+        }
+
+        style = title[..slash].Trim();
+        color = title[(slash + 1)..].Trim();
+        if (string.IsNullOrWhiteSpace( style ) || string.IsNullOrWhiteSpace( color ))
+        {
+            return false;
+        }
+
+        if (!LooksLikePinVariantSuffix( title ))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool PinVariantStyleKeysEquivalent( string leftStyle, string rightStyle ) =>
+        string.Equals(
+            CanonicalPinStyleKey( leftStyle ),
+            CanonicalPinStyleKey( rightStyle ),
+            StringComparison.OrdinalIgnoreCase );
+
+    private static string CanonicalPinStyleKey( string style )
+    {
+        string s = style.Trim().ToLowerInvariant();
+        if (s.StartsWith( "радков", StringComparison.Ordinal ))
+        {
+            return "радков";
+        }
+
+        if (s.StartsWith( "загалоўн", StringComparison.Ordinal ))
+        {
+            return "загалоўн";
+        }
+
+        return s;
     }
 
     public static void ParseProductLineKey( string lineKey, out string productId, out string variantId )
@@ -194,6 +409,30 @@ internal static class VatReportHelpers
     {
         string prefix = type == VatReportType.Poland ? "Польшча" : "Замежжа";
         return $"{prefix} {year:D4}-{month:D2}";
+    }
+
+    public static string NormalizeOrderNumber( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return string.Empty;
+        }
+
+        string trimmed = raw.Trim();
+        if (trimmed.StartsWith( "#", StringComparison.Ordinal ))
+        {
+            trimmed = trimmed[1..].Trim();
+        }
+
+        return trimmed;
+    }
+
+    public static bool OrderNumbersMatch( string? left, string? right )
+    {
+        string leftBase = NormalizeOrderNumber( ParseOrderNumberAndContact( left ?? string.Empty ).orderNumber );
+        string rightBase = NormalizeOrderNumber( ParseOrderNumberAndContact( right ?? string.Empty ).orderNumber );
+        return !string.IsNullOrWhiteSpace( leftBase ) &&
+               string.Equals( leftBase, rightBase, StringComparison.OrdinalIgnoreCase );
     }
 
     public static string EncodeOrderNumberWithContact(

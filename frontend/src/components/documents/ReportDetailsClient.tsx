@@ -1537,6 +1537,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       grossAmount: Number(newRow.grossAmount) || 0,
       vatAmount: Number(newRow.vatAmount) || 0,
       netAmount: Number(newRow.netAmount) || 0,
+      shopifyOrderId:
+        addMode === 'select' && selectedSourceIndex
+          ? sourceOrderOptions[Number(selectedSourceIndex)]?.shopifyOrderId?.trim() || undefined
+          : undefined,
     };
     if (!payload.orderNumber) {
       setAddRowError('Нумар замовы абавязковы.');

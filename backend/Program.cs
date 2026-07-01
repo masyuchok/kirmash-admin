@@ -65,6 +65,7 @@ builder.Services.AddHttpClient( "Shopify" );
 builder.Services.AddScoped<JwtService>( );
 builder.Services.AddScoped<SupplierService>( );
 builder.Services.AddScoped<SupplierInventoryService>( );
+builder.Services.AddScoped<ProductLedgerService>( );
 builder.Services.AddScoped<InventorySalesCacheService>( );
 builder.Services.AddScoped<SupplyService>();
 builder.Services.AddScoped<ProductService>();

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using backend.Data;
@@ -11,9 +12,11 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260630111641_AddInventoryProductSaleShopifyVariantId")]
+    partial class AddInventoryProductSaleShopifyVariantId
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -204,12 +207,6 @@ namespace backend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<int>("PeriodMonth")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("PeriodYear")
-                        .HasColumnType("integer");
-
                     b.Property<string>("ShopifyProductId")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -228,7 +225,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PeriodYear", "PeriodMonth", "ShopifyProductId", "ShopifyVariantId")
+                    b.HasIndex("ShopifyProductId", "ShopifyVariantId")
                         .IsUnique();
 
                     b.ToTable("InventoryProductSales");
@@ -373,46 +370,6 @@ namespace backend.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Suppliers");
-                });
-
-            modelBuilder.Entity("backend.Models.SupplierInventoryPriceOverride", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("NetUnitPrice")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<string>("ShopifyProductId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("ShopifyVariantId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("SupplierId")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<decimal>("VatRatePercent")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("numeric(5,2)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("SupplierId", "ShopifyProductId", "ShopifyVariantId")
-                        .IsUnique();
-
-                    b.ToTable("SupplierInventoryPriceOverrides");
                 });
 
             modelBuilder.Entity("backend.Models.Supply", b =>
@@ -987,17 +944,6 @@ namespace backend.Migrations
                     b.HasOne("backend.Models.Supplier", null)
                         .WithMany("Products")
                         .HasForeignKey("SupplierId");
-                });
-
-            modelBuilder.Entity("backend.Models.SupplierInventoryPriceOverride", b =>
-                {
-                    b.HasOne("backend.Models.Supplier", "Supplier")
-                        .WithMany()
-                        .HasForeignKey("SupplierId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Supplier");
                 });
 
             modelBuilder.Entity("backend.Models.Supply", b =>

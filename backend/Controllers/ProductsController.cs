@@ -26,20 +26,27 @@ namespace backend.Controllers
             try
             {
                 List<ProductWithSuppliersListItem> products = await _service.GetProductsWithSuppliersAsync();
-                List<ProductOverpaidLineItem> overpaidLines = await _unpaidLink.GetAllOverpaidLinesAsync();
-                Dictionary<string, List<ProductOverpaidLineItem>> overpaidByProductId = overpaidLines
-                    .GroupBy( line => ShopifyIds.NormalizeProductId( line.ShopifyProductId ) )
-                    .ToDictionary(
-                        g => g.Key,
-                        g => g.ToList(),
-                        StringComparer.OrdinalIgnoreCase );
-
-                foreach (ProductWithSuppliersListItem product in products)
+                try
                 {
-                    if (overpaidByProductId.TryGetValue( product.ShopifyProductId, out List<ProductOverpaidLineItem>? lines ))
+                    List<ProductOverpaidLineItem> overpaidLines = await _unpaidLink.GetAllOverpaidLinesAsync();
+                    Dictionary<string, List<ProductOverpaidLineItem>> overpaidByProductId = overpaidLines
+                        .GroupBy( line => ShopifyIds.NormalizeProductId( line.ShopifyProductId ) )
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.ToList(),
+                            StringComparer.OrdinalIgnoreCase );
+
+                    foreach (ProductWithSuppliersListItem product in products)
                     {
-                        product.OverpaidLines = lines;
+                        if (overpaidByProductId.TryGetValue( product.ShopifyProductId, out List<ProductOverpaidLineItem>? lines ))
+                        {
+                            product.OverpaidLines = lines;
+                        }
                     }
+                }
+                catch
+                {
+                    // Overpaid badges are optional; catalog still loads.
                 }
 
                 return Ok( products );

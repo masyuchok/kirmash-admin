@@ -15,19 +15,22 @@ public class VatReportMutationService
     private readonly ShopifyInventoryService _shopifyInventory;
     private readonly VatReportLockService _locks;
     private readonly VatReportFinanceSyncService _financeSync;
+    private readonly VatReportGenerationService _generation;
 
     public VatReportMutationService(
         AppDbContext db,
         IHttpContextAccessor httpContextAccessor,
         ShopifyInventoryService shopifyInventory,
         VatReportLockService locks,
-        VatReportFinanceSyncService financeSync )
+        VatReportFinanceSyncService financeSync,
+        VatReportGenerationService generation )
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _shopifyInventory = shopifyInventory;
         _locks = locks;
         _financeSync = financeSync;
+        _generation = generation;
     }
 
     public async Task MoveRowToForeignAsync( int rowId, string deliveryName, string deliveryAddress )
@@ -376,6 +379,28 @@ public class VatReportMutationService
             if (report is null)
             {
                 throw new InvalidOperationException( "Справаздача не знойдзена." );
+            }
+
+            if (!string.IsNullOrWhiteSpace( request.ShopifyOrderId ))
+            {
+                VatReportRow? sourceRow = await _generation.TryResolveRowFromShopifyAsync(
+                    report.PeriodYear,
+                    report.PeriodMonth,
+                    report.Type,
+                    request.ShopifyOrderId.Trim(),
+                    request.OrderNumber.Trim(),
+                    request.VatRatePercent );
+                if (sourceRow is null || sourceRow.Items.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Не ўдалося знайсці пазіцыі замовы ў Shopify для гэтага перыяду." );
+                }
+
+                sourceRow.VatReportId = report.Id;
+                _db.VatReportRows.Add( sourceRow );
+                await _db.SaveChangesAsync();
+                await RecalculateReportTotalsAsync( report.Id );
+                return;
             }
 
             VatReportRow row = new()

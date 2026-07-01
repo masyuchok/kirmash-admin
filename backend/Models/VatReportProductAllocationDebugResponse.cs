@@ -4,6 +4,8 @@ public class VatReportProductAllocationDebugResponse
 {
     public string SearchTitle { get; set; } = string.Empty;
     public List<VatReportAllocationDebugSaleRow> Sales { get; set; } = new();
+    public List<VatReportAllocationDebugSaleRow> RelatedSalesByProductId { get; set; } = new();
+    public List<VatReportAllocationDebugManualPoolRow> ManualAllocations { get; set; } = new();
     public List<VatReportAllocationDebugPaymentRow> Payments { get; set; } = new();
     public List<VatReportAllocationDebugStepRow> Steps { get; set; } = new();
 }
@@ -40,4 +42,15 @@ public class VatReportAllocationDebugStepRow
     public int Order { get; set; }
     public string Event { get; set; } = string.Empty;
     public string Details { get; set; } = string.Empty;
+}
+
+public class VatReportAllocationDebugManualPoolRow
+{
+    public int SalePeriodYear { get; set; }
+    public int SalePeriodMonth { get; set; }
+    public string ShopifyProductId { get; set; } = string.Empty;
+    public string ShopifyVariantId { get; set; } = string.Empty;
+    public int SupplierId { get; set; }
+    public int VatReportExpenseId { get; set; }
+    public int Quantity { get; set; }
 }

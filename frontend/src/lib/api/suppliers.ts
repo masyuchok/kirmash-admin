@@ -25,8 +25,15 @@ function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
     supplierId: readInt(row.supplierId ?? row.SupplierId),
     supplierName: String(row.supplierName ?? row.SupplierName ?? ''),
     shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
+    shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
+    variantTitle: String(row.variantTitle ?? row.VariantTitle ?? ''),
     productName: String(row.productName ?? row.ProductName ?? ''),
     supplierPrice: readNumber(row.supplierPrice ?? row.SupplierPrice),
+    vatRatePercent: readNumber(row.vatRatePercent ?? row.VatRatePercent) || 23,
+    grossUnitPrice: readNumber(row.grossUnitPrice ?? row.GrossUnitPrice),
+    supplierIsVatPayer: Boolean(row.supplierIsVatPayer ?? row.SupplierIsVatPayer),
+    hasPriceOverride: Boolean(row.hasPriceOverride ?? row.HasPriceOverride),
+    receivedQuantity: readInt(row.receivedQuantity ?? row.ReceivedQuantity),
     quantityInStock: readInt(row.quantityInStock ?? row.QuantityInStock),
     soldQuantity: readInt(row.soldQuantity ?? row.SoldQuantity),
     paidQuantity: readInt(row.paidQuantity ?? row.PaidQuantity),
@@ -67,6 +74,33 @@ export async function fetchSupplierInventory(
       ? String(payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
       : null,
   };
+}
+
+export async function updateSupplierInventoryPricing(payload: {
+  supplierId: number;
+  shopifyProductId: string;
+  shopifyVariantId: string;
+  netUnitPrice: number;
+  vatRatePercent: number;
+}): Promise<SupplierInventoryRow> {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers/inventory/pricing`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({
+      supplierId: payload.supplierId,
+      shopifyProductId: payload.shopifyProductId,
+      shopifyVariantId: payload.shopifyVariantId,
+      netUnitPrice: payload.netUnitPrice,
+      vatRatePercent: payload.vatRatePercent,
+    }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося захаваць цану');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  return mapInventoryRow(data);
 }
 
 export async function refreshSupplierInventorySales(): Promise<string | null> {

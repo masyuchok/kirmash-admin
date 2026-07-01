@@ -47,17 +47,49 @@ public class ShopifyOrderFetchService
 
     public async Task<Dictionary<string, int>> GetSoldQuantitiesByProductFromShopifyAsync()
     {
+        Dictionary<(string ProductId, string VariantId), int> byVariant =
+            await GetSoldQuantitiesByProductVariantFromShopifyAsync();
+        Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+        foreach (KeyValuePair<(string ProductId, string VariantId), int> entry in byVariant)
+        {
+            soldByProduct[entry.Key.ProductId] = soldByProduct.GetValueOrDefault( entry.Key.ProductId ) + entry.Value;
+        }
+
+        return soldByProduct;
+    }
+
+    public async Task<Dictionary<(string ProductId, string VariantId), int>> GetSoldQuantitiesByProductVariantForMonthAsync(
+        int year,
+        int month )
+    {
+        Dictionary<(string ProductId, string VariantId), int> soldByLine =
+            new( ProductVariantKeyComparer.Instance );
+
+        (string shop, string accessToken) = GetShopifyCredentials();
+        List<ShopifyOrderDto> poland = await FetchOrdersWithClientAsync(
+            shop, accessToken, year, month, ShopifyOrderScope.Poland );
+        List<ShopifyOrderDto> foreign = await FetchOrdersWithClientAsync(
+            shop, accessToken, year, month, ShopifyOrderScope.Foreign );
+        AddOrderItemsToSoldVariantMap( poland, soldByLine );
+        AddOrderItemsToSoldVariantMap( foreign, soldByLine );
+
+        return soldByLine;
+    }
+
+    public async Task<Dictionary<(string ProductId, string VariantId), int>> GetSoldQuantitiesByProductVariantFromShopifyAsync()
+    {
         DateOnly? earliestSupplyDate = await _db.Supplies
             .AsNoTracking()
             .MinAsync( s => (DateOnly?)s.Date );
         if (!earliestSupplyDate.HasValue)
         {
-            return new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase );
+            return new Dictionary<(string ProductId, string VariantId), int>( ProductVariantKeyComparer.Instance );
         }
 
         DateOnly startMonth = new( earliestSupplyDate.Value.Year, earliestSupplyDate.Value.Month, 1 );
         DateOnly endMonth = DateOnly.FromDateTime( DateTime.UtcNow );
-        Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+        Dictionary<(string ProductId, string VariantId), int> soldByLine =
+            new( ProductVariantKeyComparer.Instance );
 
         (string shop, string accessToken) = GetShopifyCredentials();
 
@@ -67,11 +99,11 @@ public class ShopifyOrderFetchService
                 shop, accessToken, monthCursor.Year, monthCursor.Month, ShopifyOrderScope.Poland );
             List<ShopifyOrderDto> foreign = await FetchOrdersWithClientAsync(
                 shop, accessToken, monthCursor.Year, monthCursor.Month, ShopifyOrderScope.Foreign );
-            AddOrderItemsToSoldMap( poland, soldByProduct );
-            AddOrderItemsToSoldMap( foreign, soldByProduct );
+            AddOrderItemsToSoldVariantMap( poland, soldByLine );
+            AddOrderItemsToSoldVariantMap( foreign, soldByLine );
         }
 
-        return soldByProduct;
+        return soldByLine;
     }
 
     public async Task<Dictionary<string, int>> GetSoldQuantitiesFromShopifySinceAsync( DateTime sinceUtc )
@@ -84,7 +116,8 @@ public class ShopifyOrderFetchService
 
         DateOnly startMonth = DateOnly.FromDateTime( sinceUtc );
         DateOnly endMonth = DateOnly.FromDateTime( toUtc );
-        Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+        Dictionary<(string ProductId, string VariantId), int> soldByLine =
+            new( ProductVariantKeyComparer.Instance );
 
         (string shop, string accessToken) = GetShopifyCredentials();
 
@@ -96,8 +129,14 @@ public class ShopifyOrderFetchService
                 shop, accessToken, monthCursor.Year, monthCursor.Month, ShopifyOrderScope.Poland );
             List<ShopifyOrderDto> foreign = await FetchOrdersWithClientAsync(
                 shop, accessToken, monthCursor.Year, monthCursor.Month, ShopifyOrderScope.Foreign );
-            AddOrdersToSoldMapSince( poland, sinceUtc, soldByProduct );
-            AddOrdersToSoldMapSince( foreign, sinceUtc, soldByProduct );
+            AddOrdersToSoldVariantMapSince( poland, sinceUtc, soldByLine );
+            AddOrdersToSoldVariantMapSince( foreign, sinceUtc, soldByLine );
+        }
+
+        Dictionary<string, int> soldByProduct = new( StringComparer.OrdinalIgnoreCase );
+        foreach (KeyValuePair<(string ProductId, string VariantId), int> entry in soldByLine)
+        {
+            soldByProduct[entry.Key.ProductId] = soldByProduct.GetValueOrDefault( entry.Key.ProductId ) + entry.Value;
         }
 
         return soldByProduct;
@@ -184,10 +223,7 @@ public class ShopifyOrderFetchService
             return result;
         }
 
-        if (!ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
-        {
-            return result;
-        }
+        (string shop, string accessToken) = GetShopifyCredentials();
 
         const int batchSize = 50;
         for (int i = 0; i < ids.Count; i += batchSize)
@@ -195,8 +231,8 @@ public class ShopifyOrderFetchService
             List<string> batch = ids.Skip( i ).Take( batchSize ).ToList();
             string[] gids = batch.Select( id => $"gid://shopify/Order/{id}" ).ToArray();
             (bool success, JsonDocument? json, string? error) = await _graphql.TryExecuteAsync(
-                session.Shop,
-                session.AccessToken,
+                shop,
+                accessToken,
                 ShopifyGraphqlQueries.OrderLineItemNodes,
                 new { ids = gids }
             );
@@ -227,6 +263,17 @@ public class ShopifyOrderFetchService
                     string orderId = ShopifyIds.NormalizeOrderId( idEl.GetString() ?? string.Empty );
                     if (string.IsNullOrWhiteSpace( orderId ))
                     {
+                        continue;
+                    }
+
+                    if (ShouldExcludeOrderFromReports( node ))
+                    {
+                        result[orderId] = new ShopifyOrderDto
+                        {
+                            OrderId = orderId,
+                            CreatedAtUtc = DateTime.UtcNow,
+                            Items = []
+                        };
                         continue;
                     }
 
@@ -748,6 +795,36 @@ public class ShopifyOrderFetchService
         return ReadCountryCodeFromAddress( addressEl );
     }
 
+    private static void AddOrdersToSoldVariantMapSince(
+        List<ShopifyOrderDto> orders,
+        DateTime sinceUtc,
+        Dictionary<(string ProductId, string VariantId), int> soldByLine )
+    {
+        foreach (ShopifyOrderDto order in orders)
+        {
+            if (order.CreatedAtUtc <= sinceUtc) continue;
+            AddOrderItemsToSoldVariantMap( new List<ShopifyOrderDto> { order }, soldByLine );
+        }
+    }
+
+    private static void AddOrderItemsToSoldVariantMap(
+        List<ShopifyOrderDto> orders,
+        Dictionary<(string ProductId, string VariantId), int> soldByLine )
+    {
+        foreach (ShopifyOrderDto order in orders)
+        {
+            foreach (ShopifyLineItemDto item in order.Items)
+            {
+                if (item.Quantity <= 0) continue;
+                string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId ).Trim();
+                if (string.IsNullOrWhiteSpace( productId )) continue;
+                string variantId = ShopifyIds.NormalizeVariantId( item.ShopifyVariantId ).Trim();
+                (string ProductId, string VariantId) key = (productId, variantId);
+                soldByLine[key] = soldByLine.GetValueOrDefault( key ) + item.Quantity;
+            }
+        }
+    }
+
     private static void AddOrdersToSoldMapSince(
         List<ShopifyOrderDto> orders,
         DateTime sinceUtc,
@@ -905,4 +982,18 @@ public class ShopifyOrderFetchService
     }
 
     private static decimal Round2( decimal value ) => Math.Round( value, 2, MidpointRounding.AwayFromZero );
+}
+
+internal sealed class ProductVariantKeyComparer : IEqualityComparer<(string ProductId, string VariantId)>
+{
+    public static ProductVariantKeyComparer Instance { get; } = new();
+
+    public bool Equals( (string ProductId, string VariantId) x, (string ProductId, string VariantId) y ) =>
+        string.Equals( x.ProductId, y.ProductId, StringComparison.OrdinalIgnoreCase ) &&
+        string.Equals( x.VariantId, y.VariantId, StringComparison.OrdinalIgnoreCase );
+
+    public int GetHashCode( (string ProductId, string VariantId) obj ) =>
+        HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode( obj.ProductId ),
+            StringComparer.OrdinalIgnoreCase.GetHashCode( obj.VariantId ) );
 }

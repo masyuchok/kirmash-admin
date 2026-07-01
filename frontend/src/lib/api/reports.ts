@@ -593,13 +593,22 @@ export async function createVatReportRow(
     grossAmount: number;
     vatAmount: number;
     netAmount: number;
+    shopifyOrderId?: string;
   }
 ): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/rows`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: apiCredentials,
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      orderNumber: payload.orderNumber,
+      orderDateUtc: payload.orderDateUtc,
+      vatRatePercent: payload.vatRatePercent,
+      grossAmount: payload.grossAmount,
+      vatAmount: payload.vatAmount,
+      netAmount: payload.netAmount,
+      shopifyOrderId: payload.shopifyOrderId ?? null,
+    }),
   });
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося дадаць радок справаздачы');

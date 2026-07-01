@@ -10,15 +10,18 @@ public class VatReportQueryService
     private readonly AppDbContext _db;
     private readonly ShopifyOrderFetchService _shopifyOrders;
     private readonly VatReportProfitService _profitService;
+    private readonly VatReportGenerationService _generation;
 
     public VatReportQueryService(
         AppDbContext db,
         ShopifyOrderFetchService shopifyOrders,
-        VatReportProfitService profitService )
+        VatReportProfitService profitService,
+        VatReportGenerationService generation )
     {
         _db = db;
         _shopifyOrders = shopifyOrders;
         _profitService = profitService;
+        _generation = generation;
     }
 
     public async Task<List<VatReportListItem>> GetAllAsync()
@@ -261,6 +264,11 @@ public class VatReportQueryService
         if (header is null)
         {
             throw new InvalidOperationException( "Справаздача не знойдзена." );
+        }
+
+        if (!header.IsLocked)
+        {
+            await _generation.RepairRowsWithoutItemsAsync( id );
         }
 
         List<ReportRowData> reportRows = await LoadReportRowsAsync( id );

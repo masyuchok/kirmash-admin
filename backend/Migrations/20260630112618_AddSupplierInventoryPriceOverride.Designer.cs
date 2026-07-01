@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using backend.Data;
@@ -11,9 +12,11 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260630112618_AddSupplierInventoryPriceOverride")]
+    partial class AddSupplierInventoryPriceOverride
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -204,12 +207,6 @@ namespace backend.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<int>("PeriodMonth")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("PeriodYear")
-                        .HasColumnType("integer");
-
                     b.Property<string>("ShopifyProductId")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -228,7 +225,7 @@ namespace backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PeriodYear", "PeriodMonth", "ShopifyProductId", "ShopifyVariantId")
+                    b.HasIndex("ShopifyProductId", "ShopifyVariantId")
                         .IsUnique();
 
                     b.ToTable("InventoryProductSales");

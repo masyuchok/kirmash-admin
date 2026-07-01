@@ -78,6 +78,8 @@ public static class ShopifyGraphqlQueries
             ... on Order {
               id
               createdAt
+              cancelledAt
+              displayFinancialStatus
               lineItems(first: 250) {
                 nodes {
                   quantity

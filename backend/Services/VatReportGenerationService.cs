@@ -10,18 +10,18 @@ public class VatReportGenerationService
     private readonly AppDbContext _db;
     private readonly ShopifyOrderFetchService _shopifyOrders;
     private readonly VatReportLockService _locks;
-    private readonly VatReportFinanceSyncService _financeSync;
+    private readonly IServiceProvider _services;
 
     public VatReportGenerationService(
         AppDbContext db,
         ShopifyOrderFetchService shopifyOrders,
         VatReportLockService locks,
-        VatReportFinanceSyncService financeSync )
+        IServiceProvider services )
     {
         _db = db;
         _shopifyOrders = shopifyOrders;
         _locks = locks;
-        _financeSync = financeSync;
+        _services = services;
     }
 
     public async Task<VatReportListItem> GenerateAsync( int periodYear, int periodMonth, string reportType )
@@ -63,7 +63,7 @@ public class VatReportGenerationService
 
             _db.VatReports.Add( report );
             await _db.SaveChangesAsync();
-            await _financeSync.SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
+            await ResolveFinanceSync().SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
 
             return new VatReportListItem
             {
@@ -118,7 +118,7 @@ public class VatReportGenerationService
             report.Rows = rows;
 
             await _db.SaveChangesAsync();
-            await _financeSync.SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
+            await ResolveFinanceSync().SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
 
             return new VatReportListItem
             {
@@ -537,6 +537,189 @@ public class VatReportGenerationService
                     StringComparer.OrdinalIgnoreCase
                 );
         }
+
+    private static readonly TimeSpan GeneratedRowsCacheLifetime = TimeSpan.FromMinutes( 15 );
+    private static readonly Dictionary<(int Year, int Month, string Type), (DateTime CachedAtUtc, List<VatReportRow> Rows)> GeneratedRowsCache =
+        new();
+
+    public async Task<VatReportRow?> TryResolveRowFromShopifyAsync(
+        int periodYear,
+        int periodMonth,
+        string reportType,
+        string? shopifyOrderId,
+        string orderNumber,
+        decimal vatRatePercent )
+    {
+        foreach (string candidateType in GetReportTypeCandidates( reportType ))
+        {
+            VatReportRow? resolved = await TryResolveRowFromShopifyForTypeAsync(
+                periodYear,
+                periodMonth,
+                candidateType,
+                shopifyOrderId,
+                orderNumber,
+                vatRatePercent );
+            if (resolved is not null)
+            {
+                return resolved;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<VatReportRow?> TryResolveRowFromShopifyForTypeAsync(
+        int periodYear,
+        int periodMonth,
+        string reportType,
+        string? shopifyOrderId,
+        string orderNumber,
+        decimal vatRatePercent )
+    {
+        List<VatReportRow> generated = await GetGeneratedRowsCachedAsync( periodYear, periodMonth, reportType );
+        decimal normalizedRate = VatReportHelpers.Round2( vatRatePercent );
+        string normalizedOrderId = (shopifyOrderId ?? string.Empty).Trim();
+
+        return generated.FirstOrDefault( row =>
+            VatReportHelpers.Round2( row.VatRatePercent ) == normalizedRate &&
+            (
+                (!string.IsNullOrWhiteSpace( normalizedOrderId ) &&
+                 string.Equals( row.ShopifyOrderId, normalizedOrderId, StringComparison.OrdinalIgnoreCase )) ||
+                VatReportHelpers.OrderNumbersMatch( row.OrderNumber, orderNumber )
+            ) );
+    }
+
+    private static IEnumerable<string> GetReportTypeCandidates( string reportType )
+    {
+        string normalizedType = VatReportHelpers.NormalizeReportType( reportType );
+        yield return normalizedType;
+
+        string siblingType = string.Equals(
+            normalizedType,
+            VatReportType.Poland,
+            StringComparison.OrdinalIgnoreCase )
+            ? VatReportType.Foreign
+            : VatReportType.Poland;
+        if (!string.Equals( siblingType, normalizedType, StringComparison.OrdinalIgnoreCase ))
+        {
+            yield return siblingType;
+        }
+    }
+
+    public async Task<int> RepairRowsWithoutItemsAsync( int reportId )
+    {
+        List<VatReportRow> rows = await _db.VatReportRows
+            .Include( r => r.VatReport )
+            .Include( r => r.Items )
+            .Where( r => r.VatReportId == reportId && !r.Items.Any() )
+            .ToListAsync();
+        if (rows.Count == 0)
+        {
+            return 0;
+        }
+
+        int repaired = 0;
+        foreach (VatReportRow row in rows)
+        {
+            if (await TryRepairRowItemsAsync( row ))
+            {
+                repaired++;
+            }
+        }
+
+        if (repaired > 0)
+        {
+            await _db.SaveChangesAsync();
+        }
+
+        return repaired;
+    }
+
+    public async Task<int> RepairAllRowsWithoutItemsAsync()
+    {
+        List<VatReportRow> rows = await _db.VatReportRows
+            .Include( r => r.VatReport )
+            .Include( r => r.Items )
+            .Where( r => !r.Items.Any() )
+            .ToListAsync();
+        if (rows.Count == 0)
+        {
+            return 0;
+        }
+
+        int repaired = 0;
+        foreach (VatReportRow row in rows)
+        {
+            if (await TryRepairRowItemsAsync( row ))
+            {
+                repaired++;
+            }
+        }
+
+        if (repaired > 0)
+        {
+            await _db.SaveChangesAsync();
+        }
+
+        return repaired;
+    }
+
+    public async Task<bool> TryRepairRowItemsAsync( VatReportRow row )
+    {
+        if (row.Items.Count > 0 || row.VatReport is null)
+        {
+            return false;
+        }
+
+        VatReportRow? resolved = await TryResolveRowFromShopifyAsync(
+            row.VatReport.PeriodYear,
+            row.VatReport.PeriodMonth,
+            row.VatReport.Type,
+            row.ShopifyOrderId,
+            row.OrderNumber,
+            row.VatRatePercent );
+        if (resolved is null || resolved.Items.Count == 0)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace( row.ShopifyOrderId ) && !string.IsNullOrWhiteSpace( resolved.ShopifyOrderId ))
+        {
+            row.ShopifyOrderId = resolved.ShopifyOrderId;
+        }
+
+        foreach (VatReportRowItem item in resolved.Items)
+        {
+            item.VatReportRow = row;
+            row.Items.Add( item );
+        }
+
+        return true;
+    }
+
+    private async Task<List<VatReportRow>> GetGeneratedRowsCachedAsync( int year, int month, string reportType )
+    {
+        string normalizedType = VatReportHelpers.NormalizeReportType( reportType );
+        (int Year, int Month, string Type) cacheKey = (year, month, normalizedType);
+        if (GeneratedRowsCache.TryGetValue( cacheKey, out (DateTime CachedAtUtc, List<VatReportRow> Rows) cached ) &&
+            DateTime.UtcNow - cached.CachedAtUtc < GeneratedRowsCacheLifetime)
+        {
+            return cached.Rows;
+        }
+
+        List<VatReportRow> rows = normalizedType switch
+        {
+            VatReportType.Poland => await BuildPolandRowsAsync( year, month ),
+            VatReportType.Foreign => await BuildForeignRowsAsync( year, month ),
+            _ => []
+        };
+
+        GeneratedRowsCache[cacheKey] = (DateTime.UtcNow, rows);
+        return rows;
+    }
+
+    private VatReportFinanceSyncService ResolveFinanceSync() =>
+        _services.GetRequiredService<VatReportFinanceSyncService>();
 
     private sealed class ShopifyClassifiedItemDto
     {

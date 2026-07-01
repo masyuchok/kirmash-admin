@@ -47,6 +47,25 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPatch( "inventory/pricing" )]
+        public async Task<ActionResult<SupplierInventoryRow>> UpdateInventoryPricing(
+            [FromBody] SupplierInventoryPricingUpdateRequest request )
+        {
+            try
+            {
+                SupplierInventoryRow row = await _inventoryService.UpdatePricingAsync( request );
+                return Ok( row );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка захавання цаны", details = ex.Message } );
+            }
+        }
+
         [HttpGet( "inventory" )]
         public async Task<ActionResult<SupplierInventoryResponse>> GetInventory(
             [FromQuery] int? supplierId,
