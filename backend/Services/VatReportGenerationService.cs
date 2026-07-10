@@ -199,6 +199,7 @@ public class VatReportGenerationService
                         VariantTitle = item.VariantTitle,
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
+                        Barcode = item.Barcode,
                         Quantity = item.Quantity,
                         UnitPrice = item.UnitPrice,
                         GrossAmount = lineGross,
@@ -327,6 +328,7 @@ public class VatReportGenerationService
                         VariantTitle = item.VariantTitle,
                         ProductTitle = item.Title,
                         ProductType = item.ProductType,
+                        Barcode = item.Barcode,
                         Quantity = item.Quantity,
                         UnitPrice = item.UnitPrice,
                         GrossAmount = lineGross,
@@ -432,6 +434,7 @@ public class VatReportGenerationService
                         VariantTitle = string.IsNullOrWhiteSpace( x.VariantTitle ) ? string.Empty : x.VariantTitle,
                         ProductTitle = string.IsNullOrWhiteSpace( x.ProductTitle ) ? "—" : x.ProductTitle,
                         ProductType = x.ProductType ?? string.Empty,
+                        Barcode = x.Barcode ?? string.Empty,
                         Quantity = x.Quantity,
                         UnitPrice = VatReportHelpers.Round2( x.UnitPrice ),
                         GrossAmount = VatReportHelpers.Round2( x.GrossAmount ),
@@ -728,6 +731,7 @@ public class VatReportGenerationService
         public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
         public string ProductType { get; set; } = string.Empty;
+        public string Barcode { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal GrossAmount { get; set; }

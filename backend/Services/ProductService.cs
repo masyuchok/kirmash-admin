@@ -270,13 +270,8 @@ public class ProductService
             ? null
             : ShopifyIds.NormalizeVariantId( shopifyVariantId.Trim() );
 
-        await _salesCache.EnsureFreshAsync( maxAge: TimeSpan.FromHours( 24 ) );
-
         List<string> productIdCandidates = ProductLedgerService.BuildProductIdCandidates( normalizedProductId );
         string productName = await ResolveProductNameAsync( normalizedProductId, productIdCandidates );
-        productIdCandidates = await _ledger.BuildExpandedProductIdCandidatesAsync(
-            normalizedProductId,
-            productName );
         (Dictionary<string, string> variantTitles, Dictionary<string, Dictionary<string, string>> variantIdByTitle) =
             await GetVariantCatalogMapsCachedAsync();
         IReadOnlyDictionary<string, string> defaultVariantByProduct =
@@ -288,6 +283,13 @@ public class ProductService
         {
             filterVariantTitle = ResolveVariantTitle( normalizedVariantFilter, variantTitles );
         }
+
+        // Single-variant products aggregate paid/sold in supplier inventory; payment lines often
+        // lack variant ids, so a variant filter would hide them while «Аплочана» still counts them.
+        bool useProductTotals =
+            VariantLegacyDefaults.GetNamedVariantCount( normalizedProductId, variantIdByTitle ) <= 1;
+        string? paymentVariantFilter = useProductTotals ? null : normalizedVariantFilter;
+        string? paymentFilterVariantTitle = useProductTotals ? null : filterVariantTitle;
 
         List<SupplyProduct> supplyLines = await _db.SupplyProducts
             .AsNoTracking()
@@ -343,43 +345,49 @@ public class ProductService
             normalizedVariantFilter,
             filterVariantTitle,
             supplierId,
-            productName );
+            productName,
+            matchByProductIdOnly: true,
+            loadLiveShopifyOrders: false );
 
         List<VatReportExpenseProduct> paymentLines = await _db.VatReportExpenseProducts
             .AsNoTracking()
             .Include( p => p.VatReportExpense )
             .ThenInclude( e => e.Supplier )
             .Include( p => p.VatReportExpense )
+            .ThenInclude( e => e.ExpenseInvoiceType )
+            .Include( p => p.VatReportExpense )
             .ThenInclude( e => e.VatReport )
-            .Where( p => productIdCandidates.Contains( p.ShopifyProductId ) )
+            .Where( p =>
+                productIdCandidates.Contains( p.ShopifyProductId ) &&
+                p.VatReportExpense.ExpenseInvoiceType.Name == ExpenseInvoiceTypeSeeder.SupplierPaymentDefaultName )
             .ToListAsync();
 
         List<ProductHistoryPaymentEvent> payments = paymentLines
-            .Where( p => ProductLedgerService.MatchesVariantFilter(
-                ProductLedgerService.ResolvePaymentVariantId(
-                    p.ShopifyProductId,
-                    p.ShopifyVariantId,
-                    defaultVariantByProduct,
-                    variantIdByTitle,
-                    legacySaleVariantByProduct ),
-                ResolveVariantTitle(
-                    ProductLedgerService.ResolvePaymentVariantId(
-                        p.ShopifyProductId,
-                        p.ShopifyVariantId,
-                        defaultVariantByProduct,
-                        variantIdByTitle,
-                        legacySaleVariantByProduct ),
-                    variantTitles ),
-                normalizedVariantFilter,
-                filterVariantTitle ) )
+            .Where( p => ProductLedgerService.PaymentLineMatchesProduct(
+                normalizedProductId,
+                p.ShopifyProductId,
+                p.ProductTitle,
+                productName,
+                productIdCandidates ) )
+            .Where( p => ProductLedgerService.MatchesPaymentVariantFilter(
+                p.ShopifyProductId,
+                p.ShopifyVariantId,
+                p.ProductTitle,
+                paymentVariantFilter,
+                paymentFilterVariantTitle,
+                variantIdByTitle,
+                defaultVariantByProduct,
+                variantTitles,
+                legacySaleVariantByProduct ) )
             .Where( p => !supplierId.HasValue || p.VatReportExpense.SupplierId == supplierId.Value )
             .Select( p =>
             {
-                string variantId = ProductLedgerService.ResolvePaymentVariantId(
+                string variantId = ProductLedgerService.ResolvePaymentVariantForHistory(
                     p.ShopifyProductId,
                     p.ShopifyVariantId,
-                    defaultVariantByProduct,
+                    p.ProductTitle,
                     variantIdByTitle,
+                    defaultVariantByProduct,
                     legacySaleVariantByProduct );
                 return new ProductHistoryPaymentEvent
                 {
@@ -390,7 +398,10 @@ public class ProductService
                     SupplierName = p.VatReportExpense.Supplier?.Name ?? string.Empty,
                     InvoiceNumber = p.VatReportExpense.InvoiceNumber ?? string.Empty,
                     ShopifyVariantId = variantId,
-                    VariantTitle = ResolveVariantTitle( variantId, variantTitles ),
+                    VariantTitle = ProductLedgerService.ResolvePaymentDisplayVariantTitle(
+                        variantId,
+                        p.ProductTitle,
+                        variantTitles ),
                     Quantity = p.Quantity
                 };
             } )

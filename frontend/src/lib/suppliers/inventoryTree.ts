@@ -1,4 +1,23 @@
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
+import { formatProductNameWithAuthor, isBookProductType } from '@/lib/supply-draft';
+
+export function formatInventoryProductTitle(
+  row: Pick<SupplierInventoryRow, 'productName' | 'productAuthor' | 'productType'>
+): string {
+  return isBookProductType(row.productType)
+    ? formatProductNameWithAuthor(row.productName, row.productAuthor)
+    : row.productName;
+}
+
+export function formatInventoryLineName(
+  row: Pick<SupplierInventoryRow, 'productName' | 'productAuthor' | 'productType' | 'variantTitle'>
+): string {
+  const baseName = formatInventoryProductTitle(row);
+  if (isNamedInventoryVariantTitle(row.variantTitle)) {
+    return `${baseName} — ${row.variantTitle.trim()}`;
+  }
+  return baseName;
+}
 
 export type InventoryProductGroup = {
   key: string;
@@ -59,9 +78,14 @@ export function groupInventoryRows(
   }));
 }
 
+export function isNamedInventoryVariantTitle(variantTitle: string): boolean {
+  const trimmed = variantTitle.trim();
+  return trimmed.length > 0 && trimmed.toLowerCase() !== 'default title';
+}
+
 export function shouldShowInventoryTree(group: InventoryProductGroup): boolean {
   if (group.variants.length > 1) return true;
-  return group.variants.some((row) => row.variantTitle.trim().length > 0);
+  return group.variants.some((row) => isNamedInventoryVariantTitle(row.variantTitle));
 }
 
 export function sumInventoryGroup(variants: SupplierInventoryRow[]): InventoryGroupTotals {

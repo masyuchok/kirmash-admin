@@ -1,13 +1,10 @@
 import * as XLSX from 'xlsx';
 import { calcGrossLineTotal, roundMoney } from '@/lib/suppliers/inventoryPricing';
+import { formatInventoryLineName } from '@/lib/suppliers/inventoryTree';
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
 
 function formatLineName(row: SupplierInventoryRow): string {
-  const variant = row.variantTitle.trim();
-  if (variant) {
-    return `${row.productName} — ${variant}`;
-  }
-  return row.productName;
+  return formatInventoryLineName(row);
 }
 
 function grossLineTotal(row: SupplierInventoryRow, unpaidQuantity: number): number {
@@ -62,13 +59,13 @@ export function exportUnpaidSupplierInventoryToExcel(
   worksheet['!cols'] = [{ wch: 48 }, { wch: 18 }, { wch: 22 }, { wch: 16 }];
 
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Не аплачана');
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Не аплочана');
 
   const datePart = new Date().toISOString().slice(0, 10);
   const supplierPart = options?.supplierName
     ? sanitizeFileNamePart(options.supplierName)
     : 'пастаўшчыкі';
-  const fileName = `інвентарызацыя-${supplierPart}-неаплачана-${datePart}.xlsx`;
+  const fileName = `інвентарызацыя-${supplierPart}-неаплочана-${datePart}.xlsx`;
 
   XLSX.writeFile(workbook, fileName);
 

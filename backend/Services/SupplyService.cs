@@ -61,6 +61,7 @@ public class SupplyService
                     Products = s.SupplyProducts
                         .Select( p => new SupplyDetailsProductItem
                         {
+                            Id = p.Id,
                             ShopifyProductId = p.ShopifyProductId,
                             ShopifyVariantId = p.ShopifyVariantId,
                             Quantity = p.Quantity,
@@ -68,7 +69,8 @@ public class SupplyService
                             VatRatePercent = p.VatRatePercent,
                             MarginPercent = p.MarginPercent,
                             SalePrice = p.SalePrice,
-                            SyncWithShopify = p.SyncWithShopify
+                            SyncWithShopify = p.SyncWithShopify,
+                            IsReturnFinalized = p.IsReturnFinalized
                         } )
                         .ToList()
                 } )
@@ -141,11 +143,12 @@ public class SupplyService
                     ?? throw new InvalidOperationException( "Пастаўка не знойдзена." );
 
                 previousQuantities = supply.SupplyProducts
-                    .Where( p => p.SyncWithShopify )
+                    .Where( p => AffectsShopifyInventory( p ) )
                     .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                     .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
                 previousAllLineQuantities = supply.SupplyProducts
+                    .Where( p => !p.IsReturnFinalized )
                     .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                     .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
@@ -176,7 +179,7 @@ public class SupplyService
                 }
 
                 string lineKey = BuildShopifySyncKey( item.ShopifyProductId, item.ShopifyVariantId );
-                if (item.Quantity < 0)
+                if (item.Quantity < 0 && !item.IsReturnFinalized)
                 {
                     int previousInCurrent = previousAllLineQuantities.GetValueOrDefault( lineKey );
                     int maxReturnable = netExcludingCurrent.GetValueOrDefault( lineKey ) + previousInCurrent;
@@ -197,12 +200,12 @@ public class SupplyService
             }
 
             Dictionary<string, int> newQuantities = requestProducts
-                .Where( p => p.SyncWithShopify )
+                .Where( AffectsShopifyInventory )
                 .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                 .ToDictionary( g => g.Key, g => g.Sum( p => p.Quantity ), StringComparer.OrdinalIgnoreCase );
 
             Dictionary<string, decimal> syncedSalePrices = requestProducts
-                .Where( p => p.SyncWithShopify )
+                .Where( AffectsShopifyInventory )
                 .GroupBy( p => BuildShopifySyncKey( p.ShopifyProductId, p.ShopifyVariantId ), StringComparer.OrdinalIgnoreCase )
                 .ToDictionary(
                     g => g.Key,
@@ -260,7 +263,8 @@ public class SupplyService
                     VatRatePercent = item.VatRatePercent,
                     MarginPercent = item.MarginPercent,
                     SalePrice = item.SalePrice,
-                    SyncWithShopify = item.SyncWithShopify
+                    SyncWithShopify = item.SyncWithShopify && !(item.IsReturnFinalized && item.Quantity < 0),
+                    IsReturnFinalized = item.IsReturnFinalized && item.Quantity < 0
                 } );
             }
 
@@ -280,6 +284,12 @@ public class SupplyService
         string variantId = (shopifyVariantId ?? string.Empty).Trim();
         return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
     }
+
+    private static bool AffectsShopifyInventory( SupplyProductSaveItem item ) =>
+        item.SyncWithShopify && !(item.IsReturnFinalized && item.Quantity < 0);
+
+    private static bool AffectsShopifyInventory( SupplyProduct item ) =>
+        item.SyncWithShopify && !(item.IsReturnFinalized && item.Quantity < 0);
 
     public async Task<List<SupplySupplierProductBalanceItem>> GetSupplierProductBalancesAsync(
         int supplierId,

@@ -601,7 +601,7 @@ public class ShopifyOrderFetchService
                 : string.Empty;
 
             (string productId, string productType) = ParseProductFromLineItem( itemNode );
-            (string variantId, string variantTitle) = ParseVariantFromLineItem( itemNode );
+            (string variantId, string variantTitle, string barcode) = ParseVariantFromLineItem( itemNode );
             decimal unitPrice = ReadMoney( itemNode, "originalUnitPriceSet" );
             decimal originalTotal = ReadMoney( itemNode, "originalTotalSet" );
             decimal discountedTotal = ReadMoney( itemNode, "discountedTotalSet" );
@@ -640,6 +640,7 @@ public class ShopifyOrderFetchService
                 ShopifyProductId = productId,
                 ShopifyVariantId = variantId,
                 VariantTitle = variantTitle,
+                Barcode = barcode,
                 Quantity = currentQuantity,
                 UnitPrice = unitPrice,
                 LineTotalGross = Round2( lineTotalGross ),
@@ -696,12 +697,12 @@ public class ShopifyOrderFetchService
         return (productId, productType);
     }
 
-    private static (string VariantId, string VariantTitle) ParseVariantFromLineItem( JsonElement itemNode )
+    private static (string VariantId, string VariantTitle, string Barcode) ParseVariantFromLineItem( JsonElement itemNode )
     {
         if (!itemNode.TryGetProperty( "variant", out JsonElement variantEl ) ||
             variantEl.ValueKind != JsonValueKind.Object)
         {
-            return (string.Empty, string.Empty);
+            return (string.Empty, string.Empty, string.Empty);
         }
 
         string variantId = string.Empty;
@@ -718,7 +719,14 @@ public class ShopifyOrderFetchService
             variantTitle = (variantTitleEl.GetString() ?? string.Empty).Trim();
         }
 
-        return (variantId, variantTitle);
+        string barcode = string.Empty;
+        if (variantEl.TryGetProperty( "barcode", out JsonElement barcodeEl ) &&
+            barcodeEl.ValueKind == JsonValueKind.String)
+        {
+            barcode = (barcodeEl.GetString() ?? string.Empty).Trim();
+        }
+
+        return (variantId, variantTitle, barcode);
     }
 
     private static decimal SumDiscountAllocations( JsonElement itemNode )

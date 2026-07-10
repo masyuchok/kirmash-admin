@@ -196,6 +196,8 @@ namespace backend.Services
 
             await _db.SaveChangesAsync();
 
+            ProductLedgerService.InvalidateSoldByLineCache();
+
         }
 
 

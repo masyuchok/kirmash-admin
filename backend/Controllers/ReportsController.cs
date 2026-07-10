@@ -107,7 +107,7 @@ namespace backend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode( 500, new { error = "Памылка прывязкі неаплачанага тавару", details = ex.Message } );
+                return StatusCode( 500, new { error = "Памылка прывязкі неаплочанага тавару", details = ex.Message } );
             }
         }
 
@@ -388,6 +388,26 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка змянення расходу", details = ex.Message } );
+            }
+        }
+
+        [HttpPatch( "expenses/{expenseId:int}/paid" )]
+        public async Task<IActionResult> UpdateExpensePaid(
+            int expenseId,
+            [FromBody] VatReportExpensePaidUpdateRequest request )
+        {
+            try
+            {
+                await _service.UpdateExpensePaidAsync( expenseId, request.IsPaid );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка змянення аплаты", details = ex.Message } );
             }
         }
 

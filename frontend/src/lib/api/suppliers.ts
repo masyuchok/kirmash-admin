@@ -28,6 +28,8 @@ function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
     shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
     variantTitle: String(row.variantTitle ?? row.VariantTitle ?? ''),
     productName: String(row.productName ?? row.ProductName ?? ''),
+    productAuthor: String(row.productAuthor ?? row.ProductAuthor ?? ''),
+    productType: String(row.productType ?? row.ProductType ?? ''),
     supplierPrice: readNumber(row.supplierPrice ?? row.SupplierPrice),
     vatRatePercent: readNumber(row.vatRatePercent ?? row.VatRatePercent) || 23,
     grossUnitPrice: readNumber(row.grossUnitPrice ?? row.GrossUnitPrice),
@@ -53,6 +55,13 @@ export async function fetchSupplierInventory(
     credentials: apiCredentials,
     cache: 'no-store',
   });
+  if (res.status === 401 && typeof window !== 'undefined') {
+    const shop = process.env.NEXT_PUBLIC_SHOP_DOMAIN?.trim();
+    const loginUrl = new URL('/api/auth/login', window.location.origin);
+    if (shop) loginUrl.searchParams.set('shop', shop);
+    (window.top ?? window).location.assign(loginUrl.toString());
+    throw new Error('Сесія скончана. Перазайдзіце праз Shopify.');
+  }
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося загрузіць інвентарызацыю');
     throw new Error(msg);

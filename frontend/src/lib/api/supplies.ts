@@ -117,15 +117,19 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
   const products = Array.isArray(productsRaw)
     ? productsRaw.map((row) => {
         const r = row as Record<string, unknown>;
+        const quantity = readInt(r.quantity ?? r.Quantity);
         return {
           shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
           shopifyVariantId: String(r.shopifyVariantId ?? r.ShopifyVariantId ?? ''),
-          quantity: readInt(r.quantity ?? r.Quantity),
+          quantity,
           supplierPrice: readNumber(r.supplierPrice ?? r.SupplierPrice),
           vatRatePercent: readNumber(r.vatRatePercent ?? r.VatRatePercent ?? 23),
           marginPercent: readNumber(r.marginPercent ?? r.MarginPercent),
           salePrice: readNumber(r.salePrice ?? r.SalePrice),
           syncWithShopify: Boolean(r.syncWithShopify ?? r.SyncWithShopify ?? true),
+          isReturnFinalized: Boolean(
+            r.isReturnFinalized ?? r.IsReturnFinalized ?? quantity < 0
+          ),
         };
       })
     : [];

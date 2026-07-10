@@ -66,6 +66,21 @@ namespace backend.Controllers
             }
         }
 
+        [HttpGet]
+        public async Task<ActionResult<List<Supplier>>> GetAll( )
+        {
+            try
+            {
+                List<Supplier> suppliers = await _service.GetAllAsync( );
+
+                return Ok( suppliers );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка атрымання спіса пастаўшчыкоў", details = ex.Message } );
+            }
+        }
+
         [HttpGet( "inventory" )]
         public async Task<ActionResult<SupplierInventoryResponse>> GetInventory(
             [FromQuery] int? supplierId,
@@ -104,23 +119,8 @@ namespace backend.Controllers
             }
         }
 
-        [HttpGet]
-        public async Task<ActionResult<List<Supplier>>> GetAll( )
-        {
-            try
-            {
-                List<Supplier> suppliers = await _service.GetAllAsync( );
-
-                return Ok( suppliers );
-            }
-            catch (Exception ex)
-            {
-                return StatusCode( 500, new { error = "Памылка атрымання спіса пастаўшчыкоў", details = ex.Message } );
-            }
-        }
-
-        [HttpGet("{id}")]
-        public async Task<ActionResult<Supplier>> Get(int id)
+        [HttpGet( "{id:int}" )]
+        public async Task<ActionResult<Supplier>> Get( int id )
         {
             try
             {
@@ -138,8 +138,8 @@ namespace backend.Controllers
             }
         }
 
-        [HttpPatch("{id}")]
-        public async Task<IActionResult> UpdateSupplier(int id, [FromBody] Supplier supplier)
+        [HttpPatch( "{id:int}" )]
+        public async Task<IActionResult> UpdateSupplier( int id, [FromBody] Supplier supplier )
         {
             try
             {

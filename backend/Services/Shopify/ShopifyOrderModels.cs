@@ -21,6 +21,7 @@ public sealed class ShopifyLineItemDto
     public decimal LineTotalGross { get; set; }
     public string ProductType { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
+    public string Barcode { get; set; } = string.Empty;
 }
 
 public sealed class ForeignDeliveryInfo

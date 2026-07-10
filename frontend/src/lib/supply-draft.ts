@@ -10,6 +10,7 @@ export type SupplyProductDraft = {
   productName: string;
   productType: string;
   syncWithShopify: boolean;
+  isReturnFinalized: boolean;
   quantity: string;
   supplierPrice: string;
   vatRatePercent: string;
@@ -36,6 +37,7 @@ export function normalizeSupplyDraftRow(row: Partial<SupplyProductDraft>): Suppl
     productName: String(row.productName ?? productId),
     productType: String(row.productType ?? ''),
     syncWithShopify: row.syncWithShopify ?? true,
+    isReturnFinalized: row.isReturnFinalized ?? false,
     quantity: String(row.quantity ?? ''),
     supplierPrice: String(row.supplierPrice ?? ''),
     vatRatePercent: String(row.vatRatePercent ?? '23'),
@@ -48,7 +50,36 @@ export function formatProductNameWithAuthor(productName: string, author?: string
   const name = productName.trim() || '—';
   const trimmedAuthor = author?.trim();
   if (!trimmedAuthor) return name;
+  if (name.toLowerCase().includes(trimmedAuthor.toLowerCase())) return name;
   return `${name}, ${trimmedAuthor}`;
+}
+
+export function isBookProductType(productType: string): boolean {
+  const source = productType.trim().toLowerCase();
+  if (!source) return false;
+  if (
+    source.includes('закладк') ||
+    source.includes('bookmark') ||
+    source.includes('zakładk') ||
+    source.includes('zakladk')
+  ) {
+    return false;
+  }
+  if (
+    source.includes('часоп') ||
+    source.includes('journal') ||
+    source.includes('czasopis') ||
+    source.includes('журнал')
+  ) {
+    return false;
+  }
+  return (
+    source.includes('кніг') ||
+    source.includes('книг') ||
+    source.includes('book') ||
+    source.includes('ksiaz') ||
+    source.includes('książ')
+  );
 }
 
 export type SupplyProductSnapshot = {
@@ -60,6 +91,7 @@ export type SupplyProductSnapshot = {
   marginPercent: number;
   salePrice: number;
   syncWithShopify: boolean;
+  isReturnFinalized?: boolean;
 };
 
 export function formatDraftQuantity(value: number): string {
@@ -86,6 +118,8 @@ export function createDraftRowFromSupplyProduct(
 ): SupplyProductDraft {
   const match = productMap.get(product.shopifyProductId);
   const variantMatch = match?.variants.find((v) => v.variantId === product.shopifyVariantId);
+  const quantity = product.quantity;
+  const isReturnFinalized = product.isReturnFinalized ?? quantity < 0;
   return normalizeSupplyDraftRow({
     lineKey: makeSupplyLineKey(product.shopifyProductId, product.shopifyVariantId),
     productId: product.shopifyProductId,
@@ -93,8 +127,9 @@ export function createDraftRowFromSupplyProduct(
     variantName: variantMatch?.variantName ?? '',
     productName: match?.productName ?? product.shopifyProductId,
     productType: match?.productType ?? '',
-    syncWithShopify: product.syncWithShopify,
-    quantity: formatDraftQuantity(product.quantity),
+    syncWithShopify: isReturnFinalized ? false : product.syncWithShopify,
+    isReturnFinalized,
+    quantity: formatDraftQuantity(quantity),
     supplierPrice: formatDraftMoney(product.supplierPrice),
     vatRatePercent: String(
       normalizeVatRatePercent(product.vatRatePercent > 0 ? product.vatRatePercent : 23)
@@ -126,6 +161,7 @@ export function createDraftLinesForProduct(
     productName: product.productName,
     productType: product.productType,
     syncWithShopify: true,
+    isReturnFinalized: false,
     supplierPrice: '',
     vatRatePercent: String(defaultVatRatePercent),
     marginPercent: '',

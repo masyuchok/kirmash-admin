@@ -11,6 +11,7 @@ namespace backend.Models
 
     public class SupplyDetailsProductItem
     {
+        public int Id { get; set; }
         public string ShopifyProductId { get; set; } = string.Empty;
         public string ShopifyVariantId { get; set; } = string.Empty;
         public int Quantity { get; set; }
@@ -19,5 +20,6 @@ namespace backend.Models
         public decimal MarginPercent { get; set; }
         public decimal SalePrice { get; set; }
         public bool SyncWithShopify { get; set; }
+        public bool IsReturnFinalized { get; set; }
     }
 }

@@ -179,7 +179,7 @@ public class VatReportUnpaidLinkService
     {
         if (!request.ExpenseProductId.HasValue || request.ExpenseProductId.Value <= 0)
         {
-            throw new InvalidOperationException( "Выберыце пераплачаны тавар у фактуре." );
+            throw new InvalidOperationException( "Выберыце пераплочаны тавар у фактуре." );
         }
 
         VatReportExpenseProduct? expenseProduct = await _db.VatReportExpenseProducts
@@ -203,12 +203,12 @@ public class VatReportUnpaidLinkService
         Dictionary<string, int> overpaidByLineKey = await BuildOverpaidQuantityByLineKeyAsync( request.SupplierId );
         if (!overpaidByLineKey.TryGetValue( expenseLineKey, out int overpaidQty ) || overpaidQty <= 0)
         {
-            throw new InvalidOperationException( "Гэты тавар у фактуре не з'яўляецца пераплачаным." );
+            throw new InvalidOperationException( "Гэты тавар у фактуре не з'яўляецца пераплочаным." );
         }
 
         if (request.Quantity > expenseProduct.Quantity)
         {
-            throw new InvalidOperationException( "Колькасць неаплачанага тавару перавышае колькасць у радку фактуры." );
+            throw new InvalidOperationException( "Колькасць неаплочанага тавару перавышае колькасць у радку фактуры." );
         }
 
         if (request.Quantity > overpaidQty)
@@ -304,7 +304,7 @@ public class VatReportUnpaidLinkService
             allocation.SupplierId == request.SupplierId );
         if (exists)
         {
-            throw new InvalidOperationException( "Гэты неаплачаны тавар ужо прывязаны да аплаты." );
+            throw new InvalidOperationException( "Гэты неаплочаны тавар ужо прывязаны да аплаты." );
         }
 
         string unpaidTitle = string.IsNullOrWhiteSpace( request.ProductTitle )
@@ -592,6 +592,7 @@ public class VatReportUnpaidLinkService
             string lineKey = ProductLedgerService.BuildStrictProductLineKey(
                 row.ShopifyProductId,
                 row.ShopifyVariantId,
+                row.ProductTitle,
                 lineKeyContext.DefaultVariantByProduct,
                 lineKeyContext.VariantIdByTitle,
                 lineKeyContext.LegacySaleVariantByProduct );
@@ -634,6 +635,7 @@ public class VatReportUnpaidLinkService
             row.LineKey = ProductLedgerService.BuildStrictProductLineKey(
                 row.ProductId,
                 row.VariantId,
+                row.ProductTitle,
                 lineKeyContext.DefaultVariantByProduct,
                 lineKeyContext.VariantIdByTitle,
                 lineKeyContext.LegacySaleVariantByProduct );

@@ -7,6 +7,7 @@ import {
   parseMoneyInput,
   parsePercentInput,
 } from '@/lib/suppliers/inventoryPricing';
+import { formatInventoryProductTitle } from '@/lib/suppliers/inventoryTree';
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
 
 type Props = {
@@ -69,7 +70,7 @@ export default function InventoryPricingCells({ row, disabled = false, onSave }:
           onChange={(e) => setNetInput(e.currentTarget.value)}
           onBlur={() => void commit()}
           className={inputClass}
-          aria-label={`Кошт нета: ${row.productName}`}
+          aria-label={`Кошт нета: ${formatInventoryProductTitle(row)}`}
         />
         {row.hasPriceOverride && (
           <div className="mt-1 text-[10px] uppercase tracking-wide text-primary">зменена</div>
@@ -86,7 +87,7 @@ export default function InventoryPricingCells({ row, disabled = false, onSave }:
               onChange={(e) => setVatInput(e.currentTarget.value)}
               onBlur={() => void commit()}
               className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-sm tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
-              aria-label={`ПДВ %: ${row.productName}`}
+              aria-label={`ПДВ %: ${formatInventoryProductTitle(row)}`}
             />
             <span className="text-xs text-gray-500">%</span>
           </div>

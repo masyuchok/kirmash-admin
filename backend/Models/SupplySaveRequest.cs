@@ -18,5 +18,6 @@ namespace backend.Models
         public decimal MarginPercent { get; set; }
         public decimal SalePrice { get; set; }
         public bool SyncWithShopify { get; set; } = true;
+        public bool IsReturnFinalized { get; set; }
     }
 }

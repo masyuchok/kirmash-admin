@@ -8,6 +8,8 @@ namespace backend.Models
         public string ShopifyVariantId { get; set; } = string.Empty;
         public string VariantTitle { get; set; } = string.Empty;
         public string ProductName { get; set; } = string.Empty;
+        public string ProductAuthor { get; set; } = string.Empty;
+        public string ProductType { get; set; } = string.Empty;
         public decimal SupplierPrice { get; set; }
         public decimal VatRatePercent { get; set; }
         public decimal GrossUnitPrice { get; set; }

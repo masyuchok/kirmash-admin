@@ -14,6 +14,15 @@ public static class ShopifyIds
 
     public static string NormalizeProductId( string id ) => NormalizeGid( id, "gid://shopify/Product/" );
 
+    public static string ToProductGid( string id )
+    {
+        if (string.IsNullOrWhiteSpace( id )) return string.Empty;
+        string trimmed = id.Trim();
+        return trimmed.StartsWith( "gid://shopify/Product/", StringComparison.OrdinalIgnoreCase )
+            ? trimmed
+            : $"gid://shopify/Product/{trimmed}";
+    }
+
     public static string NormalizeVariantId( string id ) => NormalizeGid( id, "gid://shopify/ProductVariant/" );
 
     public static long? TryParseNumericProductId( string raw )

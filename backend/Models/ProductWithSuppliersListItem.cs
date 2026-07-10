@@ -19,6 +19,7 @@ namespace backend.Models
     {
         public string VariantId { get; set; } = string.Empty;
         public string VariantName { get; set; } = string.Empty;
+        public string Barcode { get; set; } = string.Empty;
         public int QuantityInStock { get; set; }
     }
 

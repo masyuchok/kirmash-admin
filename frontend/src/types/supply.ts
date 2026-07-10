@@ -20,6 +20,7 @@ export type SupplyDetailsProduct = {
   marginPercent: number;
   salePrice: number;
   syncWithShopify: boolean;
+  isReturnFinalized: boolean;
 };
 
 export type SupplyDetails = {

@@ -11,6 +11,11 @@ namespace backend.Services;
 /// </summary>
 public class ProductLedgerService
 {
+    private static readonly TimeSpan SoldByLineCacheTtl = TimeSpan.FromMinutes( 10 );
+    private static readonly SemaphoreSlim SoldByLineCacheLock = new( 1, 1 );
+    private static ProductSoldAllocation? _soldByLineCache;
+    private static DateTime _soldByLineCachedAtUtc;
+
     private readonly AppDbContext _db;
     private readonly ShopifyVariantLookupService _variantLookup;
     private readonly ShopifyOrderFetchService _shopifyOrders;
@@ -36,6 +41,64 @@ public class ProductLedgerService
     /// </summary>
     public async Task<ProductSoldAllocation> GetSoldByLineAsync()
     {
+        if (_soldByLineCache is not null &&
+            DateTime.UtcNow - _soldByLineCachedAtUtc < SoldByLineCacheTtl)
+        {
+            return _soldByLineCache;
+        }
+
+        await SoldByLineCacheLock.WaitAsync();
+        try
+        {
+            if (_soldByLineCache is not null &&
+                DateTime.UtcNow - _soldByLineCachedAtUtc < SoldByLineCacheTtl)
+            {
+                return _soldByLineCache;
+            }
+
+            LedgerVariantContext variantContext = await LoadVariantContextAsync();
+            ProductSoldAllocation allocation = new()
+            {
+                SoldByLine = new Dictionary<(string ProductId, string VariantId), int>(
+                    ProductVariantKeyComparer.Instance ),
+                LegacyUnnamedSoldByProduct = new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase )
+            };
+
+            List<ProductLedgerSaleLine> reportLinesForAllocation =
+                await GetReportSaleLinesAsync( variantContext, repairUnresolved: false );
+
+            foreach (ProductLedgerSaleLine line in reportLinesForAllocation)
+            {
+                AddSaleLineToAllocation( line, variantContext, allocation );
+            }
+
+            foreach (ProductLedgerSaleLine line in await GetShopifySaleLinesFromCacheAsync( variantContext ))
+            {
+                AddSaleLineToAllocation( line, variantContext, allocation );
+            }
+
+            _soldByLineCache = allocation;
+            _soldByLineCachedAtUtc = DateTime.UtcNow;
+            return allocation;
+        }
+        finally
+        {
+            SoldByLineCacheLock.Release();
+        }
+    }
+
+    public static void InvalidateSoldByLineCache()
+    {
+        _soldByLineCache = null;
+        _soldByLineCachedAtUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Sold qty by product line using the same loaders and matching rules as product history.
+    /// </summary>
+    public async Task<ProductSoldAllocation> GetSoldByLineForProductsAsync(
+        IReadOnlyList<(string ProductId, string? ProductName)> products )
+    {
         LedgerVariantContext variantContext = await LoadVariantContextAsync();
         ProductSoldAllocation allocation = new()
         {
@@ -44,22 +107,90 @@ public class ProductLedgerService
             LegacyUnnamedSoldByProduct = new Dictionary<string, int>( StringComparer.OrdinalIgnoreCase )
         };
 
-        List<ProductLedgerSaleLine> reportLinesForAllocation =
-            await GetReportSaleLinesAsync( variantContext, repairUnresolved: false );
-        HashSet<(int Year, int Month)> reportedPeriods = await GetReportedPeriodsAsync();
-        await ApplyShopifyRefundAdjustmentsAsync(
-            reportLinesForAllocation,
-            variantContext,
-            reportedPeriods );
-
-        foreach (ProductLedgerSaleLine line in reportLinesForAllocation)
+        if (products.Count == 0)
         {
-            AddSaleLineToAllocation( line, variantContext, allocation );
+            return allocation;
         }
 
-        foreach (ProductLedgerSaleLine line in await GetShopifySaleLinesFromCacheAsync( variantContext ))
+        HashSet<string> seenSaleKeys = new( StringComparer.OrdinalIgnoreCase );
+        HashSet<(int Year, int Month)> reportedPeriods = await GetReportedPeriodsAsync();
+        HashSet<string> processedProductIds = new( StringComparer.OrdinalIgnoreCase );
+
+        foreach ((string rawProductId, string? productName) in products)
         {
-            AddSaleLineToAllocation( line, variantContext, allocation );
+            string normalizedProductId = ShopifyIds.NormalizeProductId( rawProductId );
+            if (string.IsNullOrWhiteSpace( normalizedProductId ) ||
+                !processedProductIds.Add( normalizedProductId ))
+            {
+                continue;
+            }
+
+            List<string> productIdCandidates =
+                await BuildExpandedProductIdCandidatesAsync( normalizedProductId, productName );
+            HashSet<string> normalizedCandidateIds = BuildNormalizedProductIdSet( productIdCandidates );
+            string? productIsbn = ResolveContextProductIsbn( normalizedProductId, variantContext );
+
+            List<ProductLedgerSaleLine> lines = await LoadReportSaleLinesForProductAsync(
+                variantContext,
+                normalizedProductId,
+                productIdCandidates,
+                normalizedCandidateIds,
+                productName );
+
+            await ApplyShopifyRefundAdjustmentsAsync(
+                lines,
+                variantContext,
+                reportedPeriods );
+
+            List<InventoryProductSale> cachedShopifySales = await _db.InventoryProductSales
+                .AsNoTracking()
+                .Where( row =>
+                    row.PeriodYear > 0 &&
+                    row.PeriodMonth > 0 &&
+                    productIdCandidates.Contains( row.ShopifyProductId ) )
+                .ToListAsync();
+
+            foreach (InventoryProductSale row in cachedShopifySales)
+            {
+                if (reportedPeriods.Contains( (row.PeriodYear, row.PeriodMonth) )) continue;
+                if (row.SoldQuantity <= 0) continue;
+
+                string productId = ShopifyIds.NormalizeProductId( row.ShopifyProductId );
+                string variantId = ResolveEffectiveVariantId(
+                    row.ShopifyProductId,
+                    row.ShopifyVariantId,
+                    string.Empty,
+                    variantContext.VariantIdByTitle,
+                    variantContext.DefaultVariantByProduct,
+                    variantContext.LegacySaleVariantByProduct );
+
+                ProductLedgerSaleLine shopifyLine = new()
+                {
+                    ProductId = productId,
+                    VariantId = variantId,
+                    Quantity = row.SoldQuantity,
+                    Source = "shopify",
+                    DateUtc = new DateTime( row.PeriodYear, row.PeriodMonth, 1, 0, 0, 0, DateTimeKind.Utc )
+                };
+                if (!SaleLineMatchesProduct( shopifyLine, normalizedCandidateIds, productIsbn ))
+                {
+                    continue;
+                }
+
+                shopifyLine.ProductId = normalizedProductId;
+                lines.Add( shopifyLine );
+            }
+
+            foreach (ProductLedgerSaleLine line in lines)
+            {
+                string dedupKey = BuildSaleLineDedupKey( line );
+                if (!seenSaleKeys.Add( dedupKey ))
+                {
+                    continue;
+                }
+
+                AddSaleLineToAllocation( line, variantContext, allocation );
+            }
         }
 
         return allocation;
@@ -70,12 +201,16 @@ public class ProductLedgerService
         string? normalizedVariantFilter,
         string? filterVariantTitle,
         int? supplierId = null,
-        string? productName = null )
+        string? productName = null,
+        bool matchByProductIdOnly = false,
+        bool loadLiveShopifyOrders = false )
     {
-        List<string> productIdCandidates =
-            await BuildExpandedProductIdCandidatesAsync( normalizedProductId, productName );
+        List<string> productIdCandidates = matchByProductIdOnly
+            ? BuildProductIdCandidates( normalizedProductId )
+            : await BuildExpandedProductIdCandidatesAsync( normalizedProductId, productName );
         HashSet<string> normalizedCandidateIds = BuildNormalizedProductIdSet( productIdCandidates );
         LedgerVariantContext variantContext = await LoadVariantContextAsync();
+        string? productIsbn = ResolveContextProductIsbn( normalizedProductId, variantContext );
         List<ProductHistorySaleEvent> sales = new();
 
         List<ProductLedgerSaleLine> reportLines = await LoadReportSaleLinesForProductAsync(
@@ -83,7 +218,31 @@ public class ProductLedgerService
             normalizedProductId,
             productIdCandidates,
             normalizedCandidateIds,
-            productName );
+            productName,
+            matchByProductIdOnly );
+
+        if (loadLiveShopifyOrders)
+        {
+            await AppendSaleLinesFromUnresolvedReportRowsAsync( reportLines, variantContext );
+
+            List<ProductLedgerSaleLine> shopifyOrderLines = await GetShopifySaleEventsForProductAsync(
+                normalizedProductId,
+                productIdCandidates,
+                variantContext );
+            HashSet<string> existingSaleKeys = reportLines
+                .Select( BuildSaleLineDedupKey )
+                .ToHashSet( StringComparer.OrdinalIgnoreCase );
+            foreach (ProductLedgerSaleLine shopifyOrderLine in shopifyOrderLines)
+            {
+                string dedupKey = BuildSaleLineDedupKey( shopifyOrderLine );
+                if (!existingSaleKeys.Add( dedupKey ))
+                {
+                    continue;
+                }
+
+                reportLines.Add( shopifyOrderLine );
+            }
+        }
 
         HashSet<(int Year, int Month)> reportedPeriods = await GetReportedPeriodsAsync();
         await ApplyShopifyRefundAdjustmentsAsync(
@@ -121,11 +280,12 @@ public class ProductLedgerService
                 Source = "shopify",
                 DateUtc = new DateTime( row.PeriodYear, row.PeriodMonth, 1, 0, 0, 0, DateTimeKind.Utc )
             };
-            if (!SaleLineMatchesProduct( shopifyLine, normalizedCandidateIds, productName ))
+            if (!SaleLineMatchesProduct( shopifyLine, normalizedCandidateIds, productIsbn, matchByProductIdOnly ))
             {
                 continue;
             }
 
+            shopifyLine.ProductId = normalizedProductId;
             reportLines.Add( shopifyLine );
         }
 
@@ -138,6 +298,11 @@ public class ProductLedgerService
 
         foreach (ProductLedgerSaleLine line in reportLines)
         {
+            if (!SaleLineMatchesProduct( line, normalizedCandidateIds, productIsbn, matchByProductIdOnly ))
+            {
+                continue;
+            }
+
             string resolvedVariantId = VariantLegacyDefaults.ResolveVariantId(
                 line.ProductId,
                 line.VariantId,
@@ -173,6 +338,56 @@ public class ProductLedgerService
         return sales
             .OrderByDescending( x => x.DateUtc, StringComparer.Ordinal )
             .ToList();
+    }
+
+    public async Task<string> ResolveProductNameForLedgerAsync( string normalizedProductId )
+    {
+        List<string> productIdCandidates = BuildProductIdCandidates( normalizedProductId );
+        try
+        {
+            LedgerVariantContext variantContext = await LoadVariantContextAsync();
+            if (variantContext.ProductTitleById.TryGetValue( normalizedProductId, out string? catalogName ) &&
+                !string.IsNullOrWhiteSpace( catalogName ))
+            {
+                return catalogName.Trim();
+            }
+        }
+        catch
+        {
+            // Fall back to report row titles below.
+        }
+
+        string? fromRowItem = await _db.VatReportRowItems
+            .AsNoTracking()
+            .Where( i => productIdCandidates.Contains( i.ShopifyProductId ) && i.ProductTitle != "" )
+            .Select( i => i.ProductTitle )
+            .FirstOrDefaultAsync();
+        if (!string.IsNullOrWhiteSpace( fromRowItem ))
+        {
+            return fromRowItem.Trim();
+        }
+
+        string? fromExpense = await _db.VatReportExpenseProducts
+            .AsNoTracking()
+            .Where( p => productIdCandidates.Contains( p.ShopifyProductId ) && p.ProductTitle != "" )
+            .Select( p => p.ProductTitle )
+            .FirstOrDefaultAsync();
+        if (!string.IsNullOrWhiteSpace( fromExpense ))
+        {
+            return fromExpense.Trim();
+        }
+
+        string? fromCash = await _db.VatReportCashSales
+            .AsNoTracking()
+            .Where( s => productIdCandidates.Contains( s.ShopifyProductId ) && s.ProductTitle != "" )
+            .Select( s => s.ProductTitle )
+            .FirstOrDefaultAsync();
+        if (!string.IsNullOrWhiteSpace( fromCash ))
+        {
+            return fromCash.Trim();
+        }
+
+        return normalizedProductId;
     }
 
     /// <summary>
@@ -318,14 +533,30 @@ public class ProductLedgerService
         string shopifyVariantId,
         IReadOnlyDictionary<string, string> defaultVariantByProduct,
         IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle,
+        IReadOnlyDictionary<string, string>? legacySaleVariantByProduct = null ) =>
+        BuildStrictProductLineKey(
+            shopifyProductId,
+            shopifyVariantId,
+            null,
+            defaultVariantByProduct,
+            variantIdByTitle,
+            legacySaleVariantByProduct );
+
+    public static string BuildStrictProductLineKey(
+        string shopifyProductId,
+        string shopifyVariantId,
+        string? productTitle,
+        IReadOnlyDictionary<string, string> defaultVariantByProduct,
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle,
         IReadOnlyDictionary<string, string>? legacySaleVariantByProduct = null )
     {
         string productId = ShopifyIds.NormalizeProductId( shopifyProductId );
-        string variantId = ResolvePaymentVariantId(
+        string variantId = ResolveEffectiveVariantId(
             shopifyProductId,
             shopifyVariantId,
-            defaultVariantByProduct,
+            VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitle ),
             variantIdByTitle,
+            defaultVariantByProduct,
             legacySaleVariantByProduct );
         return VatReportHelpers.BuildProductLineKey( productId, variantId );
     }
@@ -381,62 +612,138 @@ public class ProductLedgerService
         return false;
     }
 
-    public async Task<List<string>> BuildExpandedProductIdCandidatesAsync(
+    public static string ResolvePaymentVariantForHistory(
+        string shopifyProductId,
+        string shopifyVariantId,
+        string? productTitle,
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle,
+        IReadOnlyDictionary<string, string> defaultVariantByProduct,
+        IReadOnlyDictionary<string, string>? legacySaleVariantByProduct = null ) =>
+        ResolveEffectiveVariantId(
+            shopifyProductId,
+            shopifyVariantId,
+            VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitle ),
+            variantIdByTitle,
+            defaultVariantByProduct,
+            legacySaleVariantByProduct );
+
+    public static string ResolvePaymentDisplayVariantTitle(
+        string resolvedVariantId,
+        string? productTitle,
+        IReadOnlyDictionary<string, string> variantTitles )
+    {
+        string explicitTitle = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitle );
+        if (!string.IsNullOrWhiteSpace( explicitTitle ))
+        {
+            return explicitTitle.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace( resolvedVariantId ))
+        {
+            return string.Empty;
+        }
+
+        return variantTitles.TryGetValue( resolvedVariantId, out string? title )
+            ? title
+            : string.Empty;
+    }
+
+    public static bool PaymentLineMatchesProduct(
+        string normalizedProductId,
+        string rawProductId,
+        string? productTitle,
+        string? productName,
+        IEnumerable<string>? productIdCandidates = null )
+    {
+        string lineProductId = ShopifyIds.NormalizeProductId( rawProductId );
+        if (!string.IsNullOrWhiteSpace( lineProductId ))
+        {
+            return string.Equals( lineProductId, normalizedProductId, StringComparison.OrdinalIgnoreCase );
+        }
+
+        return !string.IsNullOrWhiteSpace( productName ) &&
+               VatReportHelpers.ProductTitlesMatch( productTitle ?? string.Empty, productName );
+    }
+
+    /// <summary>
+    /// Variant filter for supplier payments: when the expense line title names a variant,
+    /// only that variant matches; unnamed lines on multi-variant products are excluded.
+    /// </summary>
+    public static bool MatchesPaymentVariantFilter(
+        string shopifyProductId,
+        string shopifyVariantId,
+        string? productTitle,
+        string? normalizedVariantFilter,
+        string? filterVariantTitle,
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle,
+        IReadOnlyDictionary<string, string> defaultVariantByProduct,
+        IReadOnlyDictionary<string, string> variantTitles,
+        IReadOnlyDictionary<string, string>? legacySaleVariantByProduct = null )
+    {
+        if (string.IsNullOrWhiteSpace( normalizedVariantFilter ) && string.IsNullOrWhiteSpace( filterVariantTitle ))
+        {
+            return true;
+        }
+
+        string normalizedProductId = ShopifyIds.NormalizeProductId( shopifyProductId );
+        string explicitVariantTitle = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( productTitle );
+        int namedVariantCount = VariantLegacyDefaults.GetNamedVariantCount( normalizedProductId, variantIdByTitle );
+
+        if (!string.IsNullOrWhiteSpace( explicitVariantTitle ))
+        {
+            if (!string.IsNullOrWhiteSpace( filterVariantTitle ))
+            {
+                return string.Equals( explicitVariantTitle, filterVariantTitle, StringComparison.OrdinalIgnoreCase ) ||
+                       VatReportHelpers.VariantTitlesEquivalentForPaymentMatch(
+                           explicitVariantTitle,
+                           filterVariantTitle );
+            }
+
+            string resolvedFromExplicit = ShopifyVariantLookupService.ResolveVariantIdByProductTitle(
+                shopifyProductId,
+                explicitVariantTitle,
+                variantIdByTitle );
+            if (!string.IsNullOrWhiteSpace( normalizedVariantFilter ) &&
+                !string.IsNullOrWhiteSpace( resolvedFromExplicit ))
+            {
+                return string.Equals(
+                    ShopifyIds.NormalizeVariantId( resolvedFromExplicit ),
+                    normalizedVariantFilter,
+                    StringComparison.OrdinalIgnoreCase );
+            }
+
+            return false;
+        }
+
+        if (namedVariantCount > 1 && string.IsNullOrWhiteSpace( ShopifyIds.NormalizeVariantId( shopifyVariantId ) ))
+        {
+            return false;
+        }
+
+        string resolvedVariantId = ResolvePaymentVariantForHistory(
+            shopifyProductId,
+            shopifyVariantId,
+            productTitle,
+            variantIdByTitle,
+            defaultVariantByProduct,
+            legacySaleVariantByProduct );
+        string displayVariantTitle = ResolvePaymentDisplayVariantTitle(
+            resolvedVariantId,
+            productTitle,
+            variantTitles );
+        return MatchesVariantFilter(
+            resolvedVariantId,
+            displayVariantTitle,
+            normalizedVariantFilter,
+            filterVariantTitle );
+    }
+
+    public Task<List<string>> BuildExpandedProductIdCandidatesAsync(
         string normalizedProductId,
         string? productName )
     {
-        HashSet<string> candidates = new( BuildProductIdCandidates( normalizedProductId ), StringComparer.OrdinalIgnoreCase );
-        if (string.IsNullOrWhiteSpace( productName ))
-        {
-            return candidates.ToList();
-        }
-
-        string? searchToken = VatReportHelpers.ExtractProductTitleSearchToken( productName );
-        if (string.IsNullOrWhiteSpace( searchToken ))
-        {
-            return candidates.ToList();
-        }
-
-        string likePattern = $"%{searchToken}%";
-        List<(string ProductId, string ProductTitle)> reportRows = await _db.VatReportRowItems
-            .AsNoTracking()
-            .Where( i =>
-                i.ProductTitle != "" &&
-                (candidates.Contains( i.ShopifyProductId ) ||
-                 EF.Functions.ILike( i.ProductTitle, likePattern )) )
-            .Select( i => new ValueTuple<string, string>( i.ShopifyProductId, i.ProductTitle ) )
-            .Distinct()
-            .ToListAsync();
-        foreach ((string productId, string title) in reportRows)
-        {
-            if (!VatReportHelpers.ProductTitlesMatch( title, productName ))
-            {
-                continue;
-            }
-
-            AddProductIdCandidate( candidates, productId );
-        }
-
-        List<(string ProductId, string ProductTitle)> cashRows = await _db.VatReportCashSales
-            .AsNoTracking()
-            .Where( s =>
-                s.ProductTitle != "" &&
-                (candidates.Contains( s.ShopifyProductId ) ||
-                 EF.Functions.ILike( s.ProductTitle, likePattern )) )
-            .Select( s => new ValueTuple<string, string>( s.ShopifyProductId, s.ProductTitle ) )
-            .Distinct()
-            .ToListAsync();
-        foreach ((string productId, string title) in cashRows)
-        {
-            if (!VatReportHelpers.ProductTitlesMatch( title, productName ))
-            {
-                continue;
-            }
-
-            AddProductIdCandidate( candidates, productId );
-        }
-
-        return candidates.ToList();
+        _ = productName;
+        return Task.FromResult( BuildProductIdCandidates( normalizedProductId ) );
     }
 
     private async Task<List<ProductLedgerSaleLine>> LoadReportSaleLinesForProductAsync(
@@ -444,13 +751,11 @@ public class ProductLedgerService
         string normalizedProductId,
         List<string> productIdCandidates,
         HashSet<string> normalizedCandidateIds,
-        string? productName )
+        string? productName,
+        bool matchByProductIdOnly = false )
     {
         List<ProductLedgerSaleLine> lines = new();
-        string? searchToken = VatReportHelpers.ExtractProductTitleSearchToken( productName );
-        bool useTitleSearch = !string.IsNullOrWhiteSpace( productName ) &&
-                              !string.IsNullOrWhiteSpace( searchToken );
-        string? likePattern = useTitleSearch ? $"%{searchToken}%" : null;
+        string? productIsbn = ResolveContextProductIsbn( normalizedProductId, variantContext );
 
         IQueryable<VatReportRowItem> orderQuery = _db.VatReportRowItems
             .AsNoTracking()
@@ -458,25 +763,20 @@ public class ProductLedgerService
             .ThenInclude( r => r.VatReport )
             .Where( i => i.Quantity > 0 );
 
-        List<VatReportRowItem> orderItems;
-        if (useTitleSearch)
-        {
-            orderItems = await orderQuery
-                .Where( i =>
-                    productIdCandidates.Contains( i.ShopifyProductId ) ||
-                    (i.ProductTitle != "" && EF.Functions.ILike( i.ProductTitle, likePattern! )) )
-                .ToListAsync();
-            orderItems = orderItems
-                .Where( i =>
-                    productIdCandidates.Contains( i.ShopifyProductId ) ||
-                    VatReportHelpers.ProductTitlesMatch( i.ProductTitle, productName ) )
-                .ToList();
-        }
-        else
-        {
-            orderItems = await orderQuery
+        List<VatReportRowItem> orderItems = matchByProductIdOnly
+            ? await orderQuery
                 .Where( i => productIdCandidates.Contains( i.ShopifyProductId ) )
+                .ToListAsync()
+            : await orderQuery
+                .Where( i =>
+                    productIdCandidates.Contains( i.ShopifyProductId ) || i.ShopifyProductId == "" )
                 .ToListAsync();
+
+        if (!matchByProductIdOnly)
+        {
+            orderItems = orderItems
+                .Where( i => ReportItemMatchesProduct( i, normalizedCandidateIds, productIsbn, matchByProductIdOnly ) )
+                .ToList();
         }
 
         foreach (VatReportRowItem item in orderItems)
@@ -484,60 +784,56 @@ public class ProductLedgerService
             ProductLedgerSaleLine saleLine = CreateReportOrderSaleLine( item, item.VatReportRow, variantContext );
             if (string.IsNullOrWhiteSpace( saleLine.ProductId ))
             {
-                if (string.IsNullOrWhiteSpace( productName ) ||
-                    !VatReportHelpers.ProductTitlesMatch( item.ProductTitle, productName ))
+                string? canonicalProductId = ResolveCanonicalProductId(
+                    saleLine.ProductId,
+                    item.Barcode,
+                    variantContext.ProductIdByIsbn,
+                    variantContext.IsbnByProductId );
+                if (string.IsNullOrWhiteSpace( canonicalProductId ) ||
+                    !string.Equals( canonicalProductId, normalizedProductId, StringComparison.OrdinalIgnoreCase ))
                 {
                     continue;
                 }
 
-                saleLine.ProductId = normalizedProductId;
+                saleLine.ProductId = canonicalProductId;
             }
 
-            if (!SaleLineMatchesProduct( saleLine, normalizedCandidateIds, productName ))
+            if (!SaleLineMatchesProduct( saleLine, normalizedCandidateIds, productIsbn, matchByProductIdOnly ))
             {
                 continue;
             }
 
+            saleLine.ProductId = normalizedProductId;
             lines.Add( saleLine );
         }
 
-        IQueryable<VatReportCashSale> cashQuery = _db.VatReportCashSales
-            .AsNoTracking()
-            .Include( s => s.VatReport )
-            .Where( s => s.Quantity > 0 );
+        List<VatReportCashSale> cashSales = matchByProductIdOnly
+            ? await _db.VatReportCashSales
+                .AsNoTracking()
+                .Include( s => s.VatReport )
+                .Where( s => s.Quantity > 0 && productIdCandidates.Contains( s.ShopifyProductId ) )
+                .ToListAsync()
+            : await _db.VatReportCashSales
+                .AsNoTracking()
+                .Include( s => s.VatReport )
+                .Where( s =>
+                    s.Quantity > 0 &&
+                    (productIdCandidates.Contains( s.ShopifyProductId ) || s.ShopifyProductId == "") )
+                .ToListAsync();
 
-        List<VatReportCashSale> cashSales;
-        if (useTitleSearch)
+        if (matchByProductIdOnly || string.IsNullOrWhiteSpace( productIsbn ))
         {
-            cashSales = await cashQuery
-                .Where( s =>
-                    productIdCandidates.Contains( s.ShopifyProductId ) ||
-                    (s.ProductTitle != "" && EF.Functions.ILike( s.ProductTitle, likePattern! )) )
-                .ToListAsync();
             cashSales = cashSales
-                .Where( s =>
-                    productIdCandidates.Contains( s.ShopifyProductId ) ||
-                    VatReportHelpers.ProductTitlesMatch( s.ProductTitle, productName ) )
-                .ToList();
-        }
-        else
-        {
-            cashSales = await cashQuery
                 .Where( s => productIdCandidates.Contains( s.ShopifyProductId ) )
-                .ToListAsync();
+                .ToList();
         }
 
         foreach (VatReportCashSale sale in cashSales)
         {
             string productId = ShopifyIds.NormalizeProductId( sale.ShopifyProductId );
-            if (string.IsNullOrWhiteSpace( productId ))
-            {
-                continue;
-            }
-
             string variantTitleFromProduct = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( sale.ProductTitle );
             string variantId = ResolveEffectiveVariantId(
-                sale.ShopifyProductId,
+                string.IsNullOrWhiteSpace( productId ) ? normalizedProductId : sale.ShopifyProductId,
                 sale.ShopifyVariantId,
                 variantTitleFromProduct,
                 variantContext.VariantIdByTitle,
@@ -546,7 +842,7 @@ public class ProductLedgerService
 
             ProductLedgerSaleLine cashLine = new()
             {
-                ProductId = productId,
+                ProductId = string.IsNullOrWhiteSpace( productId ) ? normalizedProductId : productId,
                 VariantId = variantId,
                 VariantTitle = variantTitleFromProduct,
                 ProductTitle = sale.ProductTitle ?? string.Empty,
@@ -558,11 +854,12 @@ public class ProductLedgerService
                 OrderNumber = string.Empty,
                 ReportId = sale.VatReportId
             };
-            if (!SaleLineMatchesProduct( cashLine, normalizedCandidateIds, productName ))
+            if (!SaleLineMatchesProduct( cashLine, normalizedCandidateIds, productIsbn, matchByProductIdOnly ))
             {
                 continue;
             }
 
+            cashLine.ProductId = normalizedProductId;
             lines.Add( cashLine );
         }
 
@@ -587,10 +884,56 @@ public class ProductLedgerService
         candidates.Add( $"gid://shopify/Product/{productId}" );
     }
 
+    private static bool ReportItemMatchesProduct(
+        VatReportRowItem item,
+        HashSet<string> normalizedCandidateIds,
+        string? productIsbn,
+        bool matchByProductIdOnly )
+    {
+        string lineProductId = ShopifyIds.NormalizeProductId( item.ShopifyProductId );
+        if (!string.IsNullOrWhiteSpace( lineProductId ) && normalizedCandidateIds.Contains( lineProductId ))
+        {
+            return true;
+        }
+
+        if (matchByProductIdOnly)
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace( productIsbn ) &&
+               VatReportHelpers.IsbnsMatch( item.Barcode, productIsbn );
+    }
+
+    private static string? ResolveContextProductIsbn(
+        string normalizedProductId,
+        LedgerVariantContext variantContext )
+    {
+        if (variantContext.IsbnByProductId.TryGetValue( normalizedProductId, out string? isbn ) &&
+            !string.IsNullOrWhiteSpace( isbn ))
+        {
+            return isbn;
+        }
+
+        return null;
+    }
+
+    private static string ResolveLineIsbn( ProductLedgerSaleLine line )
+    {
+        string fromBarcode = VatReportHelpers.NormalizeIsbn( line.Barcode );
+        if (!string.IsNullOrWhiteSpace( fromBarcode ))
+        {
+            return fromBarcode;
+        }
+
+        return VatReportHelpers.ExtractIsbnFromText( line.ProductTitle ) ?? string.Empty;
+    }
+
     private static bool SaleLineMatchesProduct(
         ProductLedgerSaleLine line,
         HashSet<string> normalizedCandidateIds,
-        string? productName )
+        string? productIsbn,
+        bool matchByProductIdOnly = false )
     {
         string lineProductId = ShopifyIds.NormalizeProductId( line.ProductId );
         if (!string.IsNullOrWhiteSpace( lineProductId ) && normalizedCandidateIds.Contains( lineProductId ))
@@ -598,8 +941,17 @@ public class ProductLedgerService
             return true;
         }
 
-        return !string.IsNullOrWhiteSpace( productName ) &&
-               VatReportHelpers.ProductTitlesMatch( line.ProductTitle, productName );
+        if (matchByProductIdOnly)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace( productIsbn ))
+        {
+            return false;
+        }
+
+        return VatReportHelpers.IsbnsMatch( ResolveLineIsbn( line ), productIsbn );
     }
 
     public static List<string> BuildProductIdCandidates( string normalizedProductId )
@@ -638,18 +990,12 @@ public class ProductLedgerService
             .Where( i => i.Quantity > 0 )
             .ToListAsync();
 
-        List<(string ProductId, string ProductTitle)> reportProductTitles =
-            await BuildReportProductTitleIndexAsync( orderSaleLines );
-        Dictionary<string, string> knownProductNames = await BuildKnownProductNameIndexAsync( variantContext );
-
         foreach (VatReportRowItem item in orderSaleLines)
         {
             AppendReportOrderSaleLine(
                 lines,
                 item,
-                variantContext,
-                reportProductTitles,
-                knownProductNames );
+                variantContext );
         }
 
         if (repairUnresolved)
@@ -665,12 +1011,19 @@ public class ProductLedgerService
 
         foreach (VatReportCashSale sale in cashSaleLines)
         {
-            string productId = ShopifyIds.NormalizeProductId( sale.ShopifyProductId );
-            if (string.IsNullOrWhiteSpace( productId )) continue;
+            string? canonicalProductId = ResolveCanonicalProductId(
+                sale.ShopifyProductId,
+                string.Empty,
+                variantContext.ProductIdByIsbn,
+                variantContext.IsbnByProductId );
+            if (string.IsNullOrWhiteSpace( canonicalProductId ))
+            {
+                continue;
+            }
 
             string variantTitleFromProduct = VatReportHelpers.ExtractVariantTitleFromProductLineTitle( sale.ProductTitle );
             string variantId = ResolveEffectiveVariantId(
-                sale.ShopifyProductId,
+                canonicalProductId,
                 sale.ShopifyVariantId,
                 variantTitleFromProduct,
                 variantContext.VariantIdByTitle,
@@ -679,7 +1032,7 @@ public class ProductLedgerService
 
             lines.Add( new ProductLedgerSaleLine
             {
-                ProductId = productId,
+                ProductId = canonicalProductId,
                 VariantId = variantId,
                 VariantTitle = variantTitleFromProduct,
                 Quantity = sale.Quantity,
@@ -855,27 +1208,25 @@ public class ProductLedgerService
     private static void AppendReportOrderSaleLine(
         List<ProductLedgerSaleLine> lines,
         VatReportRowItem item,
-        LedgerVariantContext variantContext,
-        IReadOnlyList<(string ProductId, string ProductTitle)> reportProductTitles,
-        IReadOnlyDictionary<string, string> knownProductNames )
+        LedgerVariantContext variantContext )
     {
         ProductLedgerSaleLine saleLine = CreateReportOrderSaleLine( item, item.VatReportRow, variantContext );
-        if (string.IsNullOrWhiteSpace( saleLine.ProductId ))
+        string? canonicalProductId = ResolveCanonicalProductId(
+            saleLine.ProductId,
+            item.Barcode,
+            variantContext.ProductIdByIsbn,
+            variantContext.IsbnByProductId );
+        if (string.IsNullOrWhiteSpace( canonicalProductId ))
         {
-            string? resolvedProductId = ResolveProductIdFromTitle(
-                item.ProductTitle,
-                reportProductTitles,
-                variantContext.ProductTitleById )
-                ?? ResolveProductIdFromKnownProducts( item.ProductTitle, knownProductNames );
-            if (string.IsNullOrWhiteSpace( resolvedProductId ))
-            {
-                return;
-            }
+            return;
+        }
 
-            saleLine.ProductId = resolvedProductId;
+        if (!string.Equals( saleLine.ProductId, canonicalProductId, StringComparison.OrdinalIgnoreCase ))
+        {
+            saleLine.ProductId = canonicalProductId;
             string variantTitleHint = ResolveOrderSaleVariantTitleHint( item );
             saleLine.VariantId = ResolveEffectiveVariantId(
-                resolvedProductId,
+                canonicalProductId,
                 item.ShopifyVariantId,
                 variantTitleHint,
                 variantContext.VariantIdByTitle,
@@ -886,50 +1237,46 @@ public class ProductLedgerService
         lines.Add( saleLine );
     }
 
-    private static string? ResolveProductIdFromTitle(
-        string? productTitle,
-        IReadOnlyList<(string ProductId, string ProductTitle)> reportProductTitles,
-        IReadOnlyDictionary<string, string> catalogTitleById )
+    private static string? ResolveCanonicalProductId(
+        string? rawProductId,
+        string? barcodeOrIsbn,
+        IReadOnlyDictionary<string, string> productIdByIsbn,
+        IReadOnlyDictionary<string, string> catalogIsbnByProductId )
     {
-        if (string.IsNullOrWhiteSpace( productTitle ))
+        string normalized = ShopifyIds.NormalizeProductId( rawProductId ?? string.Empty );
+        if (!string.IsNullOrWhiteSpace( normalized ))
         {
-            return null;
+            return normalized;
         }
 
-        foreach ((string productId, string title) in reportProductTitles)
-        {
-            if (VatReportHelpers.ProductTitlesMatch( productTitle, title ) ||
-                VatReportHelpers.ProductTitleContainedIn( productTitle, title ))
-            {
-                return productId;
-            }
-        }
-
-        foreach (KeyValuePair<string, string> entry in catalogTitleById )
-        {
-            if (VatReportHelpers.ProductTitlesMatch( productTitle, entry.Value ) ||
-                VatReportHelpers.ProductTitleContainedIn( productTitle, entry.Value ))
-            {
-                return entry.Key;
-            }
-        }
-
-        return null;
+        return ResolveProductIdFromIsbn( barcodeOrIsbn, productIdByIsbn, catalogIsbnByProductId );
     }
 
-    private static string? ResolveProductIdFromKnownProducts(
-        string? productTitle,
-        IReadOnlyDictionary<string, string> knownProductNames )
+    private static string? ResolveProductIdFromIsbn(
+        string? rawIsbn,
+        IReadOnlyDictionary<string, string> productIdByIsbn,
+        IReadOnlyDictionary<string, string> catalogIsbnByProductId )
     {
-        if (string.IsNullOrWhiteSpace( productTitle ))
+        string isbn = VatReportHelpers.NormalizeIsbn( rawIsbn );
+        if (string.IsNullOrWhiteSpace( isbn ))
+        {
+            isbn = VatReportHelpers.ExtractIsbnFromText( rawIsbn ) ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace( isbn ))
         {
             return null;
         }
 
-        foreach (KeyValuePair<string, string> entry in knownProductNames )
+        if (productIdByIsbn.TryGetValue( isbn, out string? productId ) &&
+            !string.IsNullOrWhiteSpace( productId ))
         {
-            if (VatReportHelpers.ProductTitlesMatch( productTitle, entry.Value ) ||
-                VatReportHelpers.ProductTitleContainedIn( productTitle, entry.Value ))
+            return ShopifyIds.NormalizeProductId( productId );
+        }
+
+        foreach (KeyValuePair<string, string> entry in catalogIsbnByProductId)
+        {
+            if (VatReportHelpers.IsbnsMatch( isbn, entry.Value ))
             {
                 return entry.Key;
             }
@@ -959,6 +1306,7 @@ public class ProductLedgerService
             VariantId = variantId,
             VariantTitle = variantTitleHint,
             ProductTitle = item.ProductTitle ?? string.Empty,
+            Barcode = item.Barcode ?? string.Empty,
             Quantity = item.Quantity,
             Source = "order",
             DateUtc = reportRow.OrderDateUtc,
@@ -1049,16 +1397,30 @@ public class ProductLedgerService
     {
         foreach (ShopifyOrderDto order in orders)
         {
+            string? productIsbn = variantContext.IsbnByProductId.TryGetValue( normalizedProductId, out string? isbn )
+                ? isbn
+                : null;
+
             foreach (ShopifyLineItemDto item in order.Items)
             {
                 if (item.Quantity <= 0) continue;
-                if (!ProductIdMatches( normalizedProductId, item.ShopifyProductId ))
+
+                bool matchesProduct = ProductIdMatches( normalizedProductId, item.ShopifyProductId );
+                if (!matchesProduct && !string.IsNullOrWhiteSpace( productIsbn ))
+                {
+                    matchesProduct = VatReportHelpers.IsbnsMatch( item.Barcode, productIsbn );
+                }
+
+                if (!matchesProduct)
                 {
                     continue;
                 }
 
                 string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId );
-                if (string.IsNullOrWhiteSpace( productId )) continue;
+                if (string.IsNullOrWhiteSpace( productId ))
+                {
+                    productId = normalizedProductId;
+                }
 
                 string variantId = ResolveEffectiveVariantId(
                     item.ShopifyProductId,
@@ -1073,6 +1435,8 @@ public class ProductLedgerService
                     ProductId = productId,
                     VariantId = variantId,
                     VariantTitle = item.VariantTitle,
+                    ProductTitle = item.Title,
+                    Barcode = item.Barcode,
                     Quantity = item.Quantity,
                     Source = "shopify",
                     DateUtc = order.CreatedAtUtc,
@@ -1086,20 +1450,52 @@ public class ProductLedgerService
     {
         IReadOnlyDictionary<string, string> defaultVariantByProduct =
             await LoadMergedDefaultVariantByProductAsync();
-        IReadOnlyDictionary<string, string> variantTitleById =
-            await _variantLookup.GetVariantTitleByIdMapCachedAsync();
-        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
-            await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+        IReadOnlyDictionary<string, string> variantTitleById;
+        IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle;
+        if (_variantLookup.IsCatalogCacheWarm)
+        {
+            try
+            {
+                variantTitleById = await _variantLookup.GetVariantTitleByIdMapCachedAsync();
+                variantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            }
+            catch
+            {
+                variantTitleById = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+                variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+            }
+        }
+        else
+        {
+            variantTitleById = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+            variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+        }
+
         IReadOnlyDictionary<string, string> legacySaleVariantByProduct =
             await LoadLegacySaleVariantByProductAsync( defaultVariantByProduct, variantIdByTitle );
         IReadOnlyDictionary<string, string> productTitleById;
-        try
+        IReadOnlyDictionary<string, string> isbnByProductId;
+        IReadOnlyDictionary<string, string> productIdByIsbn;
+        if (_variantLookup.IsCatalogCacheWarm)
         {
-            productTitleById = await _variantLookup.GetProductTitleByIdMapCachedAsync();
+            try
+            {
+                productTitleById = await _variantLookup.GetProductTitleByIdMapCachedAsync();
+                isbnByProductId = await _variantLookup.GetIsbnByProductIdMapCachedAsync();
+                productIdByIsbn = await _variantLookup.GetProductIdByIsbnMapCachedAsync();
+            }
+            catch
+            {
+                productTitleById = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+                isbnByProductId = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+                productIdByIsbn = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+            }
         }
-        catch
+        else
         {
             productTitleById = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+            isbnByProductId = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+            productIdByIsbn = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
         }
 
         return new LedgerVariantContext(
@@ -1110,7 +1506,9 @@ public class ProductLedgerService
                 StringComparer.OrdinalIgnoreCase ),
             new Dictionary<string, string>( variantTitleById, StringComparer.OrdinalIgnoreCase ),
             legacySaleVariantByProduct,
-            new Dictionary<string, string>( productTitleById, StringComparer.OrdinalIgnoreCase ) );
+            new Dictionary<string, string>( productTitleById, StringComparer.OrdinalIgnoreCase ),
+            new Dictionary<string, string>( isbnByProductId, StringComparer.OrdinalIgnoreCase ),
+            new Dictionary<string, string>( productIdByIsbn, StringComparer.OrdinalIgnoreCase ) );
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetDefaultVariantByProductAsync() =>
@@ -1121,11 +1519,18 @@ public class ProductLedgerService
         IReadOnlyDictionary<string, string> defaultVariantByProduct =
             await LoadMergedDefaultVariantByProductAsync();
         IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle;
-        try
+        if (_variantLookup.IsCatalogCacheWarm)
         {
-            variantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            try
+            {
+                variantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            }
+            catch
+            {
+                variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+            }
         }
-        catch
+        else
         {
             variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
         }
@@ -1136,25 +1541,35 @@ public class ProductLedgerService
     private async Task<IReadOnlyDictionary<string, string>> LoadMergedDefaultVariantByProductAsync()
     {
         Dictionary<string, string> merged = new( StringComparer.OrdinalIgnoreCase );
-        try
+        if (_variantLookup.IsCatalogCacheWarm)
         {
-            foreach (KeyValuePair<string, string> entry in
-                     await _variantLookup.GetDefaultVariantIdByProductCachedAsync())
+            try
             {
-                merged[entry.Key] = entry.Value;
+                foreach (KeyValuePair<string, string> entry in
+                         await _variantLookup.GetDefaultVariantIdByProductCachedAsync())
+                {
+                    merged[entry.Key] = entry.Value;
+                }
             }
-        }
-        catch
-        {
-            // Shopify catalog is optional; fall back to ledger lines below.
+            catch
+            {
+                // Shopify catalog is optional; fall back to ledger lines below.
+            }
         }
 
         IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle;
-        try
+        if (_variantLookup.IsCatalogCacheWarm)
         {
-            variantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            try
+            {
+                variantIdByTitle = await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            }
+            catch
+            {
+                variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+            }
         }
-        catch
+        else
         {
             variantIdByTitle = new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
         }
@@ -1350,6 +1765,7 @@ public class ProductLedgerService
             .Where( line =>
                 string.Equals( line.Source, "order", StringComparison.OrdinalIgnoreCase ) &&
                 !string.IsNullOrWhiteSpace( line.ShopifyOrderId ) &&
+                !line.ReportId.HasValue &&
                 (reportedPeriodsToSkip is null ||
                  !reportedPeriodsToSkip.Contains( (line.DateUtc.Year, line.DateUtc.Month) )) )
             .ToList();
@@ -1499,32 +1915,41 @@ public class ProductLedgerService
             return;
         }
 
+        string productId = ShopifyIds.NormalizeProductId( line.ProductId );
         string variantTitle = ResolveLineVariantTitle(
-            line.ProductId,
+            productId,
             line.VariantId,
             line.VariantTitle,
             variantContext );
-        string variantId = VariantLegacyDefaults.ResolveVariantId(
-            line.ProductId,
+        string variantId = ResolveEffectiveVariantId(
+            productId,
             line.VariantId,
-            variantContext.DefaultVariantByProduct,
+            variantTitle,
             variantContext.VariantIdByTitle,
+            variantContext.DefaultVariantByProduct,
             variantContext.LegacySaleVariantByProduct );
 
         if (!string.IsNullOrWhiteSpace( variantId ))
         {
-            AddQuantity( allocation.SoldByLine, line.ProductId, variantId, line.Quantity );
+            AddQuantity( allocation.SoldByLine, productId, variantId, line.Quantity );
+            return;
+        }
+
+        if (VariantLegacyDefaults.GetNamedVariantCount( productId, variantContext.VariantIdByTitle ) <= 1)
+        {
+            allocation.LegacyUnnamedSoldByProduct[productId] =
+                allocation.LegacyUnnamedSoldByProduct.GetValueOrDefault( productId ) + line.Quantity;
             return;
         }
 
         if (VariantLegacyDefaults.IsLegacyUnnamedSaleLine(
-                line.ProductId,
+                productId,
                 line.VariantId,
                 variantTitle,
                 variantContext.VariantIdByTitle ))
         {
-            allocation.LegacyUnnamedSoldByProduct[line.ProductId] =
-                allocation.LegacyUnnamedSoldByProduct.GetValueOrDefault( line.ProductId ) + line.Quantity;
+            allocation.LegacyUnnamedSoldByProduct[productId] =
+                allocation.LegacyUnnamedSoldByProduct.GetValueOrDefault( productId ) + line.Quantity;
         }
     }
 
@@ -1752,7 +2177,9 @@ public class ProductLedgerService
         IReadOnlyDictionary<string, Dictionary<string, string>> VariantIdByTitle,
         IReadOnlyDictionary<string, string> VariantTitleById,
         IReadOnlyDictionary<string, string> LegacySaleVariantByProduct,
-        IReadOnlyDictionary<string, string> ProductTitleById );
+        IReadOnlyDictionary<string, string> ProductTitleById,
+        IReadOnlyDictionary<string, string> IsbnByProductId,
+        IReadOnlyDictionary<string, string> ProductIdByIsbn );
 
     private sealed class ProductLedgerSaleLine
     {
@@ -1760,6 +2187,7 @@ public class ProductLedgerService
         public string VariantId { get; set; } = string.Empty;
         public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;
+        public string Barcode { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public string Source { get; set; } = string.Empty;
         public DateTime DateUtc { get; set; }

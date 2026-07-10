@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using backend.Models;
+using backend.Services;
 
 namespace backend.Services.Shopify;
 
@@ -49,6 +50,77 @@ public class ShopifyProductCatalogService
             .ToList();
     }
 
+    public async Task<Dictionary<string, string>> FetchProductTitlesByIdsAsync(
+        string shop,
+        string accessToken,
+        IReadOnlyCollection<string> normalizedProductIds )
+    {
+        Dictionary<string, string> titles = new( StringComparer.OrdinalIgnoreCase );
+        if (normalizedProductIds.Count == 0)
+        {
+            return titles;
+        }
+
+        List<string> gids = normalizedProductIds
+            .Select( ShopifyIds.NormalizeProductId )
+            .Where( id => !string.IsNullOrWhiteSpace( id ) )
+            .Select( ShopifyIds.ToProductGid )
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .ToList();
+
+        const int batchSize = 50;
+        for (int offset = 0; offset < gids.Count; offset += batchSize)
+        {
+            string[] batch = gids.Skip( offset ).Take( batchSize ).ToArray();
+            using JsonDocument json = await _graphql.ExecuteAsync(
+                shop,
+                accessToken,
+                ShopifyGraphqlQueries.ProductTitleNodes,
+                new { ids = batch } );
+
+            if (!json.RootElement.TryGetProperty( "data", out JsonElement dataEl ) ||
+                !dataEl.TryGetProperty( "nodes", out JsonElement nodesEl ) ||
+                nodesEl.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement node in nodesEl.EnumerateArray())
+            {
+                if (node.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                string productId = string.Empty;
+                if (node.TryGetProperty( "legacyResourceId", out JsonElement legacyIdEl ) &&
+                    legacyIdEl.ValueKind == JsonValueKind.Number &&
+                    legacyIdEl.TryGetInt64( out long legacyId ))
+                {
+                    productId = legacyId.ToString();
+                }
+                else if (node.TryGetProperty( "id", out JsonElement gidEl ) &&
+                         gidEl.ValueKind == JsonValueKind.String)
+                {
+                    productId = ShopifyIds.NormalizeProductId( gidEl.GetString() ?? string.Empty );
+                }
+
+                string title = node.TryGetProperty( "title", out JsonElement titleEl ) &&
+                               titleEl.ValueKind == JsonValueKind.String
+                    ? (titleEl.GetString() ?? string.Empty).Trim()
+                    : string.Empty;
+                if (string.IsNullOrWhiteSpace( productId ) || string.IsNullOrWhiteSpace( title ))
+                {
+                    continue;
+                }
+
+                titles[productId] = title;
+            }
+        }
+
+        return titles;
+    }
+
     private static ShopifyCatalogProduct? ParseProductNode( JsonElement node )
     {
         string productName = node.GetProperty( "title" ).GetString() ?? "—";
@@ -80,6 +152,10 @@ public class ShopifyProductCatalogService
             variantsEl.TryGetProperty( "edges", out JsonElement variantEdgesEl ) &&
             variantEdgesEl.ValueKind == JsonValueKind.Array)
         {
+            string? defaultVariantId = null;
+            string? defaultVariantBarcode = null;
+            int defaultVariantQuantity = 0;
+
             foreach (JsonElement edgeEl in variantEdgesEl.EnumerateArray())
             {
                 if (!edgeEl.TryGetProperty( "node", out JsonElement variantNode ) ||
@@ -95,6 +171,10 @@ public class ShopifyProductCatalogService
                 string variantName = variantNode.TryGetProperty( "title", out JsonElement variantTitleEl ) &&
                                      variantTitleEl.ValueKind == JsonValueKind.String
                     ? (variantTitleEl.GetString() ?? string.Empty)
+                    : string.Empty;
+                string variantBarcode = variantNode.TryGetProperty( "barcode", out JsonElement barcodeEl ) &&
+                                        barcodeEl.ValueKind == JsonValueKind.String
+                    ? (barcodeEl.GetString() ?? string.Empty).Trim()
                     : string.Empty;
                 int variantQuantity = variantNode.TryGetProperty( "inventoryQuantity", out JsonElement variantQtyEl ) &&
                                       variantQtyEl.ValueKind == JsonValueKind.Number &&
@@ -127,9 +207,17 @@ public class ShopifyProductCatalogService
                     }
                 }
 
-                if (string.IsNullOrWhiteSpace( variantName ) ||
-                    string.Equals( variantName, "Default Title", StringComparison.OrdinalIgnoreCase ))
+                bool isDefaultTitle = string.IsNullOrWhiteSpace( variantName ) ||
+                                      string.Equals( variantName, "Default Title", StringComparison.OrdinalIgnoreCase );
+                if (isDefaultTitle)
                 {
+                    defaultVariantId ??= variantId;
+                    if (!string.IsNullOrWhiteSpace( variantBarcode ))
+                    {
+                        defaultVariantBarcode = variantBarcode;
+                    }
+
+                    defaultVariantQuantity = variantQuantity;
                     continue;
                 }
 
@@ -137,7 +225,19 @@ public class ShopifyProductCatalogService
                 {
                     VariantId = variantId,
                     VariantName = variantName,
+                    Barcode = variantBarcode,
                     QuantityInStock = variantQuantity
+                } );
+            }
+
+            if (variants.Count == 0 && !string.IsNullOrWhiteSpace( defaultVariantId ))
+            {
+                variants.Add( new ProductVariantItem
+                {
+                    VariantId = defaultVariantId,
+                    VariantName = "Default Title",
+                    Barcode = defaultVariantBarcode ?? string.Empty,
+                    QuantityInStock = defaultVariantQuantity
                 } );
             }
         }
@@ -166,6 +266,7 @@ public class ShopifyProductCatalogService
         }
 
         string author = ParseAuthor( node );
+        string isbn = ParseIsbn( node, variants );
 
         return new ShopifyCatalogProduct
         {
@@ -173,10 +274,77 @@ public class ShopifyProductCatalogService
             Title = productName,
             ProductType = productType,
             Author = author,
+            Isbn = isbn,
             TotalInventory = quantityInStock,
             ImageUrl = string.IsNullOrWhiteSpace( mainImageUrl ) ? null : mainImageUrl,
             Variants = variants
         };
+    }
+
+    private static string ParseIsbn( JsonElement node, IReadOnlyList<ProductVariantItem> variants )
+    {
+        string? fromAlias = ReadAliasedMetafield( node, "isbnMetafield" );
+        if (!string.IsNullOrWhiteSpace( fromAlias ))
+        {
+            string normalized = VatReportHelpers.NormalizeIsbn( fromAlias );
+            if (!string.IsNullOrWhiteSpace( normalized ))
+            {
+                return normalized;
+            }
+        }
+
+        if (node.TryGetProperty( "metafields", out JsonElement metafieldsEl ) &&
+            metafieldsEl.ValueKind == JsonValueKind.Object &&
+            metafieldsEl.TryGetProperty( "edges", out JsonElement metafieldEdgesEl ) &&
+            metafieldEdgesEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement edge in metafieldEdgesEl.EnumerateArray())
+            {
+                if (!edge.TryGetProperty( "node", out JsonElement metafieldNode ) ||
+                    metafieldNode.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                string key = metafieldNode.TryGetProperty( "key", out JsonElement keyEl ) &&
+                               keyEl.ValueKind == JsonValueKind.String
+                    ? (keyEl.GetString() ?? string.Empty)
+                    : string.Empty;
+                if (!string.Equals( key, "isbn", StringComparison.OrdinalIgnoreCase ))
+                {
+                    continue;
+                }
+
+                string? value = ReadMetafieldValue( metafieldNode );
+                string normalized = VatReportHelpers.NormalizeIsbn( value );
+                if (!string.IsNullOrWhiteSpace( normalized ))
+                {
+                    return normalized;
+                }
+            }
+        }
+
+        foreach (ProductVariantItem variant in variants)
+        {
+            string normalized = VatReportHelpers.NormalizeIsbn( variant.Barcode );
+            if (!string.IsNullOrWhiteSpace( normalized ))
+            {
+                return normalized;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string? ReadMetafieldValue( JsonElement metafieldNode )
+    {
+        if (metafieldNode.TryGetProperty( "value", out JsonElement valueEl ) &&
+            valueEl.ValueKind == JsonValueKind.String)
+        {
+            return valueEl.GetString();
+        }
+
+        return null;
     }
 
     private static string ParseAuthor( JsonElement node )

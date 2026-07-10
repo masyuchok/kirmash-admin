@@ -10,6 +10,8 @@ export type SupplierInventoryRow = {
   shopifyVariantId: string;
   variantTitle: string;
   productName: string;
+  productAuthor: string;
+  productType: string;
   supplierPrice: number;
   vatRatePercent: number;
   grossUnitPrice: number;

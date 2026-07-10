@@ -25,6 +25,7 @@ import {
   setVatReportLocked,
   moveVatReportRowToForeign,
   updateVatReportExpense,
+  updateVatReportExpensePaid,
   uploadVatReportExpenseInvoice,
   uploadVatReportRowInvoice,
   updateVatReportRow,
@@ -1914,6 +1915,24 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
     }
   };
 
+  const [expensePaidSavingId, setExpensePaidSavingId] = useState<number | null>(null);
+  const toggleExpensePaid = async (expenseId: number, nextPaid: boolean) => {
+    if (isLocked) return;
+    if (expensePaidSavingId === expenseId) return;
+    setExpensePaidSavingId(expenseId);
+    setError(null);
+    try {
+      await updateVatReportExpensePaid(expenseId, nextPaid);
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Памылка змянення аплаты');
+    } finally {
+      setExpensePaidSavingId((prev) => (prev === expenseId ? null : prev));
+    }
+  };
+
   const resetNewCashSaleForm = () => {
     setCashProductSearch('');
     setNewCashSale({
@@ -2022,7 +2041,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
   const submitUnpaidLink = async () => {
     if (!data?.periodYear || !data?.periodMonth || !unpaidLinkTarget?.supplierId) return;
     if (unpaidLinkMode === 'replace' && !selectedOverpaidProductId) {
-      setUnpaidLinkError('Выберыце пераплачаны тавар у фактуре.');
+      setUnpaidLinkError('Выберыце пераплочаны тавар у фактуре.');
       return;
     }
     if (unpaidLinkMode === 'link') {
@@ -2863,7 +2882,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                         : row.type === 'cash'
                           ? 'Наяўнымі'
                           : row.type === 'unpaid'
-                            ? 'Неаплачанае'
+                            ? 'Неаплочанае'
                             : 'Расход'}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums">
@@ -3999,7 +4018,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
       {activeDetailsPanel === 'unpaid' && (
         <div className="w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="border-b border-gray-100 px-6 py-4">
-            <h3 className="text-sm font-semibold text-gray-900">Неаплачаныя тавары</h3>
+            <h3 className="text-sm font-semibold text-gray-900">Неаплочаныя тавары</h3>
             <p className="mt-1 text-xs text-gray-500">
               Проданы ў гэтым месяцы (па даце продажы), але фактура пастаўшчыку не пакрыла гэты тавар.
               Прывязаныя да аплаты пазначаны нумарам фактуры.
@@ -4077,7 +4096,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
               {visibleUnpaidRows.length === 0 && (
                 <tr>
                   <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
-                    Усе проданыя тавары аплачаны па фактурах.
+                    Усе проданыя тавары аплочаны па фактурах.
                   </td>
                 </tr>
               )}
@@ -4190,7 +4209,17 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                     <td className={`max-w-[16rem] truncate px-4 py-3 ${rowHighlightClass}`} title={expense.comment || undefined}>
                       {expense.comment || '—'}
                     </td>
-                    <td className={`px-4 py-3 text-center ${rowHighlightClass}`}>{expense.isPaid ? 'Так' : 'Не'}</td>
+                    <td className={`px-4 py-3 text-center ${rowHighlightClass}`}>
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-primary"
+                        checked={expense.isPaid}
+                        disabled={isLocked || expensePaidSavingId === expense.id}
+                        onChange={(e) => void toggleExpensePaid(expense.id, e.target.checked)}
+                        aria-label="Аплочана"
+                        title={isLocked ? lockedTitle : 'Аплочана'}
+                      />
+                    </td>
                     <td className={`px-4 py-3 text-right ${rowHighlightClass}`}>
                       <div className="inline-flex items-center gap-2">
                         {expense.invoiceFileName && (
@@ -4821,10 +4850,10 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       />
                       <span>
                         <span className="block text-sm font-medium text-gray-900">
-                          Замяніць пераплачаны тавар у фактуре
+                          Замяніць пераплочаны тавар у фактуре
                         </span>
                         <span className="mt-0.5 block text-xs text-gray-500">
-                          Тавар, за які заплачана больш, чым прадана.
+                          Тавар, за які заплочана больш, чым прадана.
                         </span>
                       </span>
                     </label>
@@ -4837,7 +4866,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                       />
                     )}
                     {unpaidLinkOptions.overpaidProducts.length === 0 && (
-                      <p className="text-xs text-gray-500">Пераплачаных тавараў у гэтага пастаўшчыка няма.</p>
+                      <p className="text-xs text-gray-500">Пераплочаных тавараў у гэтага пастаўшчыка няма.</p>
                     )}
                   </div>
 
@@ -4859,7 +4888,7 @@ export default function ReportDetailsClient({ reportId }: { reportId: number }) 
                           Прывязаць да аплаты пастаўшчыка
                         </span>
                         <span className="mt-0.5 block text-xs text-gray-500">
-                          Неаплачаны тавар пакрываецца выбранай фактурай або іншым запісам аплаты.
+                          Неаплочаны тавар пакрываецца выбранай фактурай або іншым запісам аплаты.
                         </span>
                       </span>
                     </label>

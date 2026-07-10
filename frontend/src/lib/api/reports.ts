@@ -434,6 +434,19 @@ export async function updateVatReportExpense(
   }
 }
 
+export async function updateVatReportExpensePaid(expenseId: number, isPaid: boolean): Promise<void> {
+  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/paid`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: apiCredentials,
+    body: JSON.stringify({ isPaid }),
+  });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося змяніць аплату');
+    throw new Error(msg);
+  }
+}
+
 export async function uploadVatReportExpenseInvoice(expenseId: number, file: File): Promise<void> {
   const formData = new FormData();
   formData.append('file', file);
@@ -780,7 +793,7 @@ export async function linkUnpaidProduct(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося прывязаць неаплачаны тавар');
+    const msg = await readErrorMessage(res, 'Не ўдалося прывязаць неаплочаны тавар');
     throw new Error(msg);
   }
 }

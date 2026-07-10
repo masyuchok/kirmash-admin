@@ -12,6 +12,7 @@ import { exportUnpaidSupplierInventoryToExcel } from '@/lib/suppliers/inventoryE
 import { calcGrossUnitPrice, inventoryRowKey } from '@/lib/suppliers/inventoryPricing';
 import {
   flattenInventoryGroups,
+  formatInventoryProductTitle,
   groupInventoryRows,
   sumInventoryGroup,
   type InventoryGroupTotals,
@@ -146,7 +147,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
       supplierName: supplierName?.trim() || undefined,
     });
     if (result.exported === 0) {
-      setExportNotice('Няма неаплачаных прадалагаў для экспарту.');
+      setExportNotice('Няма неаплочаных прадалагаў для экспарту.');
       return;
     }
     setExportNotice(`Экспартавана радкоў: ${result.exported}.`);
@@ -203,8 +204,11 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
     const q = searchQuery.trim().toLowerCase();
     if (q) {
       filtered = filtered.filter((row) => {
+        const displayName = formatInventoryProductTitle(row);
         return (
+          displayName.toLowerCase().includes(q) ||
           row.productName.toLowerCase().includes(q) ||
+          row.productAuthor.toLowerCase().includes(q) ||
           row.variantTitle.toLowerCase().includes(q) ||
           row.supplierName.toLowerCase().includes(q)
         );
@@ -220,7 +224,10 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
         const direction = sort.direction === 'asc' ? 1 : -1;
         return (getGroupSortValue(a, sort.column) - getGroupSortValue(b, sort.column)) * direction;
       }
-      const byName = a.productName.localeCompare(b.productName, 'be');
+      const byName = formatInventoryProductTitle(a.variants[0]).localeCompare(
+        formatInventoryProductTitle(b.variants[0]),
+        'be'
+      );
       if (byName !== 0) return byName;
       return a.supplierName.localeCompare(b.supplierName, 'be');
     });
@@ -255,26 +262,14 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
   };
 
   const openHistory = async (row: SupplierInventoryRow) => {
-    const subtitleParts: string[] = [];
-    if (row.variantTitle.trim()) {
-      subtitleParts.push(row.variantTitle.trim());
-    }
-    if (row.supplierName.trim()) {
-      subtitleParts.push(row.supplierName.trim());
-    }
-
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError(null);
     setHistoryData(null);
-    setHistorySubtitle(subtitleParts.length > 0 ? subtitleParts.join(' · ') : undefined);
+    setHistorySubtitle(undefined);
 
     try {
-      const history = await fetchProductHistory(row.shopifyProductId, {
-        supplierId: row.supplierId,
-        shopifyVariantId: row.shopifyVariantId.trim() || undefined,
-        variantTitle: row.variantTitle.trim() || undefined,
-      });
+      const history = await fetchProductHistory(row.shopifyProductId);
       setHistoryData(history);
     } catch (err: unknown) {
       setHistoryError(err instanceof Error ? err.message : 'Памылка загрузкі гісторыі');
@@ -358,7 +353,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
         {renderSortHeader('received', 'Атрымана ўсяго')}
       </th>
       <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('paid', 'Аплачана ўсяго')}
+        {renderSortHeader('paid', 'Аплочана ўсяго')}
       </th>
       <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
         {renderSortHeader('stock', 'У наяўнасці')}
@@ -367,7 +362,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
         {renderSortHeader('sold', 'Прадана')}
       </th>
       <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('unpaid', 'Не аплачана')}
+        {renderSortHeader('unpaid', 'Не аплочана')}
       </th>
       <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">Дзеі</th>
     </tr>
@@ -423,7 +418,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
               <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-500">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="size-3 rounded bg-amber-100 ring-1 ring-amber-300" aria-hidden />
-                  прадана, не аплачана
+                  прадана, не аплочана
                 </span>
                 <span className="inline-flex items-center gap-1.5">
                   <span className="size-3 rounded bg-violet-100 ring-1 ring-violet-300" aria-hidden />
@@ -436,7 +431,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                 type="button"
                 onClick={handleExportExcel}
                 className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
-                title="Экспарт неаплачаных прадалагаў у Excel"
+                title="Экспарт неаплочаных прадалагаў у Excel"
               >
                 <FiDownload className="size-4" aria-hidden />
                 Excel
@@ -508,7 +503,9 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                             <span aria-hidden>{isCollapsed ? '▸' : '▾'}</span>
                           </button>
                           <div className="flex min-w-0 flex-col gap-1">
-                            <span className="font-medium">{group.productName}</span>
+                            <span className="font-medium">
+                              {formatInventoryProductTitle(group.variants[0])}
+                            </span>
                             {overpaidQty > 0 && (
                               <span className="inline-flex w-fit rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
                                 пераплата {overpaidQty}
@@ -516,7 +513,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                             )}
                             {unpaidQty > 0 && (
                               <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
-                                не аплачана {unpaidQty}
+                                не аплочана {unpaidQty}
                               </span>
                             )}
                           </div>
@@ -581,14 +578,14 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                               )}
                               {unpaidQty > 0 && (
                                 <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
-                                  не аплачана {unpaidQty}
+                                  не аплочана {unpaidQty}
                                 </span>
                               )}
                             </div>
                           </div>
                         ) : (
                           <>
-                            <span>{row.productName}</span>
+                            <span>{formatInventoryProductTitle(row)}</span>
                             {overpaidQty > 0 && (
                               <span className="inline-flex w-fit rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
                                 пераплата {overpaidQty}
@@ -596,7 +593,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                             )}
                             {unpaidQty > 0 && (
                               <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
-                                не аплачана {unpaidQty}
+                                не аплочана {unpaidQty}
                               </span>
                             )}
                           </>
@@ -622,7 +619,7 @@ export default function SupplierInventoryClient({ supplierId = null, supplierNam
                           void openHistory(row);
                         }}
                         className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
-                        aria-label={`Гісторыя: ${displayRow.isVariantChild ? variantLabel : row.productName}`}
+                        aria-label={`Гісторыя: ${displayRow.isVariantChild ? variantLabel : formatInventoryProductTitle(row)}`}
                         title="Гісторыя прадукту"
                       >
                         <FiClock className="size-3.5" aria-hidden />

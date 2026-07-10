@@ -554,10 +554,10 @@ export default function ProductsClient() {
             </div>
             <div
               className="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-800"
-              title="Падсветка радка азначае: пастаўшчыку аплачана больш, чым прадана."
+              title="Падсветка радка азначае: пастаўшчыку аплочана больш, чым прадана."
             >
               <span className="inline-block size-2 rounded-full bg-violet-500" />
-              Пераплачаныя тавары
+              Пераплочаныя тавары
             </div>
           </div>
         </div>

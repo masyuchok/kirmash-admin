@@ -13,6 +13,16 @@ export function calcGrossUnitPrice(
   return roundMoney(netUnitPrice * (1 + vatRatePercent / 100));
 }
 
+/** Net from supply gross when supplier is a VAT payer (matches expense VAT extraction). */
+export function calcNetUnitPriceFromGross(grossUnitPrice: number, vatRatePercent: number): number {
+  if (grossUnitPrice <= 0 || vatRatePercent <= 0) {
+    return roundMoney(grossUnitPrice);
+  }
+  const rate = vatRatePercent / 100;
+  const vatPart = roundMoney((grossUnitPrice * rate) / (1 + rate));
+  return roundMoney(grossUnitPrice - vatPart);
+}
+
 export function calcGrossLineTotal(
   netUnitPrice: number,
   vatRatePercent: number,

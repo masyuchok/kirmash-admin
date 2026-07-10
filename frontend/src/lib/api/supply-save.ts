@@ -9,6 +9,7 @@ export type SupplyProductSavePayload = {
   marginPercent: number;
   salePrice: number;
   syncWithShopify: boolean;
+  isReturnFinalized?: boolean;
 };
 
 export type SaveSupplyPayload = {

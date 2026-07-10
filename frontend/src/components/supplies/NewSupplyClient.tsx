@@ -269,6 +269,7 @@ export default function NewSupplyClient({
   const baselineQuantityByLine = useMemo(() => {
     const map: Record<string, number> = {};
     for (const row of baselineDrafts) {
+      if (row.isReturnFinalized) continue;
       const qty = Number(row.quantity);
       if (!Number.isFinite(qty)) continue;
       map[row.lineKey] = (map[row.lineKey] ?? 0) + qty;
@@ -558,6 +559,13 @@ export default function NewSupplyClient({
           }
         }
 
+        if (field === 'quantity') {
+          const qty = parseDecimal(value);
+          if (qty !== null && qty >= 0) {
+            next.isReturnFinalized = false;
+          }
+        }
+
         return next;
       })
     );
@@ -578,8 +586,26 @@ export default function NewSupplyClient({
   const toggleSyncWithShopify = (lineKey: string) => {
     setProductDrafts((prev) =>
       prev.map((row) =>
-        row.lineKey === lineKey ? { ...row, syncWithShopify: !row.syncWithShopify } : row
+        row.lineKey === lineKey && !row.isReturnFinalized
+          ? { ...row, syncWithShopify: !row.syncWithShopify }
+          : row
       )
+    );
+  };
+
+  const toggleReturnFinalized = (lineKey: string) => {
+    setProductDrafts((prev) =>
+      prev.map((row) => {
+        if (row.lineKey !== lineKey) return row;
+        const quantity = Number(row.quantity);
+        if (!Number.isFinite(quantity) || quantity >= 0) return row;
+        const isReturnFinalized = !row.isReturnFinalized;
+        return {
+          ...row,
+          isReturnFinalized,
+          syncWithShopify: isReturnFinalized ? false : row.syncWithShopify,
+        };
+      })
     );
   };
 
@@ -621,11 +647,11 @@ export default function NewSupplyClient({
         setSaveError(`Праверце колькасць для "${displayDraftLabel(row)}" (не можа быць 0).`);
         return;
       }
-      if (quantity < 0) {
+      if (quantity < 0 && !row.isReturnFinalized) {
         const maxReturn = getMaxReturnableQuantity(row.lineKey);
         if (maxReturn <= 0) {
           setSaveError(
-            `"${displayDraftLabel(row)}" нельга вярнуць — тавар не быў у пастаўках гэтага пастаўшчыка.`
+            `"${displayDraftLabel(row)}" нельга вярнуць — тавар не быў у пастаўках гэтага пастаўшчыка. Уключыце «Ужо вернута», калі вяртанне ўжо праведзена.`
           );
           return;
         }
@@ -658,16 +684,21 @@ export default function NewSupplyClient({
     setSaveError(null);
     setSaveOk(null);
     try {
-      const payloadProducts = productDrafts.map((row) => ({
-        shopifyProductId: row.productId,
-        shopifyVariantId: row.variantId || undefined,
-        quantity: Number(row.quantity || 0),
-        supplierPrice: Number(row.supplierPrice || 0),
-        vatRatePercent: Number(row.vatRatePercent || 0),
-        marginPercent: roundPercent(Number(row.marginPercent || 0)),
-        salePrice: Number(row.salePrice || 0),
-        syncWithShopify: row.syncWithShopify,
-      }));
+      const payloadProducts = productDrafts.map((row) => {
+        const quantity = Number(row.quantity || 0);
+        const isReturnFinalized = row.isReturnFinalized && quantity < 0;
+        return {
+          shopifyProductId: row.productId,
+          shopifyVariantId: row.variantId || undefined,
+          quantity,
+          supplierPrice: Number(row.supplierPrice || 0),
+          vatRatePercent: Number(row.vatRatePercent || 0),
+          marginPercent: roundPercent(Number(row.marginPercent || 0)),
+          salePrice: Number(row.salePrice || 0),
+          syncWithShopify: isReturnFinalized ? false : row.syncWithShopify,
+          isReturnFinalized,
+        };
+      });
 
       const result = await saveSupply({
         supplyId: supplyId ? Number(supplyId) : undefined,
@@ -986,28 +1017,44 @@ export default function NewSupplyClient({
                         const maxReturnable = getMaxReturnableQuantity(row.lineKey);
                         const quantityValue = Number(row.quantity);
                         const isReturn = Number.isFinite(quantityValue) && quantityValue < 0;
+                        const isFinalizedReturn = isReturn && row.isReturnFinalized;
                         return (
                           <div className="space-y-1">
                             <input
                               type="number"
-                              min={maxReturnable > 0 ? -maxReturnable : 0}
+                              min={isFinalizedReturn ? undefined : maxReturnable > 0 ? -maxReturnable : 0}
                               step="1"
                               value={row.quantity}
                               onChange={(e) =>
                                 updateDraftField(row.lineKey, 'quantity', readFieldValue(e))
                               }
                               title={
-                                maxReturnable > 0
-                                  ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
-                                  : undefined
+                                isFinalizedReturn
+                                  ? 'Закрэпленае вяртанне — толькі для гісторыі'
+                                  : maxReturnable > 0
+                                    ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
+                                    : undefined
                               }
                               className={`w-24 rounded-lg border bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 ${
                                 isReturn
-                                  ? 'border-amber-300 ring-amber-100'
+                                  ? isFinalizedReturn
+                                    ? 'border-emerald-300 bg-emerald-50 ring-emerald-100'
+                                    : 'border-amber-300 ring-amber-100'
                                   : 'border-gray-200'
                               }`}
                             />
-                            {maxReturnable > 0 && (
+                            {isReturn && (
+                              <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                                <input
+                                  type="checkbox"
+                                  className="size-3.5 rounded border-gray-300 accent-primary focus:ring-primary"
+                                  checked={row.isReturnFinalized}
+                                  onChange={() => toggleReturnFinalized(row.lineKey)}
+                                />
+                                <span>Ужо вернута</span>
+                              </label>
+                            )}
+                            {!isFinalizedReturn && maxReturnable > 0 && (
                               <p className="text-[11px] text-gray-500">Вяртанне: да −{maxReturnable}</p>
                             )}
                           </div>
@@ -1073,6 +1120,7 @@ export default function NewSupplyClient({
                           type="checkbox"
                           className="size-4 rounded border-gray-300 accent-primary focus:ring-primary"
                           checked={row.syncWithShopify}
+                          disabled={row.isReturnFinalized && Number(row.quantity) < 0}
                           onChange={() => toggleSyncWithShopify(row.lineKey)}
                         />
                         <span>Абнаўляць</span>

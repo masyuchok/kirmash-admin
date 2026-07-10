@@ -516,7 +516,7 @@ public class VatReportQueryService
         return new VatReportDetailsSummaryRow
         {
             Type = VatReportType.Unpaid,
-            Name = "Неаплачанае",
+            Name = "Неаплочанае",
             ShopifyOrderId = "unpaid-summary",
             Vat = 0m,
             GrossAmount = estimatedCogs,

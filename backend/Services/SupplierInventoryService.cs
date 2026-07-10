@@ -11,7 +11,6 @@ namespace backend.Services
         private readonly ShopifyVariantLookupService _variantLookup;
         private readonly InventorySalesCacheService _salesCacheService;
         private readonly ProductLedgerService _ledger;
-        private ProductSoldAllocation? _soldAllocationCache;
         private Dictionary<int, Dictionary<string, int>>? _allSupplierSoldByLineKeyCache;
         private Dictionary<string, int>? _totalSoldByLineKeyCache;
 
@@ -25,6 +24,13 @@ namespace backend.Services
             _variantLookup = variantLookup;
             _salesCacheService = salesCacheService;
             _ledger = ledger;
+        }
+
+        public void InvalidateSoldAllocationCaches()
+        {
+            _allSupplierSoldByLineKeyCache = null;
+            _totalSoldByLineKeyCache = null;
+            ProductLedgerService.InvalidateSoldByLineCache();
         }
 
         public async Task<SupplierInventoryResponse> GetInventoryAsync( int? supplierId, bool forceRefresh = false )
@@ -44,19 +50,32 @@ namespace backend.Services
             }
 
             await ExpenseInvoiceTypeSeeder.EnsureDefaultAsync( _db );
-            // Sync Shopify sales for months without VAT reports into InventoryProductSales cache.
-            // Skips Shopify when cache is fresh; repair of broken report rows stays disabled in GetSoldByLineAsync.
-            DateTime? salesSyncedAtUtc = await _salesCacheService.EnsureFreshAsync( force: forceRefresh );
+            // Shopify sync is slow (live API per unreported month); only block on explicit refresh.
+            DateTime? salesSyncedAtUtc = forceRefresh
+                ? await _salesCacheService.EnsureFreshAsync( force: true )
+                : await _salesCacheService.GetLastSyncedAtUtcAsync();
+            if (forceRefresh)
+            {
+                InvalidateSoldAllocationCaches();
+            }
 
             List<SupplyBatch> supplyBatches = await LoadSupplyBatchesAsync( supplierId );
+            List<SupplyBatch> fifoSupplyBatches = supplierId.HasValue
+                ? await LoadSupplyBatchesAsync( supplierId: null )
+                : supplyBatches;
             IReadOnlyDictionary<string, string> defaultVariantByProduct =
                 await _ledger.GetDefaultVariantByProductAsync();
             IReadOnlyDictionary<string, string> legacySaleVariantByProduct =
                 await _ledger.GetLegacySaleVariantByProductAsync();
             IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
-                await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+                await TryLoadVariantIdByTitleAsync();
             RemapSupplyBatchVariants(
                 supplyBatches,
+                defaultVariantByProduct,
+                variantIdByTitle,
+                legacySaleVariantByProduct );
+            RemapSupplyBatchVariants(
+                fifoSupplyBatches,
                 defaultVariantByProduct,
                 variantIdByTitle,
                 legacySaleVariantByProduct );
@@ -65,21 +84,27 @@ namespace backend.Services
                 .Where( id => !string.IsNullOrWhiteSpace( id ) )
                 .ToHashSet( StringComparer.OrdinalIgnoreCase );
             Dictionary<string, string> productNames = await BuildProductNamesAsync( productIds );
+            Dictionary<string, string> productAuthors = await TryLoadProductAuthorsAsync( productIds );
+            Dictionary<string, string> productTypes = await TryLoadProductTypesAsync( productIds );
             IReadOnlyDictionary<(string ProductId, string VariantId), string> variantTitles =
                 await TryLoadVariantTitlesAsync();
             IReadOnlyDictionary<(string ProductId, string VariantId), int> stockByLine =
                 await TryLoadStockByLineAsync();
             Dictionary<InventoryLineKey, int> soldBySupplierLine =
-                await BuildSoldBySupplierLineFromHistoryAsync(
-                    supplyBatches,
-                    productNames,
-                    supplierId );
+                await BuildSoldBySupplierLineFastAsync( fifoSupplyBatches );
             Dictionary<InventoryLineKey, int> paidBySupplierLine =
                 await LoadPaidBySupplierLineAsync(
                     supplierId,
                     defaultVariantByProduct,
                     variantIdByTitle,
                     legacySaleVariantByProduct );
+            Dictionary<InventoryLineKey, int> allPaidBySupplierLine = supplierId.HasValue
+                ? await LoadPaidBySupplierLineAsync(
+                    supplierId: null,
+                    defaultVariantByProduct,
+                    variantIdByTitle,
+                    legacySaleVariantByProduct )
+                : paidBySupplierLine;
             Dictionary<InventoryLineKey, decimal> latestSupplierPrice = supplyBatches
                 .GroupBy( x => x.LineKey )
                 .ToDictionary( g => g.Key, g => ResolveLatestNonZeroSupplyPrice( g ) );
@@ -125,13 +150,15 @@ namespace backend.Services
                 .Select( key =>
                 {
                     productNames.TryGetValue( key.ProductId, out string? productName );
-                    latestSupplierPrice.TryGetValue( key, out decimal supplyNetPrice );
+                    productAuthors.TryGetValue( key.ProductId, out string? productAuthor );
+                    productTypes.TryGetValue( key.ProductId, out string? productType );
+                    latestSupplierPrice.TryGetValue( key, out decimal supplyUnitPrice );
                     latestVatRatePercent.TryGetValue( key, out decimal supplyVatRatePercent );
                     bool useProductTotals =
                         VariantLegacyDefaults.GetNamedVariantCount( key.ProductId, variantIdByTitle ) <= 1;
-                    if (useProductTotals && supplyNetPrice <= 0m)
+                    if (useProductTotals && supplyUnitPrice <= 0m)
                     {
-                        supplyNetPrice = ResolveLatestNonZeroSupplyPrice(
+                        supplyUnitPrice = ResolveLatestNonZeroSupplyPrice(
                             supplyBatches.Where( batch =>
                                 batch.SupplierId == key.SupplierId &&
                                 string.Equals(
@@ -160,12 +187,18 @@ namespace backend.Services
                     (decimal netUnitPrice, decimal vatRatePercent, decimal grossUnitPrice, bool hasPriceOverride) =
                         ResolvePricing(
                             key,
-                            supplyNetPrice,
+                            supplyUnitPrice,
                             supplyVatRatePercent,
                             isVatPayer,
                             priceOverrides );
 
-                    int quantityToPay = soldQuantity - paidQuantity;
+                    int quantityToPay = ComputeQuantityToPay(
+                        key,
+                        soldQuantity,
+                        paidQuantity,
+                        soldBySupplierLine,
+                        allPaidBySupplierLine,
+                        useProductTotals );
 
                     return new SupplierInventoryRow
                     {
@@ -173,8 +206,12 @@ namespace backend.Services
                         SupplierName = supplierName ?? string.Empty,
                         ShopifyProductId = key.ProductId,
                         ShopifyVariantId = key.VariantId,
-                        VariantTitle = string.IsNullOrWhiteSpace( variantTitle ) ? string.Empty : variantTitle,
+                        VariantTitle = VariantLegacyDefaults.IsDefaultVariantTitle( variantTitle )
+                            ? string.Empty
+                            : variantTitle!.Trim(),
                         ProductName = string.IsNullOrWhiteSpace( productName ) ? key.ProductId : productName,
+                        ProductAuthor = productAuthor ?? string.Empty,
+                        ProductType = productType ?? string.Empty,
                         SupplierPrice = netUnitPrice,
                         VatRatePercent = vatRatePercent,
                         GrossUnitPrice = grossUnitPrice,
@@ -227,7 +264,7 @@ namespace backend.Services
             IReadOnlyDictionary<string, string> legacySaleVariantByProduct =
                 await _ledger.GetLegacySaleVariantByProductAsync();
             IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle =
-                await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+                await TryLoadVariantIdByTitleAsync();
             List<SupplyBatch> supplyBatches = await LoadSupplyBatchesAsync( supplierId: null );
             RemapSupplyBatchVariants(
                 supplyBatches,
@@ -241,25 +278,15 @@ namespace backend.Services
             Dictionary<string, string> productNames = await BuildProductNamesAsync( productIds );
 
             Dictionary<int, Dictionary<string, int>> result = new();
+            Dictionary<InventoryLineKey, int> soldBySupplierLine =
+                await BuildSoldBySupplierLineFastAsync( supplyBatches );
             foreach (IGrouping<int, SupplyBatch> supplierGroup in supplyBatches.GroupBy( batch => batch.LineKey.SupplierId ))
             {
-                Dictionary<string, string> supplierProductNames = supplierGroup
-                    .Select( batch => batch.ShopifyProductId )
-                    .Distinct( StringComparer.OrdinalIgnoreCase )
-                    .ToDictionary(
-                        id => id,
-                        id =>
-                        {
-                            productNames.TryGetValue( id, out string? name );
-                            return name ?? string.Empty;
-                        },
-                        StringComparer.OrdinalIgnoreCase );
-                Dictionary<InventoryLineKey, int> soldBySupplierLine = await BuildSoldBySupplierLineFromHistoryAsync(
-                    supplierGroup.ToList(),
-                    supplierProductNames,
-                    supplierGroup.Key );
+                Dictionary<InventoryLineKey, int> supplierSold = soldBySupplierLine
+                    .Where( entry => entry.Key.SupplierId == supplierGroup.Key )
+                    .ToDictionary( entry => entry.Key, entry => entry.Value, InventoryLineKeyComparer.Instance );
                 result[supplierGroup.Key] = AggregateSoldByLineKey(
-                    soldBySupplierLine,
+                    supplierSold,
                     defaultVariantByProduct,
                     variantIdByTitle,
                     legacySaleVariantByProduct );
@@ -293,9 +320,6 @@ namespace backend.Services
             _totalSoldByLineKeyCache = sold;
             return sold;
         }
-
-        private async Task<ProductSoldAllocation> GetSoldAllocationCachedAsync() =>
-            _soldAllocationCache ??= await _ledger.GetSoldByLineAsync();
 
         private static Dictionary<string, int> AggregateSoldByLineKey(
             Dictionary<InventoryLineKey, int> soldBySupplierLine,
@@ -387,7 +411,11 @@ namespace backend.Services
             IReadOnlyDictionary<(string ProductId, string VariantId), string> variantTitles =
                 await TryLoadVariantTitlesAsync();
             Dictionary<string, string> productNames = await BuildProductNamesAsync( new HashSet<string>( [productId], StringComparer.OrdinalIgnoreCase ) );
+            Dictionary<string, string> productAuthors = await TryLoadProductAuthorsAsync( new HashSet<string>( [productId], StringComparer.OrdinalIgnoreCase ) );
+            Dictionary<string, string> productTypes = await TryLoadProductTypesAsync( new HashSet<string>( [productId], StringComparer.OrdinalIgnoreCase ) );
             productNames.TryGetValue( productId, out string? productName );
+            productAuthors.TryGetValue( productId, out string? productAuthor );
+            productTypes.TryGetValue( productId, out string? productType );
             variantTitles.TryGetValue( (productId, variantId), out string? variantTitle );
 
             return new SupplierInventoryRow
@@ -396,8 +424,12 @@ namespace backend.Services
                 SupplierName = supplier.Name ?? string.Empty,
                 ShopifyProductId = productId,
                 ShopifyVariantId = variantId,
-                VariantTitle = variantTitle ?? string.Empty,
+                VariantTitle = VariantLegacyDefaults.IsDefaultVariantTitle( variantTitle )
+                    ? string.Empty
+                    : (variantTitle ?? string.Empty).Trim(),
                 ProductName = string.IsNullOrWhiteSpace( productName ) ? productId : productName,
+                ProductAuthor = productAuthor ?? string.Empty,
+                ProductType = productType ?? string.Empty,
                 SupplierPrice = netUnitPrice,
                 VatRatePercent = vatRatePercent,
                 GrossUnitPrice = grossUnitPrice,
@@ -433,12 +465,12 @@ namespace backend.Services
         private static (decimal NetUnitPrice, decimal VatRatePercent, decimal GrossUnitPrice, bool HasPriceOverride)
             ResolvePricing(
                 InventoryLineKey key,
-                decimal supplyNetPrice,
+                decimal supplyUnitPrice,
                 decimal supplyVatRatePercent,
                 bool supplierIsVatPayer,
                 IReadOnlyDictionary<InventoryLineKey, PriceOverrideRow> priceOverrides )
         {
-            decimal netUnitPrice = supplyNetPrice;
+            decimal netUnitPrice;
             decimal vatRatePercent = supplierIsVatPayer ? supplyVatRatePercent : 0m;
             bool hasPriceOverride = false;
 
@@ -447,6 +479,16 @@ namespace backend.Services
                 netUnitPrice = priceOverride.NetUnitPrice;
                 vatRatePercent = supplierIsVatPayer ? priceOverride.VatRatePercent : 0m;
                 hasPriceOverride = true;
+            }
+            else if (supplierIsVatPayer)
+            {
+                // Supply form stores gross purchase price when the supplier is a VAT payer.
+                netUnitPrice = CalcNetUnitPriceFromGross( supplyUnitPrice, vatRatePercent );
+            }
+            else
+            {
+                netUnitPrice = supplyUnitPrice;
+                vatRatePercent = 0m;
             }
 
             if (!supplierIsVatPayer)
@@ -506,6 +548,21 @@ namespace backend.Services
             return Round2( netUnitPrice * (1m + vatRatePercent / 100m ) );
         }
 
+        /// <summary>
+        /// Net unit cost from supply gross price and VAT rate (same formula as expense product VAT extraction).
+        /// </summary>
+        private static decimal CalcNetUnitPriceFromGross( decimal grossUnitPrice, decimal vatRatePercent )
+        {
+            if (grossUnitPrice <= 0m || vatRatePercent <= 0m)
+            {
+                return Round2( grossUnitPrice );
+            }
+
+            decimal rate = vatRatePercent / 100m;
+            decimal vatPart = Round2( grossUnitPrice * rate / (1m + rate) );
+            return Round2( grossUnitPrice - vatPart );
+        }
+
         private static decimal Round2( decimal value ) => Math.Round( value, 2, MidpointRounding.AwayFromZero );
 
         private async Task<List<SupplyBatch>> LoadSupplyBatchesAsync( int? supplierId )
@@ -542,6 +599,11 @@ namespace backend.Services
 
         private async Task<IReadOnlyDictionary<(string ProductId, string VariantId), string>> TryLoadVariantTitlesAsync()
         {
+            if (!_variantLookup.IsCatalogCacheWarm)
+            {
+                return new Dictionary<(string ProductId, string VariantId), string>( ProductVariantKeyComparer.Instance );
+            }
+
             try
             {
                 return await _variantLookup.GetVariantTitleByLineMapCachedAsync();
@@ -552,8 +614,30 @@ namespace backend.Services
             }
         }
 
+        private async Task<IReadOnlyDictionary<string, Dictionary<string, string>>> TryLoadVariantIdByTitleAsync()
+        {
+            if (!_variantLookup.IsCatalogCacheWarm)
+            {
+                return new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+            }
+
+            try
+            {
+                return await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
+            }
+            catch
+            {
+                return new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
+            }
+        }
+
         private async Task<IReadOnlyDictionary<(string ProductId, string VariantId), int>> TryLoadStockByLineAsync()
         {
+            if (!_variantLookup.IsCatalogCacheWarm)
+            {
+                return new Dictionary<(string ProductId, string VariantId), int>( ProductVariantKeyComparer.Instance );
+            }
+
             try
             {
                 return await _variantLookup.GetStockByLineMapCachedAsync();
@@ -572,114 +656,237 @@ namespace backend.Services
                 return names;
             }
 
+            HashSet<string> idLookup = new( StringComparer.OrdinalIgnoreCase );
+            foreach (string productId in productIds)
+            {
+                string normalized = NormalizeProductId( productId );
+                if (string.IsNullOrWhiteSpace( normalized )) continue;
+                idLookup.Add( normalized );
+                idLookup.Add( ShopifyIds.ToProductGid( normalized ) );
+            }
+
+            List<string> idList = idLookup.ToList();
+            void TryAddName( string rawProductId, string? title )
+            {
+                string productId = NormalizeProductId( rawProductId );
+                if (string.IsNullOrWhiteSpace( productId ) || !productIds.Contains( productId )) return;
+                if (names.ContainsKey( productId )) return;
+                if (string.IsNullOrWhiteSpace( title )) return;
+                names[productId] = title.Trim();
+            }
+
+            foreach (var product in await _db.VatReportExpenseProducts
+                         .AsNoTracking()
+                         .Where( p => idList.Contains( p.ShopifyProductId ) && p.ProductTitle != "" )
+                         .Select( p => new { p.ShopifyProductId, p.ProductTitle } )
+                         .ToListAsync())
+            {
+                TryAddName( product.ShopifyProductId, product.ProductTitle );
+            }
+
+            foreach (var sale in await _db.VatReportCashSales
+                         .AsNoTracking()
+                         .Where( s => idList.Contains( s.ShopifyProductId ) && s.ProductTitle != "" )
+                         .Select( s => new { s.ShopifyProductId, s.ProductTitle } )
+                         .ToListAsync())
+            {
+                TryAddName( sale.ShopifyProductId, sale.ProductTitle );
+            }
+
+            foreach (var item in await _db.VatReportRowItems
+                         .AsNoTracking()
+                         .Where( i => idList.Contains( i.ShopifyProductId ) && i.ProductTitle != "" )
+                         .Select( i => new { i.ShopifyProductId, i.ProductTitle } )
+                         .ToListAsync())
+            {
+                TryAddName( item.ShopifyProductId, item.ProductTitle );
+            }
+
+            List<string> missingNameIds = productIds
+                .Where( id => !names.ContainsKey( id ) )
+                .ToList();
+            if (missingNameIds.Count == 0)
+            {
+                return names;
+            }
+
             try
             {
-                IReadOnlyDictionary<string, string> catalogNames =
-                    await _variantLookup.GetProductTitleByIdMapCachedAsync();
-                foreach (string productId in productIds)
+                Dictionary<string, string> resolved =
+                    await _variantLookup.ResolveProductTitlesAsync( missingNameIds );
+                foreach (KeyValuePair<string, string> entry in resolved)
                 {
-                    if (catalogNames.TryGetValue( productId, out string? catalogName ) &&
-                        !string.IsNullOrWhiteSpace( catalogName ))
+                    if (!names.ContainsKey( entry.Key ) && !string.IsNullOrWhiteSpace( entry.Value ))
                     {
-                        names[productId] = catalogName.Trim();
+                        names[entry.Key] = entry.Value.Trim();
                     }
                 }
             }
             catch
             {
-                // Shopify catalog is optional for names; fall back to expense titles below.
-            }
-
-            List<string> productIdList = productIds.ToList();
-            var expenseProducts = await _db.VatReportExpenseProducts
-                .AsNoTracking()
-                .Where( p => productIdList.Contains( p.ShopifyProductId ) )
-                .Select( p => new { p.ShopifyProductId, p.ProductTitle } )
-                .ToListAsync();
-            foreach (var product in expenseProducts)
-            {
-                string productId = NormalizeProductId( product.ShopifyProductId );
-                if (string.IsNullOrWhiteSpace( productId )) continue;
-                if (!string.IsNullOrWhiteSpace( product.ProductTitle ))
-                {
-                    names[productId] = product.ProductTitle.Trim();
-                }
+                // Optional Shopify lookup; ledger titles above are enough when present.
             }
 
             return names;
         }
 
+        private async Task<Dictionary<string, string>> TryLoadProductAuthorsAsync( HashSet<string> productIds )
+        {
+            Dictionary<string, string> authors = new( StringComparer.OrdinalIgnoreCase );
+            if (productIds.Count == 0)
+            {
+                return authors;
+            }
+
+            try
+            {
+                if (_variantLookup.IsCatalogCacheWarm)
+                {
+                    IReadOnlyDictionary<string, string> catalogAuthors =
+                        await _variantLookup.GetProductAuthorByIdMapCachedAsync();
+                    foreach (string productId in productIds)
+                    {
+                        if (catalogAuthors.TryGetValue( productId, out string? author ) &&
+                            !string.IsNullOrWhiteSpace( author ))
+                        {
+                            authors[productId] = author.Trim();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Shopify catalog is optional.
+            }
+
+            return authors;
+        }
+
+        private async Task<Dictionary<string, string>> TryLoadProductTypesAsync( HashSet<string> productIds )
+        {
+            Dictionary<string, string> types = new( StringComparer.OrdinalIgnoreCase );
+            if (productIds.Count == 0)
+            {
+                return types;
+            }
+
+            try
+            {
+                if (_variantLookup.IsCatalogCacheWarm)
+                {
+                    IReadOnlyDictionary<string, string> catalogTypes =
+                        await _variantLookup.GetProductTypeByIdMapCachedAsync();
+                    foreach (string productId in productIds)
+                    {
+                        if (catalogTypes.TryGetValue( productId, out string? productType ) &&
+                            !string.IsNullOrWhiteSpace( productType ))
+                        {
+                            types[productId] = productType.Trim();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Shopify catalog is optional.
+            }
+
+            return types;
+        }
+
+        private async Task<Dictionary<InventoryLineKey, int>> BuildSoldBySupplierLineFastAsync(
+            List<SupplyBatch> supplyBatches )
+        {
+            ProductSoldAllocation soldAllocation = await _ledger.GetSoldByLineAsync();
+            Dictionary<(string ProductId, string VariantId), int> soldByLine = new(
+                soldAllocation.SoldByLine,
+                ProductVariantKeyComparer.Instance );
+            Dictionary<string, int> legacyUnnamedSoldByProduct = new(
+                soldAllocation.LegacyUnnamedSoldByProduct,
+                StringComparer.OrdinalIgnoreCase );
+            return AllocateSoldBySupplierFifo(
+                soldByLine,
+                legacyUnnamedSoldByProduct,
+                supplyBatches );
+        }
+
         private async Task<Dictionary<InventoryLineKey, int>> BuildSoldBySupplierLineFromHistoryAsync(
             List<SupplyBatch> supplyBatches,
             Dictionary<string, string> productNames,
-            int? supplierId )
+            HashSet<string>? limitToProductIds = null )
         {
             Dictionary<InventoryLineKey, int> soldBySupplierLine = new( InventoryLineKeyComparer.Instance );
-            foreach (IGrouping<string, SupplyBatch> productGroup in supplyBatches.GroupBy(
-                batch => batch.ShopifyProductId,
-                StringComparer.OrdinalIgnoreCase ))
+            HashSet<string> processedProductIds = new( StringComparer.OrdinalIgnoreCase );
+
+            foreach (string rawProductId in supplyBatches
+                         .Select( batch => batch.ShopifyProductId )
+                         .Where( id => !string.IsNullOrWhiteSpace( id ) ))
             {
-                string productId = productGroup.Key;
-                if (string.IsNullOrWhiteSpace( productId ))
+                string normalizedProductId = NormalizeProductId( rawProductId );
+                if (string.IsNullOrWhiteSpace( normalizedProductId ) ||
+                    !processedProductIds.Add( normalizedProductId ))
                 {
                     continue;
                 }
 
-                productNames.TryGetValue( productId, out string? productName );
+                if (limitToProductIds is not null &&
+                    !limitToProductIds.Contains( normalizedProductId ))
+                {
+                    continue;
+                }
+
+                string productName;
+                if (!productNames.TryGetValue( normalizedProductId, out string? mappedName ) ||
+                    string.IsNullOrWhiteSpace( mappedName ))
+                {
+                    productName = await _ledger.ResolveProductNameForLedgerAsync( normalizedProductId );
+                }
+                else
+                {
+                    productName = mappedName;
+                }
+
                 List<ProductHistorySaleEvent> sales = await _ledger.GetSaleEventsForProductAsync(
-                    productId,
+                    normalizedProductId,
                     normalizedVariantFilter: null,
                     filterVariantTitle: null,
-                    supplierId,
-                    productName );
+                    supplierId: null,
+                    productName,
+                    matchByProductIdOnly: true );
 
-                IEnumerable<IGrouping<string, ProductHistorySaleEvent>> salesByVariant = sales
-                    .GroupBy( sale => sale.ShopifyVariantId ?? string.Empty, StringComparer.OrdinalIgnoreCase );
-                foreach (IGrouping<string, ProductHistorySaleEvent> variantGroup in salesByVariant)
+                Dictionary<(string ProductId, string VariantId), int> soldByLine = new(
+                    ProductVariantKeyComparer.Instance );
+                Dictionary<string, int> legacyUnnamedSoldByProduct = new( StringComparer.OrdinalIgnoreCase );
+                foreach (ProductHistorySaleEvent sale in sales)
                 {
-                    string variantId = variantGroup.Key;
-                    int totalSold = variantGroup.Sum( sale => sale.Quantity );
-                    if (totalSold <= 0)
+                    string variantId = (sale.ShopifyVariantId ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace( variantId ))
                     {
-                        continue;
+                        (string ProductId, string VariantId) key = (normalizedProductId, variantId);
+                        soldByLine[key] = soldByLine.GetValueOrDefault( key ) + sale.Quantity;
                     }
-
-                    List<SupplyBatch> variantBatches = productGroup
-                        .Where( batch =>
-                            string.IsNullOrWhiteSpace( variantId ) ||
-                            string.Equals(
-                                batch.ShopifyVariantId,
-                                variantId,
-                                StringComparison.OrdinalIgnoreCase ) )
-                        .OrderBy( batch => batch.SupplyDate )
-                        .ThenBy( batch => batch.SupplyId )
-                        .ToList();
-                    if (variantBatches.Count == 0)
+                    else
                     {
-                        variantBatches = productGroup
-                            .OrderBy( batch => batch.SupplyDate )
-                            .ThenBy( batch => batch.SupplyId )
-                            .ToList();
+                        legacyUnnamedSoldByProduct[normalizedProductId] =
+                            legacyUnnamedSoldByProduct.GetValueOrDefault( normalizedProductId ) + sale.Quantity;
                     }
+                }
 
-                    int remaining = totalSold;
-                    foreach (SupplyBatch batch in variantBatches)
-                    {
-                        if (remaining <= 0)
-                        {
-                            break;
-                        }
+                List<SupplyBatch> productBatches = supplyBatches
+                    .Where( batch =>
+                        string.Equals(
+                            NormalizeProductId( batch.ShopifyProductId ),
+                            normalizedProductId,
+                            StringComparison.OrdinalIgnoreCase ) )
+                    .ToList();
 
-                        int allocated = Math.Min( remaining, Math.Max( 0, batch.Quantity ) );
-                        if (allocated <= 0)
-                        {
-                            continue;
-                        }
-
-                        soldBySupplierLine[batch.LineKey] =
-                            soldBySupplierLine.GetValueOrDefault( batch.LineKey ) + allocated;
-                        remaining -= allocated;
-                    }
+                foreach (KeyValuePair<InventoryLineKey, int> allocated in AllocateSoldBySupplierFifo(
+                             soldByLine,
+                             legacyUnnamedSoldByProduct,
+                             productBatches ))
+                {
+                    soldBySupplierLine[allocated.Key] =
+                        soldBySupplierLine.GetValueOrDefault( allocated.Key ) + allocated.Value;
                 }
             }
 
@@ -705,11 +912,144 @@ namespace backend.Services
             return total;
         }
 
+        private static int ComputeQuantityToPay(
+            InventoryLineKey key,
+            int soldQuantity,
+            int paidQuantity,
+            Dictionary<InventoryLineKey, int> soldBySupplierLine,
+            Dictionary<InventoryLineKey, int> paidBySupplierLine,
+            bool useProductTotals )
+        {
+            int balance = soldQuantity - paidQuantity;
+            if (balance <= 0)
+            {
+                return balance;
+            }
+
+            int crossSupplierCredit = ComputeCrossSupplierPaymentCredit(
+                key,
+                soldBySupplierLine,
+                paidBySupplierLine,
+                useProductTotals );
+            return Math.Max( 0, balance - crossSupplierCredit );
+        }
+
+        /// <summary>
+        /// Payments to other suppliers for the same product that exceed their FIFO sold qty
+        /// can settle this supplier's unpaid balance (e.g. invoice recorded under wrong supplier).
+        /// </summary>
+        private static int ComputeCrossSupplierPaymentCredit(
+            InventoryLineKey key,
+            Dictionary<InventoryLineKey, int> soldBySupplierLine,
+            Dictionary<InventoryLineKey, int> paidBySupplierLine,
+            bool useProductTotals )
+        {
+            int excessOnOthers = 0;
+            HashSet<int> processedOtherSuppliers = new();
+
+            foreach (KeyValuePair<InventoryLineKey, int> entry in paidBySupplierLine)
+            {
+                if (entry.Key.SupplierId == key.SupplierId)
+                {
+                    continue;
+                }
+
+                if (useProductTotals)
+                {
+                    if (!string.Equals(
+                            entry.Key.ProductId,
+                            key.ProductId,
+                            StringComparison.OrdinalIgnoreCase ) ||
+                        !processedOtherSuppliers.Add( entry.Key.SupplierId ))
+                    {
+                        continue;
+                    }
+
+                    int soldOnOther = SumQuantityForSupplierProduct( soldBySupplierLine, entry.Key );
+                    int paidOnOther = SumQuantityForSupplierProduct( paidBySupplierLine, entry.Key );
+                    excessOnOthers += Math.Max( 0, paidOnOther - soldOnOther );
+                    continue;
+                }
+
+                if (!InventoryLineKeyComparer.Instance.Equals( entry.Key, key ))
+                {
+                    continue;
+                }
+
+                int soldOnOtherLine = soldBySupplierLine.GetValueOrDefault( entry.Key );
+                excessOnOthers += Math.Max( 0, entry.Value - soldOnOtherLine );
+            }
+
+            return excessOnOthers;
+        }
+
+        private static SupplyBatch CloneSupplyBatch( SupplyBatch source, int quantity ) =>
+            new()
+            {
+                SupplyId = source.SupplyId,
+                SupplyDate = source.SupplyDate,
+                SupplierId = source.SupplierId,
+                ShopifyProductId = source.ShopifyProductId,
+                ShopifyVariantId = source.ShopifyVariantId,
+                LineKey = source.LineKey,
+                Quantity = quantity,
+                SupplierPrice = source.SupplierPrice,
+                VatRatePercent = source.VatRatePercent
+            };
+
+        /// <summary>
+        /// Returns (negative supply qty) reduce the same supplier's recent receipts before FIFO sale allocation.
+        /// </summary>
+        private static List<SupplyBatch> NormalizeSupplyBatchesForFifo( List<SupplyBatch> supplyBatches )
+        {
+            List<SupplyBatch> result = new();
+            foreach (IGrouping<InventoryLineKey, SupplyBatch> group in supplyBatches
+                         .GroupBy( batch => batch.LineKey, InventoryLineKeyComparer.Instance ))
+            {
+                List<SupplyBatch> pool = new();
+                foreach (SupplyBatch batch in group
+                             .OrderBy( b => b.SupplyDate )
+                             .ThenBy( b => b.SupplyId ))
+                {
+                    if (batch.Quantity > 0)
+                    {
+                        pool.Add( CloneSupplyBatch( batch, batch.Quantity ) );
+                        continue;
+                    }
+
+                    if (batch.Quantity >= 0)
+                    {
+                        continue;
+                    }
+
+                    int toReturn = -batch.Quantity;
+                    for (int i = pool.Count - 1; i >= 0 && toReturn > 0; i--)
+                    {
+                        SupplyBatch target = pool[i];
+                        int deduct = Math.Min( toReturn, target.Quantity );
+                        target.Quantity -= deduct;
+                        toReturn -= deduct;
+                    }
+                }
+
+                foreach (SupplyBatch batch in pool.Where( b => b.Quantity > 0 ))
+                {
+                    result.Add( batch );
+                }
+            }
+
+            return result
+                .OrderBy( b => b.SupplyDate )
+                .ThenBy( b => b.SupplyId )
+                .ToList();
+        }
+
         private static Dictionary<InventoryLineKey, int> AllocateSoldBySupplierFifo(
             Dictionary<(string ProductId, string VariantId), int> soldByLine,
             Dictionary<string, int> legacyUnnamedSoldByProduct,
             List<SupplyBatch> supplyBatches )
         {
+            supplyBatches = NormalizeSupplyBatchesForFifo( supplyBatches );
             Dictionary<InventoryLineKey, int> soldBySupplierLine = new( InventoryLineKeyComparer.Instance );
             Dictionary<(string ProductId, string VariantId), int> remainingSoldByLine =
                 new( soldByLine, ProductVariantKeyComparer.Instance );
@@ -816,8 +1156,14 @@ namespace backend.Services
             string leftVariantId,
             string rightProductId,
             string rightVariantId ) =>
-            string.Equals( leftProductId, rightProductId, StringComparison.OrdinalIgnoreCase ) &&
-            string.Equals( leftVariantId, rightVariantId, StringComparison.OrdinalIgnoreCase );
+            string.Equals(
+                ShopifyIds.NormalizeProductId( leftProductId ),
+                ShopifyIds.NormalizeProductId( rightProductId ),
+                StringComparison.OrdinalIgnoreCase ) &&
+            string.Equals(
+                ShopifyIds.NormalizeVariantId( leftVariantId ),
+                ShopifyIds.NormalizeVariantId( rightVariantId ),
+                StringComparison.OrdinalIgnoreCase );
 
         private static void RemapSupplyBatchVariants(
             List<SupplyBatch> supplyBatches,
@@ -857,6 +1203,7 @@ namespace backend.Services
                     SupplierId = p.VatReportExpense.SupplierId!.Value,
                     ShopifyProductId = p.ShopifyProductId,
                     ShopifyVariantId = p.ShopifyVariantId,
+                    ProductTitle = p.ProductTitle,
                     Quantity = p.Quantity
                 } )
                 .ToListAsync();
@@ -865,11 +1212,12 @@ namespace backend.Services
                 .GroupBy( p => new InventoryLineKey(
                     p.SupplierId,
                     NormalizeProductId( p.ShopifyProductId ),
-                    ProductLedgerService.ResolvePaymentVariantId(
+                    ProductLedgerService.ResolveEffectiveVariantId(
                         p.ShopifyProductId,
                         NormalizeVariantId( p.ShopifyVariantId ),
-                        defaultVariantByProduct,
+                        VatReportHelpers.ExtractVariantTitleFromProductLineTitle( p.ProductTitle ),
                         variantIdByTitle,
+                        defaultVariantByProduct,
                         legacySaleVariantByProduct ) ) )
                 .ToDictionary( g => g.Key, g => g.Sum( x => x.Quantity ), InventoryLineKeyComparer.Instance );
         }
@@ -922,6 +1270,7 @@ namespace backend.Services
             public int SupplierId { get; set; }
             public string ShopifyProductId { get; set; } = string.Empty;
             public string ShopifyVariantId { get; set; } = string.Empty;
+            public string ProductTitle { get; set; } = string.Empty;
             public int Quantity { get; set; }
         }
 

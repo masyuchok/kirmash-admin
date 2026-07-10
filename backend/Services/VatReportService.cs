@@ -86,6 +86,9 @@ public class VatReportService
     public Task UpdateExpenseAsync( int expenseId, VatReportExpenseCreateRequest request ) =>
         _mutations.UpdateExpenseAsync( expenseId, request );
 
+    public Task UpdateExpensePaidAsync( int expenseId, bool isPaid ) =>
+        _mutations.UpdateExpensePaidAsync( expenseId, isPaid );
+
     public Task UploadExpenseInvoiceAsync( int expenseId, string fileName, string contentType, byte[] data ) =>
         _mutations.UploadExpenseInvoiceAsync( expenseId, fileName, contentType, data );
 

@@ -62,6 +62,8 @@ namespace backend.Data
                     .HasColumnType( "numeric(12,2)" );
                 entity.Property( sp => sp.SyncWithShopify )
                     .HasDefaultValue( true );
+                entity.Property( sp => sp.IsReturnFinalized )
+                    .HasDefaultValue( false );
 
                 entity.HasIndex( sp => new { sp.SupplyId, sp.ShopifyProductId, sp.ShopifyVariantId } )
                     .IsUnique();
@@ -268,6 +270,9 @@ namespace backend.Data
                 entity.Property( i => i.ProductTitle )
                     .IsRequired()
                     .HasMaxLength( 512 );
+                entity.Property( i => i.Barcode )
+                    .IsRequired()
+                    .HasMaxLength( 32 );
                 entity.Property( i => i.ProductType )
                     .HasMaxLength( 256 );
                 entity.Property( i => i.Quantity )

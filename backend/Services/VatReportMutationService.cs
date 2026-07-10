@@ -530,6 +530,28 @@ public class VatReportMutationService
             await _financeSync.SyncPeriodForReportIdAsync( expense.VatReportId );
         }
 
+    public async Task UpdateExpensePaidAsync( int expenseId, bool isPaid )
+        {
+            await _locks.EnsurePeriodUnlockedByExpenseIdAsync( expenseId );
+
+            VatReportExpense? expense = await _db.VatReportExpenses
+                .Include( x => x.VatReport )
+                .FirstOrDefaultAsync( x => x.Id == expenseId );
+            if (expense is null)
+            {
+                throw new InvalidOperationException( "Расход не знойдзены." );
+            }
+
+            if (!string.Equals( expense.VatReport.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+            {
+                throw new InvalidOperationException( "Расходы можна змяняць толькі ў польскую справаздачу." );
+            }
+
+            expense.IsPaid = isPaid;
+            await _db.SaveChangesAsync();
+            await _financeSync.SyncPeriodForReportIdAsync( expense.VatReportId );
+        }
+
     public async Task UploadExpenseInvoiceAsync( int expenseId, string fileName, string contentType, byte[] data )
         {
             await _locks.EnsurePeriodUnlockedByExpenseIdAsync( expenseId );

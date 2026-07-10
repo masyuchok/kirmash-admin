@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using backend.Models;
 using backend.Services.Shopify;
 
@@ -130,6 +131,75 @@ internal static class VatReportHelpers
             title.Split( (char[]?)null, StringSplitOptions.RemoveEmptyEntries ) );
     }
 
+    private static readonly Regex IsbnDigitRunRegex = new( @"\d{10}|\d{13}", RegexOptions.Compiled );
+
+    /// <summary>Normalize ISBN/barcode to digits-only (10 or 13 chars) for comparison.</summary>
+    public static string NormalizeIsbn( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return string.Empty;
+        }
+
+        string trimmed = raw.Trim();
+        List<char> digits = new( trimmed.Length );
+        foreach (char ch in trimmed)
+        {
+            if (char.IsDigit( ch ))
+            {
+                digits.Add( ch );
+            }
+            else if (digits.Count == 9 && (ch == 'X' || ch == 'x'))
+            {
+                digits.Add( 'X' );
+            }
+        }
+
+        if (digits.Count is not (10 or 13))
+        {
+            return string.Empty;
+        }
+
+        return new string( digits.ToArray() );
+    }
+
+    public static bool IsbnsMatch( string? leftRaw, string? rightRaw )
+    {
+        string left = NormalizeIsbn( leftRaw );
+        string right = NormalizeIsbn( rightRaw );
+        if (string.IsNullOrWhiteSpace( left ) || string.IsNullOrWhiteSpace( right ))
+        {
+            return false;
+        }
+
+        return string.Equals( left, right, StringComparison.OrdinalIgnoreCase );
+    }
+
+    public static string? ExtractIsbnFromText( string? text )
+    {
+        if (string.IsNullOrWhiteSpace( text ))
+        {
+            return null;
+        }
+
+        string direct = NormalizeIsbn( text );
+        if (!string.IsNullOrWhiteSpace( direct ))
+        {
+            return direct;
+        }
+
+        foreach (Match match in IsbnDigitRunRegex.Matches( text ))
+        {
+            string candidate = NormalizeIsbn( match.Value );
+            if (!string.IsNullOrWhiteSpace( candidate ))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
     public static string ExtractProductTitleSearchToken( string? productTitle )
     {
         string normalized = NormalizeProductTitleForMatch( productTitle );
@@ -162,37 +232,46 @@ internal static class VatReportHelpers
             return true;
         }
 
-        if (left.Length >= 8 && right.StartsWith( left, StringComparison.OrdinalIgnoreCase ))
+        if (TitlePrefixMatchesAtBoundary( left, right ) || TitlePrefixMatchesAtBoundary( right, left ))
         {
             return true;
         }
 
-        if (right.Length >= 8 && left.StartsWith( right, StringComparison.OrdinalIgnoreCase ))
-        {
-            return true;
-        }
-
-        static string PrimarySegment( string title )
-        {
-            int commaIndex = title.IndexOf( ',' );
-            return commaIndex > 0 ? title[..commaIndex].Trim() : title;
-        }
-
-        string leftPrimary = PrimarySegment( left );
-        string rightPrimary = PrimarySegment( right );
+        string leftPrimary = PrimaryTitleSegment( left );
+        string rightPrimary = PrimaryTitleSegment( right );
         if (leftPrimary.Length >= 6 &&
             string.Equals( leftPrimary, rightPrimary, StringComparison.OrdinalIgnoreCase ))
         {
             return true;
         }
 
-        if (leftPrimary.Length >= 6 && rightPrimary.StartsWith( leftPrimary, StringComparison.OrdinalIgnoreCase ))
+        return TitlePrefixMatchesAtBoundary( leftPrimary, rightPrimary ) ||
+               TitlePrefixMatchesAtBoundary( rightPrimary, leftPrimary );
+    }
+
+    /// <summary>
+    /// Prefix match only when the shorter title ends at a title boundary (end or comma),
+    /// so "Book A" does not match "Book A part two".
+    /// </summary>
+    private static bool TitlePrefixMatchesAtBoundary( string shorter, string longer )
+    {
+        if (shorter.Length < 8 || longer.Length < shorter.Length)
         {
-            return true;
+            return false;
         }
 
-        return rightPrimary.Length >= 6 &&
-               leftPrimary.StartsWith( rightPrimary, StringComparison.OrdinalIgnoreCase );
+        if (!longer.StartsWith( shorter, StringComparison.OrdinalIgnoreCase ))
+        {
+            return false;
+        }
+
+        return longer.Length == shorter.Length || longer[shorter.Length] == ',';
+    }
+
+    private static string PrimaryTitleSegment( string title )
+    {
+        int commaIndex = title.IndexOf( ',' );
+        return commaIndex > 0 ? title[..commaIndex].Trim() : title;
     }
 
     /// <summary>
@@ -207,7 +286,15 @@ internal static class VatReportHelpers
             return false;
         }
 
-        return full.Contains( fragment, StringComparison.OrdinalIgnoreCase );
+        if (string.Equals( fragment, full, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        string fragmentPrimary = PrimaryTitleSegment( fragment );
+        string fullPrimary = PrimaryTitleSegment( full );
+        return TitlePrefixMatchesAtBoundary( fragmentPrimary, fullPrimary ) ||
+               TitlePrefixMatchesAtBoundary( fullPrimary, fragmentPrimary );
     }
 
     private static bool LooksLikeCommaSeparatedVariantSuffix( string suffix )

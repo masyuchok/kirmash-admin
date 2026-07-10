@@ -46,6 +46,7 @@ public static class ShopifyGraphqlQueries
                     variant {
                       id
                       title
+                      barcode
                       product {
                         id
                         productType
@@ -100,6 +101,7 @@ public static class ShopifyGraphqlQueries
                   variant {
                     id
                     title
+                    barcode
                     product {
                       id
                       productType
@@ -107,6 +109,18 @@ public static class ShopifyGraphqlQueries
                   }
                 }
               }
+            }
+          }
+        }
+        """;
+
+    public const string ProductTitleNodes = """
+        query ProductTitleNodes($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              legacyResourceId
+              title
             }
           }
         }
@@ -131,6 +145,9 @@ public static class ShopifyGraphqlQueries
                 autorMetafield: metafield(namespace: "custom", key: "autor") {
                   value
                 }
+                isbnMetafield: metafield(namespace: "custom", key: "isbn") {
+                  value
+                }
                 metafields(first: 25) {
                   edges {
                     node {
@@ -145,6 +162,7 @@ public static class ShopifyGraphqlQueries
                     node {
                       id
                       title
+                      barcode
                       inventoryQuantity
                       selectedOptions {
                         name

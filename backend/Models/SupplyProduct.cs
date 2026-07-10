@@ -16,5 +16,9 @@ namespace backend.Models
         public decimal MarginPercent { get; set; }
         public decimal SalePrice { get; set; }
         public bool SyncWithShopify { get; set; } = true;
+        /// <summary>
+        /// Historical return already processed: kept in supply ledger, no re-validation or Shopify deduction.
+        /// </summary>
+        public bool IsReturnFinalized { get; set; }
     }
 }
