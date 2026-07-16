@@ -1,7 +1,14 @@
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 import { readInt, readNumber, readStringArray } from '@/lib/api/json';
 import type { VatReport, VatReportPeriod } from '@/types/report';
-import type { VatReportDetails, VatReportSourceOrderOption } from '@/types/report-details';
+import type {
+  VatReportDetails,
+  VatReportSourceOrderOption,
+} from '@/types/report-details';
 
 function mapVatReportListItem(row: Record<string, unknown>): VatReport {
   const docsRaw = row.documents ?? row.Documents;
@@ -9,16 +16,27 @@ function mapVatReportListItem(row: Record<string, unknown>): VatReport {
     id: readInt(row.id ?? row.Id),
     periodYear: readInt(row.periodYear ?? row.PeriodYear),
     periodMonth: readInt(row.periodMonth ?? row.PeriodMonth),
-    type: (String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign' ? 'foreign' : 'poland'),
+    type:
+      String(row.type ?? row.Type ?? 'poland').toLowerCase() === 'foreign'
+        ? 'foreign'
+        : 'poland',
     name: String(row.name ?? row.Name ?? ''),
-    document: (row.document ?? row.Document) ? String(row.document ?? row.Document) : null,
+    document:
+      (row.document ?? row.Document)
+        ? String(row.document ?? row.Document)
+        : null,
     vat: readNumber(row.vat ?? row.Vat),
     vatCredit: readNumber(row.vatCredit ?? row.VatCredit),
     vatToPay: readNumber(row.vatToPay ?? row.VatToPay),
     documents: Array.isArray(docsRaw)
-      ? docsRaw.filter((doc): doc is string => typeof doc === 'string' && doc.trim().length > 0)
+      ? docsRaw.filter(
+          (doc): doc is string =>
+            typeof doc === 'string' && doc.trim().length > 0
+        )
       : [],
-    shopifyOrderIds: readStringArray(row.shopifyOrderIds ?? row.ShopifyOrderIds),
+    shopifyOrderIds: readStringArray(
+      row.shopifyOrderIds ?? row.ShopifyOrderIds
+    ),
     isLocked: Boolean(row.isLocked ?? row.IsLocked),
   };
 }
@@ -33,7 +51,9 @@ function mapVatReportPeriod(row: Record<string, unknown>): VatReportPeriod {
     isLocked: Boolean(row.isLocked ?? row.IsLocked),
     primaryReportId: readInt(row.primaryReportId ?? row.PrimaryReportId),
     reports: Array.isArray(reportsRaw)
-      ? reportsRaw.map((item) => mapVatReportListItem(item as Record<string, unknown>))
+      ? reportsRaw.map((item) =>
+          mapVatReportListItem(item as Record<string, unknown>)
+        )
       : [],
   };
 }
@@ -52,7 +72,9 @@ export async function fetchVatReportPeriods(): Promise<VatReportPeriod[]> {
   if (!Array.isArray(data)) {
     throw new Error('Некарэктны адказ сервера');
   }
-  return data.map((item) => mapVatReportPeriod(item as Record<string, unknown>));
+  return data.map((item) =>
+    mapVatReportPeriod(item as Record<string, unknown>)
+  );
 }
 
 export async function fetchVatReports(): Promise<VatReport[]> {
@@ -71,7 +93,9 @@ export async function fetchVatReports(): Promise<VatReport[]> {
     throw new Error('Некарэктны адказ сервера');
   }
 
-  return data.map((item) => mapVatReportListItem(item as Record<string, unknown>));
+  return data.map((item) =>
+    mapVatReportListItem(item as Record<string, unknown>)
+  );
 }
 
 export async function generateVatReport(
@@ -86,7 +110,10 @@ export async function generateVatReport(
     body: JSON.stringify({ periodYear, periodMonth, type }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося згенераваць справаздачу');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося згенераваць справаздачу'
+    );
     throw new Error(msg);
   }
 
@@ -96,166 +123,220 @@ export async function generateVatReport(
 function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
   if (!Array.isArray(rowsRaw)) return [];
   return rowsRaw.map((item) => {
-          const r = item as Record<string, unknown>;
-          const polandRowsRaw = r.polandRows ?? r.PolandRows;
-          const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
-          const cashSaleRowsRaw = r.cashSaleRows ?? r.CashSaleRows;
-          const unpaidProductRowsRaw = r.unpaidProductRows ?? r.UnpaidProductRows;
-          return {
-            type: ((): 'poland' | 'foreign' | 'expense' | 'cash' | 'unpaid' => {
-              const normalized = String(r.type ?? r.Type ?? 'poland').toLowerCase();
-              if (normalized === 'foreign') return 'foreign';
-              if (normalized === 'expense') return 'expense';
-              if (normalized === 'cash') return 'cash';
-              if (normalized === 'unpaid') return 'unpaid';
-              return 'poland';
-            })(),
-            name: String(r.name ?? r.Name ?? ''),
-            shopifyOrderId: String(r.shopifyOrderId ?? r.ShopifyOrderId ?? ''),
-            orderDateUtc: (r.orderDateUtc ?? r.OrderDateUtc)
-              ? String(r.orderDateUtc ?? r.OrderDateUtc)
-              : null,
-            deliveryName: String(r.deliveryName ?? r.DeliveryName ?? ''),
-            deliveryAddress: String(r.deliveryAddress ?? r.DeliveryAddress ?? ''),
-            shippingAddress: String(r.shippingAddress ?? r.ShippingAddress ?? ''),
-            billingAddress: String(r.billingAddress ?? r.BillingAddress ?? ''),
-            shippingCountryCode: String(r.shippingCountryCode ?? r.ShippingCountryCode ?? ''),
-            billingCountryCode: String(r.billingCountryCode ?? r.BillingCountryCode ?? ''),
-            grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
-            vat: readNumber(r.vat ?? r.Vat),
-            netAmount: readNumber(r.netAmount ?? r.NetAmount),
-            expenseRows: Array.isArray(expenseRowsRaw)
-              ? expenseRowsRaw.map((x: unknown) => {
-                  const e = x as Record<string, unknown>;
+    const r = item as Record<string, unknown>;
+    const polandRowsRaw = r.polandRows ?? r.PolandRows;
+    const expenseRowsRaw = r.expenseRows ?? r.ExpenseRows;
+    const cashSaleRowsRaw = r.cashSaleRows ?? r.CashSaleRows;
+    const unpaidProductRowsRaw = r.unpaidProductRows ?? r.UnpaidProductRows;
+    return {
+      type: ((): 'poland' | 'foreign' | 'expense' | 'cash' | 'unpaid' => {
+        const normalized = String(r.type ?? r.Type ?? 'poland').toLowerCase();
+        if (normalized === 'foreign') return 'foreign';
+        if (normalized === 'expense') return 'expense';
+        if (normalized === 'cash') return 'cash';
+        if (normalized === 'unpaid') return 'unpaid';
+        return 'poland';
+      })(),
+      name: String(r.name ?? r.Name ?? ''),
+      shopifyOrderId: String(r.shopifyOrderId ?? r.ShopifyOrderId ?? ''),
+      orderDateUtc:
+        (r.orderDateUtc ?? r.OrderDateUtc)
+          ? String(r.orderDateUtc ?? r.OrderDateUtc)
+          : null,
+      deliveryName: String(r.deliveryName ?? r.DeliveryName ?? ''),
+      deliveryAddress: String(r.deliveryAddress ?? r.DeliveryAddress ?? ''),
+      shippingAddress: String(r.shippingAddress ?? r.ShippingAddress ?? ''),
+      billingAddress: String(r.billingAddress ?? r.BillingAddress ?? ''),
+      shippingCountryCode: String(
+        r.shippingCountryCode ?? r.ShippingCountryCode ?? ''
+      ),
+      billingCountryCode: String(
+        r.billingCountryCode ?? r.BillingCountryCode ?? ''
+      ),
+      grossAmount: readNumber(r.grossAmount ?? r.GrossAmount),
+      vat: readNumber(r.vat ?? r.Vat),
+      netAmount: readNumber(r.netAmount ?? r.NetAmount),
+      expenseRows: Array.isArray(expenseRowsRaw)
+        ? expenseRowsRaw.map((x: unknown) => {
+            const e = x as Record<string, unknown>;
+            return {
+              id: readInt(e.id ?? e.Id),
+              grossAmount: readNumber(e.grossAmount ?? e.GrossAmount),
+              vatAmount: readNumber(e.vatAmount ?? e.VatAmount),
+              netAmount: readNumber(e.netAmount ?? e.NetAmount),
+              expenseDateUtc: String(
+                e.expenseDateUtc ?? e.ExpenseDateUtc ?? ''
+              ),
+              comment: String(e.comment ?? e.Comment ?? ''),
+              invoiceNumber: String(e.invoiceNumber ?? e.InvoiceNumber ?? ''),
+              isPaid: Boolean(e.isPaid ?? e.IsPaid ?? false),
+              isByProsvet: Boolean(e.isByProsvet ?? e.IsByProsvet ?? false),
+              includeVatInTotal: Boolean(
+                e.includeVatInTotal ?? e.IncludeVatInTotal ?? true
+              ),
+              expenseInvoiceTypeId: readInt(
+                e.expenseInvoiceTypeId ?? e.ExpenseInvoiceTypeId
+              ),
+              expenseInvoiceTypeName: String(
+                e.expenseInvoiceTypeName ?? e.ExpenseInvoiceTypeName ?? ''
+              ),
+              invoiceFileName: String(
+                e.invoiceFileName ?? e.InvoiceFileName ?? ''
+              ),
+              createdAtUtc: String(e.createdAtUtc ?? e.CreatedAtUtc ?? ''),
+              supplierId: (() => {
+                const raw = e.supplierId ?? e.SupplierId;
+                if (raw == null) return null;
+                const n = readInt(raw);
+                return n > 0 ? n : null;
+              })(),
+              supplierName: String(e.supplierName ?? e.SupplierName ?? ''),
+              products: (() => {
+                const productsRaw = e.products ?? e.Products;
+                if (!Array.isArray(productsRaw)) return [];
+                return productsRaw.map((p: unknown) => {
+                  const row = p as Record<string, unknown>;
                   return {
-                    id: readInt(e.id ?? e.Id),
-                    grossAmount: readNumber(e.grossAmount ?? e.GrossAmount),
-                    vatAmount: readNumber(e.vatAmount ?? e.VatAmount),
-                    netAmount: readNumber(e.netAmount ?? e.NetAmount),
-                    expenseDateUtc: String(e.expenseDateUtc ?? e.ExpenseDateUtc ?? ''),
-                    comment: String(e.comment ?? e.Comment ?? ''),
-                    invoiceNumber: String(e.invoiceNumber ?? e.InvoiceNumber ?? ''),
-                    isPaid: Boolean(e.isPaid ?? e.IsPaid ?? false),
-                    isByProsvet: Boolean(e.isByProsvet ?? e.IsByProsvet ?? false),
-                    includeVatInTotal: Boolean(e.includeVatInTotal ?? e.IncludeVatInTotal ?? true),
-                    expenseInvoiceTypeId: readInt(e.expenseInvoiceTypeId ?? e.ExpenseInvoiceTypeId),
-                    expenseInvoiceTypeName: String(
-                      e.expenseInvoiceTypeName ?? e.ExpenseInvoiceTypeName ?? ''
+                    id: readInt(row.id ?? row.Id),
+                    shopifyProductId: String(
+                      row.shopifyProductId ?? row.ShopifyProductId ?? ''
                     ),
-                    invoiceFileName: String(e.invoiceFileName ?? e.InvoiceFileName ?? ''),
-                    createdAtUtc: String(e.createdAtUtc ?? e.CreatedAtUtc ?? ''),
-                    supplierId: (() => {
-                      const raw = e.supplierId ?? e.SupplierId;
-                      if (raw == null) return null;
-                      const n = readInt(raw);
-                      return n > 0 ? n : null;
-                    })(),
-                    supplierName: String(e.supplierName ?? e.SupplierName ?? ''),
-                    products: (() => {
-                      const productsRaw = e.products ?? e.Products;
-                      if (!Array.isArray(productsRaw)) return [];
-                      return productsRaw.map((p: unknown) => {
-                        const row = p as Record<string, unknown>;
-                        return {
-                          id: readInt(row.id ?? row.Id),
-                          shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
-                          shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
-                          productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
-                          quantity: readInt(row.quantity ?? row.Quantity),
-                          unitGrossPrice: readNumber(row.unitGrossPrice ?? row.UnitGrossPrice),
-                        };
-                      });
-                    })(),
+                    shopifyVariantId: String(
+                      row.shopifyVariantId ?? row.ShopifyVariantId ?? ''
+                    ),
+                    productTitle: String(
+                      row.productTitle ?? row.ProductTitle ?? ''
+                    ),
+                    quantity: readInt(row.quantity ?? row.Quantity),
+                    unitGrossPrice: readNumber(
+                      row.unitGrossPrice ?? row.UnitGrossPrice
+                    ),
                   };
-                })
-              : [],
-            cashSaleRows: Array.isArray(cashSaleRowsRaw)
-              ? cashSaleRowsRaw.map((x: unknown) => {
-                  const c = x as Record<string, unknown>;
-                  return {
-                    id: readInt(c.id ?? c.Id),
-                    shopifyProductId: String(c.shopifyProductId ?? c.ShopifyProductId ?? ''),
-                    shopifyVariantId: String(c.shopifyVariantId ?? c.ShopifyVariantId ?? ''),
-                    productTitle: String(c.productTitle ?? c.ProductTitle ?? ''),
-                    quantity: readInt(c.quantity ?? c.Quantity),
-                    unitPrice: readNumber(c.unitPrice ?? c.UnitPrice),
-                    grossAmount: readNumber(c.grossAmount ?? c.GrossAmount),
-                    createdAtUtc: String(c.createdAtUtc ?? c.CreatedAtUtc ?? ''),
-                  };
-                })
-              : [],
-            unpaidProductRows: Array.isArray(unpaidProductRowsRaw)
-              ? unpaidProductRowsRaw.map((x: unknown) => {
-                  const u = x as Record<string, unknown>;
-                  return {
-                    shopifyProductId: String(u.shopifyProductId ?? u.ShopifyProductId ?? ''),
-                    shopifyVariantId: String(u.shopifyVariantId ?? u.ShopifyVariantId ?? ''),
-                    shopifyVariantTitle: String(u.shopifyVariantTitle ?? u.ShopifyVariantTitle ?? ''),
-                    shopifyOrderId: String(u.shopifyOrderId ?? u.ShopifyOrderId ?? ''),
-                    productTitle: String(u.productTitle ?? u.ProductTitle ?? ''),
-                    quantity: readInt(u.quantity ?? u.Quantity),
-                    supplierId: (() => {
-                      const raw = u.supplierId ?? u.SupplierId;
-                      if (raw == null) return null;
-                      const n = readInt(raw);
-                      return n > 0 ? n : null;
-                    })(),
-                    supplierName: String(u.supplierName ?? u.SupplierName ?? ''),
-                    unitSupplyPrice: readNumber(u.unitSupplyPrice ?? u.UnitSupplyPrice),
-                    estimatedCogs: readNumber(u.estimatedCogs ?? u.EstimatedCogs),
-                    saleOrderDateUtc: (u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
-                      ? String(u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
-                      : null,
-                    isManuallyLinked: Boolean(u.isManuallyLinked ?? u.IsManuallyLinked),
-                    linkedExpenseId: (() => {
-                      const raw = u.linkedExpenseId ?? u.LinkedExpenseId;
-                      if (raw == null) return null;
-                      const n = readInt(raw);
-                      return n > 0 ? n : null;
-                    })(),
-                    linkedPaymentLabel: String(u.linkedPaymentLabel ?? u.LinkedPaymentLabel ?? ''),
-                  };
-                })
-              : [],
-            polandRows: Array.isArray(polandRowsRaw)
-              ? polandRowsRaw.map((p) => {
-                  const d = p as Record<string, unknown>;
-                  const detailItemsRaw = d.items ?? d.Items;
-                  return {
-                    id: readInt(d.id ?? d.Id),
-                    orderNumber: String(d.orderNumber ?? d.OrderNumber ?? ''),
-                    orderDateUtc: String(d.orderDateUtc ?? d.OrderDateUtc ?? ''),
-                    vatRatePercent: readNumber(d.vatRatePercent ?? d.VatRatePercent),
-                    grossAmount: readNumber(d.grossAmount ?? d.GrossAmount),
-                    vatAmount: readNumber(d.vatAmount ?? d.VatAmount),
-                    netAmount: readNumber(d.netAmount ?? d.NetAmount),
-                    shippingGrossAmount: readNumber(d.shippingGrossAmount ?? d.ShippingGrossAmount),
-                    shippingNetAmount: readNumber(d.shippingNetAmount ?? d.ShippingNetAmount),
-                    invoiceFileName: String(d.invoiceFileName ?? d.InvoiceFileName ?? ''),
-                    items: Array.isArray(detailItemsRaw)
-                      ? detailItemsRaw.map((it) => {
-                          const i = it as Record<string, unknown>;
-                          return {
-                            id: readInt(i.id ?? i.Id),
-                            shopifyVariantId: String(i.shopifyVariantId ?? i.ShopifyVariantId ?? ''),
-                            variantTitle: String(i.variantTitle ?? i.VariantTitle ?? ''),
-                            productTitle: String(i.productTitle ?? i.ProductTitle ?? ''),
-                            productType: String(i.productType ?? i.ProductType ?? ''),
-                            quantity: readInt(i.quantity ?? i.Quantity),
-                            unitPrice: readNumber(i.unitPrice ?? i.UnitPrice),
-                            grossAmount: readNumber(i.grossAmount ?? i.GrossAmount),
-                            assignedVatRatePercent: readNumber(
-                              i.assignedVatRatePercent ?? i.AssignedVatRatePercent
-                            ),
-                            assignmentReason: String(i.assignmentReason ?? i.AssignmentReason ?? ''),
-                          };
-                        })
-                      : [],
-                  };
-                })
-              : [],
-          };
-        });
+                });
+              })(),
+            };
+          })
+        : [],
+      cashSaleRows: Array.isArray(cashSaleRowsRaw)
+        ? cashSaleRowsRaw.map((x: unknown) => {
+            const c = x as Record<string, unknown>;
+            return {
+              id: readInt(c.id ?? c.Id),
+              shopifyProductId: String(
+                c.shopifyProductId ?? c.ShopifyProductId ?? ''
+              ),
+              shopifyVariantId: String(
+                c.shopifyVariantId ?? c.ShopifyVariantId ?? ''
+              ),
+              productTitle: String(c.productTitle ?? c.ProductTitle ?? ''),
+              quantity: readInt(c.quantity ?? c.Quantity),
+              unitPrice: readNumber(c.unitPrice ?? c.UnitPrice),
+              grossAmount: readNumber(c.grossAmount ?? c.GrossAmount),
+              createdAtUtc: String(c.createdAtUtc ?? c.CreatedAtUtc ?? ''),
+            };
+          })
+        : [],
+      unpaidProductRows: Array.isArray(unpaidProductRowsRaw)
+        ? unpaidProductRowsRaw.map((x: unknown) => {
+            const u = x as Record<string, unknown>;
+            return {
+              shopifyProductId: String(
+                u.shopifyProductId ?? u.ShopifyProductId ?? ''
+              ),
+              shopifyVariantId: String(
+                u.shopifyVariantId ?? u.ShopifyVariantId ?? ''
+              ),
+              shopifyVariantTitle: String(
+                u.shopifyVariantTitle ?? u.ShopifyVariantTitle ?? ''
+              ),
+              shopifyOrderId: String(
+                u.shopifyOrderId ?? u.ShopifyOrderId ?? ''
+              ),
+              productTitle: String(u.productTitle ?? u.ProductTitle ?? ''),
+              quantity: readInt(u.quantity ?? u.Quantity),
+              supplierId: (() => {
+                const raw = u.supplierId ?? u.SupplierId;
+                if (raw == null) return null;
+                const n = readInt(raw);
+                return n > 0 ? n : null;
+              })(),
+              supplierName: String(u.supplierName ?? u.SupplierName ?? ''),
+              unitSupplyPrice: readNumber(
+                u.unitSupplyPrice ?? u.UnitSupplyPrice
+              ),
+              estimatedCogs: readNumber(u.estimatedCogs ?? u.EstimatedCogs),
+              saleOrderDateUtc:
+                (u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
+                  ? String(u.saleOrderDateUtc ?? u.SaleOrderDateUtc)
+                  : null,
+              isManuallyLinked: Boolean(
+                u.isManuallyLinked ?? u.IsManuallyLinked
+              ),
+              linkedExpenseId: (() => {
+                const raw = u.linkedExpenseId ?? u.LinkedExpenseId;
+                if (raw == null) return null;
+                const n = readInt(raw);
+                return n > 0 ? n : null;
+              })(),
+              linkedPaymentLabel: String(
+                u.linkedPaymentLabel ?? u.LinkedPaymentLabel ?? ''
+              ),
+            };
+          })
+        : [],
+      polandRows: Array.isArray(polandRowsRaw)
+        ? polandRowsRaw.map((p) => {
+            const d = p as Record<string, unknown>;
+            const detailItemsRaw = d.items ?? d.Items;
+            return {
+              id: readInt(d.id ?? d.Id),
+              orderNumber: String(d.orderNumber ?? d.OrderNumber ?? ''),
+              orderDateUtc: String(d.orderDateUtc ?? d.OrderDateUtc ?? ''),
+              vatRatePercent: readNumber(d.vatRatePercent ?? d.VatRatePercent),
+              grossAmount: readNumber(d.grossAmount ?? d.GrossAmount),
+              vatAmount: readNumber(d.vatAmount ?? d.VatAmount),
+              netAmount: readNumber(d.netAmount ?? d.NetAmount),
+              shippingGrossAmount: readNumber(
+                d.shippingGrossAmount ?? d.ShippingGrossAmount
+              ),
+              shippingNetAmount: readNumber(
+                d.shippingNetAmount ?? d.ShippingNetAmount
+              ),
+              invoiceFileName: String(
+                d.invoiceFileName ?? d.InvoiceFileName ?? ''
+              ),
+              items: Array.isArray(detailItemsRaw)
+                ? detailItemsRaw.map((it) => {
+                    const i = it as Record<string, unknown>;
+                    return {
+                      id: readInt(i.id ?? i.Id),
+                      shopifyVariantId: String(
+                        i.shopifyVariantId ?? i.ShopifyVariantId ?? ''
+                      ),
+                      variantTitle: String(
+                        i.variantTitle ?? i.VariantTitle ?? ''
+                      ),
+                      productTitle: String(
+                        i.productTitle ?? i.ProductTitle ?? ''
+                      ),
+                      productType: String(i.productType ?? i.ProductType ?? ''),
+                      quantity: readInt(i.quantity ?? i.Quantity),
+                      unitPrice: readNumber(i.unitPrice ?? i.UnitPrice),
+                      grossAmount: readNumber(i.grossAmount ?? i.GrossAmount),
+                      assignedVatRatePercent: readNumber(
+                        i.assignedVatRatePercent ?? i.AssignedVatRatePercent
+                      ),
+                      assignmentReason: String(
+                        i.assignmentReason ?? i.AssignmentReason ?? ''
+                      ),
+                    };
+                  })
+                : [],
+            };
+          })
+        : [],
+    };
+  });
 }
 
 function mapVatReportDetails(row: Record<string, unknown>): VatReportDetails {
@@ -271,15 +352,23 @@ function mapVatReportDetails(row: Record<string, unknown>): VatReportDetails {
   };
 }
 
-export async function setVatReportLocked(reportId: number, locked: boolean): Promise<VatReport[]> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/${locked ? 'lock' : 'unlock'}`, {
-    method: 'POST',
-    credentials: apiCredentials,
-  });
+export async function setVatReportLocked(
+  reportId: number,
+  locked: boolean
+): Promise<VatReport[]> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/${reportId}/${locked ? 'lock' : 'unlock'}`,
+    {
+      method: 'POST',
+      credentials: apiCredentials,
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(
       res,
-      locked ? 'Не ўдалося заблакаваць справаздачу' : 'Не ўдалося разблакаваць справаздачу'
+      locked
+        ? 'Не ўдалося заблакаваць справаздачу'
+        : 'Не ўдалося разблакаваць справаздачу'
     );
     throw new Error(msg);
   }
@@ -287,37 +376,51 @@ export async function setVatReportLocked(reportId: number, locked: boolean): Pro
   if (!Array.isArray(data)) {
     throw new Error('Некарэктны адказ сервера');
   }
-  return data.map((item) => mapVatReportListItem(item as Record<string, unknown>));
+  return data.map((item) =>
+    mapVatReportListItem(item as Record<string, unknown>)
+  );
 }
 
-export async function fetchVatReportDetails(id: number): Promise<VatReportDetails> {
+export async function fetchVatReportDetails(
+  id: number
+): Promise<VatReportDetails> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/${id}`, {
     method: 'GET',
     credentials: apiCredentials,
     cache: 'no-store',
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць дэталі справаздачы');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць дэталі справаздачы'
+    );
     throw new Error(msg);
   }
   const row = (await res.json()) as Record<string, unknown>;
   return mapVatReportDetails(row);
 }
 
-export async function fetchVatReportCombinedDetails(
-  id: number
-): Promise<{ details: VatReportDetails; foreignRows: VatReportDetails['rows'] }> {
+export async function fetchVatReportCombinedDetails(id: number): Promise<{
+  details: VatReportDetails;
+  foreignRows: VatReportDetails['rows'];
+}> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/${id}/combined-details`, {
     method: 'GET',
     credentials: apiCredentials,
     cache: 'no-store',
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць злучаную справаздачу');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць злучаную справаздачу'
+    );
     throw new Error(msg);
   }
   const payload = (await res.json()) as Record<string, unknown>;
-  const detailsRaw = (payload.details ?? payload.Details) as Record<string, unknown>;
+  const detailsRaw = (payload.details ?? payload.Details) as Record<
+    string,
+    unknown
+  >;
   const foreignRowsRaw = payload.foreignRows ?? payload.ForeignRows;
   return {
     details: mapVatReportDetails(detailsRaw),
@@ -342,20 +445,31 @@ export async function createVatReportCashSale(
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося дадаць наяўную продажу');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося дадаць наяўную продажу'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as Record<string, unknown>;
   return readInt(data.id ?? data.Id);
 }
 
-export async function deleteVatReportCashSale(cashSaleId: number): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/cash-sales/${cashSaleId}`, {
-    method: 'DELETE',
-    credentials: apiCredentials,
-  });
+export async function deleteVatReportCashSale(
+  cashSaleId: number
+): Promise<void> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/cash-sales/${cashSaleId}`,
+    {
+      method: 'DELETE',
+      credentials: apiCredentials,
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць наяўную продажу');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося выдаліць наяўную продажу'
+    );
     throw new Error(msg);
   }
 }
@@ -434,27 +548,39 @@ export async function updateVatReportExpense(
   }
 }
 
-export async function updateVatReportExpensePaid(expenseId: number, isPaid: boolean): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/paid`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify({ isPaid }),
-  });
+export async function updateVatReportExpensePaid(
+  expenseId: number,
+  isPaid: boolean
+): Promise<void> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/expenses/${expenseId}/paid`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({ isPaid }),
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося змяніць аплату');
     throw new Error(msg);
   }
 }
 
-export async function uploadVatReportExpenseInvoice(expenseId: number, file: File): Promise<void> {
+export async function uploadVatReportExpenseInvoice(
+  expenseId: number,
+  file: File
+): Promise<void> {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`, {
-    method: 'POST',
-    credentials: apiCredentials,
-    body: formData,
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`,
+    {
+      method: 'POST',
+      credentials: apiCredentials,
+      body: formData,
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося загрузіць фактуру');
     throw new Error(msg);
@@ -464,18 +590,25 @@ export async function uploadVatReportExpenseInvoice(expenseId: number, file: Fil
 export async function downloadVatReportExpenseInvoice(
   expenseId: number
 ): Promise<{ blob: Blob; fileName: string }> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`, {
-    method: 'GET',
-    credentials: apiCredentials,
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/expenses/${expenseId}/invoice`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося атрымаць фактуру');
     throw new Error(msg);
   }
   const blob = await res.blob();
   const contentDisposition = res.headers.get('content-disposition') ?? '';
-  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(contentDisposition);
-  const fileName = match ? decodeURIComponent(match[1]) : `expense-${expenseId}.pdf`;
+  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(
+    contentDisposition
+  );
+  const fileName = match
+    ? decodeURIComponent(match[1])
+    : `expense-${expenseId}.pdf`;
   return { blob, fileName };
 }
 
@@ -513,7 +646,10 @@ export async function updateVatReportRow(payload: {
     }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося захаваць радок справаздачы');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося захаваць радок справаздачы'
+    );
     throw new Error(msg);
   }
 }
@@ -522,26 +658,37 @@ export async function updateVatReportRowItemVat(payload: {
   itemId: number;
   vatRatePercent: number;
 }): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/items/${payload.itemId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify({
-      vatRatePercent: payload.vatRatePercent,
-    }),
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/rows/items/${payload.itemId}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({
+        vatRatePercent: payload.vatRatePercent,
+      }),
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося захаваць VAT па тавары');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося захаваць VAT па тавары'
+    );
     throw new Error(msg);
   }
 }
 
-export async function fetchVatReportSourceOrders(reportId: number): Promise<VatReportSourceOrderOption[]> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/source-orders`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+export async function fetchVatReportSourceOrders(
+  reportId: number
+): Promise<VatReportSourceOrderOption[]> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/${reportId}/source-orders`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося загрузіць спіс замоў');
     throw new Error(msg);
@@ -583,12 +730,15 @@ export async function createVatReportForeignRow(
     }>;
   }
 ): Promise<string> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/foreign-rows`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify(payload),
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/${reportId}/foreign-rows`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify(payload),
+    }
+  );
   if (!res.ok) {
     const msg = await readErrorMessage(res, 'Не ўдалося дадаць замежны радок');
     throw new Error(msg);
@@ -624,7 +774,10 @@ export async function createVatReportRow(
     }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося дадаць радок справаздачы');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося дадаць радок справаздачы'
+    );
     throw new Error(msg);
   }
 }
@@ -635,7 +788,10 @@ export async function deleteVatReportRow(rowId: number): Promise<void> {
     credentials: apiCredentials,
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць радок справаздачы');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося выдаліць радок справаздачы'
+    );
     throw new Error(msg);
   }
 }
@@ -645,17 +801,23 @@ export async function moveVatReportRowToForeign(payload: {
   deliveryName: string;
   deliveryAddress: string;
 }): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${payload.rowId}/move-to-foreign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify({
-      deliveryName: payload.deliveryName,
-      deliveryAddress: payload.deliveryAddress,
-    }),
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/rows/${payload.rowId}/move-to-foreign`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({
+        deliveryName: payload.deliveryName,
+        deliveryAddress: payload.deliveryAddress,
+      }),
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося перанесці радок у замежныя');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося перанесці радок у замежныя'
+    );
     throw new Error(msg);
   }
 }
@@ -666,13 +828,19 @@ export async function regenerateVatReport(id: number): Promise<VatReport> {
     credentials: apiCredentials,
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося перегенераваць справаздачу');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося перегенераваць справаздачу'
+    );
     throw new Error(msg);
   }
   return mapVatReportListItem((await res.json()) as Record<string, unknown>);
 }
 
-export async function uploadVatReportRowInvoice(rowId: number, file: File): Promise<void> {
+export async function uploadVatReportRowInvoice(
+  rowId: number,
+  file: File
+): Promise<void> {
   const formData = new FormData();
   formData.append('file', file);
   const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${rowId}/invoice`, {
@@ -686,7 +854,9 @@ export async function uploadVatReportRowInvoice(rowId: number, file: File): Prom
   }
 }
 
-export async function downloadVatReportRowInvoice(rowId: number): Promise<{ blob: Blob; fileName: string }> {
+export async function downloadVatReportRowInvoice(
+  rowId: number
+): Promise<{ blob: Blob; fileName: string }> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/rows/${rowId}/invoice`, {
     method: 'GET',
     credentials: apiCredentials,
@@ -697,8 +867,12 @@ export async function downloadVatReportRowInvoice(rowId: number): Promise<{ blob
   }
   const blob = await res.blob();
   const contentDisposition = res.headers.get('content-disposition') ?? '';
-  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(contentDisposition);
-  const fileName = match ? decodeURIComponent(match[1]) : `invoice-${rowId}.pdf`;
+  const match = /filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?/i.exec(
+    contentDisposition
+  );
+  const fileName = match
+    ? decodeURIComponent(match[1])
+    : `invoice-${rowId}.pdf`;
   return { blob, fileName };
 }
 
@@ -710,9 +884,15 @@ function mapOverpaidOption(row: Record<string, unknown>) {
     invoiceNumber: String(row.invoiceNumber ?? row.InvoiceNumber ?? ''),
     comment: String(row.comment ?? row.Comment ?? ''),
     productTitle: String(row.productTitle ?? row.ProductTitle ?? ''),
-    shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
-    shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
-    shopifyVariantTitle: String(row.shopifyVariantTitle ?? row.ShopifyVariantTitle ?? ''),
+    shopifyProductId: String(
+      row.shopifyProductId ?? row.ShopifyProductId ?? ''
+    ),
+    shopifyVariantId: String(
+      row.shopifyVariantId ?? row.ShopifyVariantId ?? ''
+    ),
+    shopifyVariantTitle: String(
+      row.shopifyVariantTitle ?? row.ShopifyVariantTitle ?? ''
+    ),
     quantity: readInt(row.quantity ?? row.Quantity),
     overpaidQuantity: readInt(row.overpaidQuantity ?? row.OverpaidQuantity),
   };
@@ -724,7 +904,9 @@ function mapSupplierPaymentOption(row: Record<string, unknown>) {
     expenseDateUtc: String(row.expenseDateUtc ?? row.ExpenseDateUtc ?? ''),
     invoiceNumber: String(row.invoiceNumber ?? row.InvoiceNumber ?? ''),
     comment: String(row.comment ?? row.Comment ?? ''),
-    expenseInvoiceTypeName: String(row.expenseInvoiceTypeName ?? row.ExpenseInvoiceTypeName ?? ''),
+    expenseInvoiceTypeName: String(
+      row.expenseInvoiceTypeName ?? row.ExpenseInvoiceTypeName ?? ''
+    ),
     grossAmount: readNumber(row.grossAmount ?? row.GrossAmount),
     totalProductUnits: readInt(row.totalProductUnits ?? row.TotalProductUnits),
     hasInvoice: Boolean(row.hasInvoice ?? row.HasInvoice),
@@ -747,28 +929,41 @@ export async function fetchUnpaidLinkOptions(params: {
   if (params.shopifyVariantId?.trim()) {
     query.set('shopifyVariantId', params.shopifyVariantId.trim());
   }
-  const res = await fetch(`${getApiBaseUrl()}/Reports/unpaid/link-options?${query.toString()}`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/unpaid/link-options?${query.toString()}`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць варыянты прывязкі');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць варыянты прывязкі'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as Record<string, unknown>;
   const overpaidRaw = data.overpaidProducts ?? data.OverpaidProducts;
   const invoicesRaw = data.supplierInvoices ?? data.SupplierInvoices;
-  const paymentsRaw = data.supplierPaymentRecords ?? data.SupplierPaymentRecords;
+  const paymentsRaw =
+    data.supplierPaymentRecords ?? data.SupplierPaymentRecords;
   return {
     overpaidProducts: Array.isArray(overpaidRaw)
-      ? overpaidRaw.map((row) => mapOverpaidOption(row as Record<string, unknown>))
+      ? overpaidRaw.map((row) =>
+          mapOverpaidOption(row as Record<string, unknown>)
+        )
       : [],
     supplierInvoices: Array.isArray(invoicesRaw)
-      ? invoicesRaw.map((row) => mapSupplierPaymentOption(row as Record<string, unknown>))
+      ? invoicesRaw.map((row) =>
+          mapSupplierPaymentOption(row as Record<string, unknown>)
+        )
       : [],
     supplierPaymentRecords: Array.isArray(paymentsRaw)
-      ? paymentsRaw.map((row) => mapSupplierPaymentOption(row as Record<string, unknown>))
+      ? paymentsRaw.map((row) =>
+          mapSupplierPaymentOption(row as Record<string, unknown>)
+        )
       : [],
   };
 }
@@ -793,7 +988,10 @@ export async function linkUnpaidProduct(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося прывязаць неаплочаны тавар');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося прывязаць неаплочаны тавар'
+    );
     throw new Error(msg);
   }
 }

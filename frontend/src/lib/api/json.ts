@@ -1,7 +1,8 @@
 /** Shared JSON field readers for API responses (PascalCase / camelCase). */
 
 export function readInt(value: unknown): number {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === 'number' && Number.isFinite(value))
+    return Math.trunc(value);
   if (typeof value === 'string' && value.trim() !== '') {
     const n = Number(value);
     return Number.isFinite(n) ? Math.trunc(n) : 0;
@@ -31,5 +32,7 @@ export function readBoolean(value: unknown): boolean {
 
 export function readStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return value.filter(
+    (item): item is string => typeof item === 'string' && item.trim().length > 0
+  );
 }

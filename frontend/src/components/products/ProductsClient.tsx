@@ -6,7 +6,11 @@ import { FiClock, FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import ProductHistoryModal from '@/components/products/ProductHistoryModal';
-import { fetchProductHistory, fetchProductsWithSuppliers, syncUnsyncedProductRow } from '@/lib/api/products';
+import {
+  fetchProductHistory,
+  fetchProductsWithSuppliers,
+  syncUnsyncedProductRow,
+} from '@/lib/api/products';
 import { getRowOverpaidQuantity } from '@/lib/products/overpaid';
 import type { ProductWithSuppliers } from '@/types/product';
 import type { ProductHistory } from '@/types/product-history';
@@ -29,7 +33,8 @@ type ProductHistoryTarget = {
   subtitle?: string;
 };
 
-const isDefaultVariantTitle = (name: string) => name.trim().toLowerCase() === 'default title';
+const isDefaultVariantTitle = (name: string) =>
+  name.trim().toLowerCase() === 'default title';
 
 export default function ProductsClient() {
   const pageSize = 50;
@@ -39,10 +44,16 @@ export default function ProductsClient() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedProductTypes, setSelectedProductTypes] = useState<string[]>([]);
+  const [selectedProductTypes, setSelectedProductTypes] = useState<string[]>(
+    []
+  );
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
-  const [syncFilter, setSyncFilter] = useState<'all' | 'supply' | 'shopify'>('all');
-  const [quantitySortDirection, setQuantitySortDirection] = useState<'asc' | 'desc'>('desc');
+  const [syncFilter, setSyncFilter] = useState<'all' | 'supply' | 'shopify'>(
+    'all'
+  );
+  const [quantitySortDirection, setQuantitySortDirection] = useState<
+    'asc' | 'desc'
+  >('desc');
   const [page, setPage] = useState(1);
   const [supplierMenuOpen, setSupplierMenuOpen] = useState(false);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
@@ -50,13 +61,19 @@ export default function ProductsClient() {
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
   const [syncingRowKey, setSyncingRowKey] = useState<string | null>(null);
-  const [recentSyncedQty, setRecentSyncedQty] = useState<Record<string, number>>({});
-  const [collapsedProducts, setCollapsedProducts] = useState<Record<string, boolean>>({});
+  const [recentSyncedQty, setRecentSyncedQty] = useState<
+    Record<string, number>
+  >({});
+  const [collapsedProducts, setCollapsedProducts] = useState<
+    Record<string, boolean>
+  >({});
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyData, setHistoryData] = useState<ProductHistory | null>(null);
-  const [historySubtitle, setHistorySubtitle] = useState<string | undefined>(undefined);
+  const [historySubtitle, setHistorySubtitle] = useState<string | undefined>(
+    undefined
+  );
   const supplierTriggerRef = useRef<HTMLButtonElement | null>(null);
   const typeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
@@ -134,7 +151,11 @@ export default function ProductsClient() {
 
   const productTypeOptions = useMemo(() => {
     return Array.from(
-      new Set(rows.map((row) => row.productType).filter((type) => type.trim().length > 0))
+      new Set(
+        rows
+          .map((row) => row.productType)
+          .filter((type) => type.trim().length > 0)
+      )
     ).sort((a, b) => a.localeCompare(b, 'be'));
   }, [rows]);
 
@@ -144,26 +165,33 @@ export default function ProductsClient() {
     const filteredBySupplier =
       selectedSuppliers.length === 0
         ? displayRows
-        : displayRows.filter((row) => selectedSuppliers.includes(row.supplierName));
+        : displayRows.filter((row) =>
+            selectedSuppliers.includes(row.supplierName)
+          );
 
     const filtered =
       q.length === 0
         ? filteredBySupplier
         : filteredBySupplier.filter(
             (row) =>
-              row.productName.toLowerCase().includes(q) || row.variantName.toLowerCase().includes(q)
+              row.productName.toLowerCase().includes(q) ||
+              row.variantName.toLowerCase().includes(q)
           );
 
     const filteredByType =
       selectedProductTypes.length === 0
         ? filtered
-        : filtered.filter((row) => selectedProductTypes.includes(row.productType));
+        : filtered.filter((row) =>
+            selectedProductTypes.includes(row.productType)
+          );
 
     const filteredBySyncFlag =
       syncFilter === 'all'
         ? filteredByType
         : filteredByType.filter((row) =>
-            syncFilter === 'supply' ? row.rowSource === 'supply' : row.rowSource === 'shopify'
+            syncFilter === 'supply'
+              ? row.rowSource === 'supply'
+              : row.rowSource === 'shopify'
           );
 
     const visibleByCollapse = filteredBySyncFlag.filter(
@@ -215,7 +243,13 @@ export default function ProductsClient() {
 
   useEffect(() => {
     setPage(1);
-  }, [searchQuery, selectedSuppliers, selectedProductTypes, syncFilter, quantitySortDirection]);
+  }, [
+    searchQuery,
+    selectedSuppliers,
+    selectedProductTypes,
+    syncFilter,
+    quantitySortDirection,
+  ]);
 
   const toggleSupplierFilter = (supplier: string) => {
     setSelectedSuppliers((prev) =>
@@ -327,9 +361,10 @@ export default function ProductsClient() {
       subtitle: loading
         ? 'Загрузка…'
         : `Усяго прадуктаў: ${rows.length}${
-            selectedSuppliers.length > 0 || searchQuery.trim()
-              || selectedProductTypes.length > 0
-              || syncFilter !== 'all'
+            selectedSuppliers.length > 0 ||
+            searchQuery.trim() ||
+            selectedProductTypes.length > 0 ||
+            syncFilter !== 'all'
               ? ` · паказана: ${visibleRows.length}`
               : ''
           }`,
@@ -374,9 +409,14 @@ export default function ProductsClient() {
     };
   }, []);
 
-  const reloadProducts = async (expectedQtyByProductId?: Record<string, number>) => {
+  const reloadProducts = async (
+    expectedQtyByProductId?: Record<string, number>
+  ) => {
     const data = await fetchProductsWithSuppliers(true);
-    if (!expectedQtyByProductId || Object.keys(expectedQtyByProductId).length === 0) {
+    if (
+      !expectedQtyByProductId ||
+      Object.keys(expectedQtyByProductId).length === 0
+    ) {
       setRows(data);
       return;
     }
@@ -390,7 +430,8 @@ export default function ProductsClient() {
         return {
           ...item,
           shopifyQuantityInStock: expected,
-          quantityInStock: item.unsyncedSuppliers.length > 0 ? item.quantityInStock : expected,
+          quantityInStock:
+            item.unsyncedSuppliers.length > 0 ? item.quantityInStock : expected,
         };
       })
     );
@@ -402,23 +443,38 @@ export default function ProductsClient() {
     setError(null);
     setSuccess(null);
     try {
-      const result = await syncUnsyncedProductRow(row.shopifyProductId, row.supplierId);
-      const nextRecent = { ...recentSyncedQty, [row.shopifyProductId]: result.newAvailable };
+      const result = await syncUnsyncedProductRow(
+        row.shopifyProductId,
+        row.supplierId
+      );
+      const nextRecent = {
+        ...recentSyncedQty,
+        [row.shopifyProductId]: result.newAvailable,
+      };
       setRecentSyncedQty(nextRecent);
       setRows((prev) =>
         prev.map((item) => {
           if (item.shopifyProductId !== row.shopifyProductId) return item;
 
-          const remainingUnsynced = item.unsyncedSuppliers.filter((s) => s.supplierId !== row.supplierId);
-          const remainingUnsyncedQty = remainingUnsynced.reduce((sum, s) => sum + s.quantity, 0);
+          const remainingUnsynced = item.unsyncedSuppliers.filter(
+            (s) => s.supplierId !== row.supplierId
+          );
+          const remainingUnsyncedQty = remainingUnsynced.reduce(
+            (sum, s) => sum + s.quantity,
+            0
+          );
 
           return {
             ...item,
             unsyncedSuppliers: remainingUnsynced,
             hasSupplyQuantityOverride: remainingUnsynced.length > 0,
-            quantityInStock: remainingUnsynced.length > 0 ? remainingUnsyncedQty : result.newAvailable,
+            quantityInStock:
+              remainingUnsynced.length > 0
+                ? remainingUnsyncedQty
+                : result.newAvailable,
             shopifyQuantityInStock: result.newAvailable,
-            lastSyncedSupplierName: row.supplierName || item.lastSyncedSupplierName,
+            lastSyncedSupplierName:
+              row.supplierName || item.lastSyncedSupplierName,
           };
         })
       );
@@ -434,7 +490,10 @@ export default function ProductsClient() {
   };
 
   const toggleCollapsed = (productId: string) => {
-    setCollapsedProducts((prev) => ({ ...prev, [productId]: !prev[productId] }));
+    setCollapsedProducts((prev) => ({
+      ...prev,
+      [productId]: !prev[productId],
+    }));
   };
 
   const closeHistory = () => {
@@ -448,15 +507,28 @@ export default function ProductsClient() {
     const isVariantScope = row.isVariantChild;
     const target: ProductHistoryTarget = {
       shopifyProductId: row.shopifyProductId,
-      shopifyVariantId: isVariantScope && row.shopifyVariantId.trim() ? row.shopifyVariantId : undefined,
-      variantTitle: isVariantScope && row.variantName.trim() ? row.variantName.trim() : undefined,
-      supplierId: row.rowSource === 'supply' && row.supplierId ? row.supplierId : undefined,
+      shopifyVariantId:
+        isVariantScope && row.shopifyVariantId.trim()
+          ? row.shopifyVariantId
+          : undefined,
+      variantTitle:
+        isVariantScope && row.variantName.trim()
+          ? row.variantName.trim()
+          : undefined,
+      supplierId:
+        row.rowSource === 'supply' && row.supplierId
+          ? row.supplierId
+          : undefined,
     };
     const subtitleParts: string[] = [];
     if (row.isVariantChild && row.variantName.trim()) {
       subtitleParts.push(row.variantName.trim());
     }
-    if (target.supplierId && row.supplierName.trim() && row.supplierName !== '—') {
+    if (
+      target.supplierId &&
+      row.supplierName.trim() &&
+      row.supplierName !== '—'
+    ) {
       subtitleParts.push(row.supplierName.trim());
     }
 
@@ -464,7 +536,9 @@ export default function ProductsClient() {
     setHistoryLoading(true);
     setHistoryError(null);
     setHistoryData(null);
-    setHistorySubtitle(subtitleParts.length > 0 ? subtitleParts.join(' · ') : undefined);
+    setHistorySubtitle(
+      subtitleParts.length > 0 ? subtitleParts.join(' · ') : undefined
+    );
 
     try {
       const history = await fetchProductHistory(target.shopifyProductId, {
@@ -474,7 +548,9 @@ export default function ProductsClient() {
       });
       setHistoryData(history);
     } catch (err: unknown) {
-      setHistoryError(err instanceof Error ? err.message : 'Памылка загрузкі гісторыі');
+      setHistoryError(
+        err instanceof Error ? err.message : 'Памылка загрузкі гісторыі'
+      );
     } finally {
       setHistoryLoading(false);
     }
@@ -487,7 +563,9 @@ export default function ProductsClient() {
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {error}
+        </div>
       )}
       {success && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
@@ -537,7 +615,11 @@ export default function ProductsClient() {
               <span className="font-medium">Крыніца колькасці</span>
               <select
                 value={syncFilter}
-                onChange={(e) => setSyncFilter(e.currentTarget.value as 'all' | 'supply' | 'shopify')}
+                onChange={(e) =>
+                  setSyncFilter(
+                    e.currentTarget.value as 'all' | 'supply' | 'shopify'
+                  )
+                }
                 className="rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
               >
                 <option value="all">Усе</option>
@@ -564,7 +646,9 @@ export default function ProductsClient() {
         {visibleRows.length === 0 ? (
           <div className="px-6 py-16 text-center">
             <p className="text-sm font-medium text-gray-900">
-              {rows.length === 0 ? 'Прадуктаў пакуль няма' : 'Нічога не знойдзена'}
+              {rows.length === 0
+                ? 'Прадуктаў пакуль няма'
+                : 'Нічога не знойдзена'}
             </p>
             <p className="mt-1 text-sm text-gray-500">
               {rows.length === 0
@@ -583,15 +667,21 @@ export default function ProductsClient() {
                       type="button"
                       className="inline-flex items-center gap-1 rounded text-xs font-semibold uppercase tracking-wide text-gray-500 transition hover:text-gray-700"
                       onClick={() =>
-                        setQuantitySortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+                        setQuantitySortDirection((prev) =>
+                          prev === 'asc' ? 'desc' : 'asc'
+                        )
                       }
                       aria-label="Сартаваць па колькасці ў наяўнасці"
                     >
                       У наяўнасці
-                      <span aria-hidden>{quantitySortDirection === 'asc' ? '↑' : '↓'}</span>
+                      <span aria-hidden>
+                        {quantitySortDirection === 'asc' ? '↑' : '↓'}
+                      </span>
                     </button>
                   </th>
-                  <th className="whitespace-nowrap px-6 py-3.5 text-right">У Shopify</th>
+                  <th className="whitespace-nowrap px-6 py-3.5 text-right">
+                    У Shopify
+                  </th>
                   <th className="whitespace-nowrap px-6 py-3.5">
                     <div className="inline-flex items-center gap-1">
                       <span>Пастаўшчыкі</span>
@@ -606,171 +696,207 @@ export default function ProductsClient() {
                       </button>
                     </div>
                   </th>
-                  <th className="whitespace-nowrap px-6 py-3.5 text-right">Дзеянне</th>
+                  <th className="whitespace-nowrap px-6 py-3.5 text-right">
+                    Дзеянне
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
                 {pagedRows.map((row) => {
-                  const overpaidQty = getRowOverpaidQuantity(row.overpaidLines ?? [], {
-                    shopifyProductId: row.shopifyProductId,
-                    shopifyVariantId: row.shopifyVariantId,
-                    variantName: row.variantName,
-                    supplierId: row.supplierId,
-                    isVariantChild: row.isVariantChild,
-                    rowSource: row.rowSource,
-                  });
+                  const overpaidQty = getRowOverpaidQuantity(
+                    row.overpaidLines ?? [],
+                    {
+                      shopifyProductId: row.shopifyProductId,
+                      shopifyVariantId: row.shopifyVariantId,
+                      variantName: row.variantName,
+                      supplierId: row.supplierId,
+                      isVariantChild: row.isVariantChild,
+                      rowSource: row.rowSource,
+                    }
+                  );
                   const isOverpaid = overpaidQty > 0;
-                  const isSupplyOverride = row.rowSource === 'supply' && row.hasSupplyQuantityOverride;
+                  const isSupplyOverride =
+                    row.rowSource === 'supply' && row.hasSupplyQuantityOverride;
 
                   return (
-                  <tr
-                    key={row.rowKey}
-                    className={`transition hover:bg-gray-50/80 ${
-                      isOverpaid
-                        ? 'bg-violet-50/80'
-                        : isSupplyOverride
-                          ? 'bg-amber-50/70'
-                          : row.isVariantChild
-                            ? 'bg-gray-50/40'
-                            : ''
-                    }`}
-                  >
-                    <td className={`py-3.5 font-medium text-gray-900 ${row.isVariantChild ? 'pl-12 pr-6' : 'px-6'}`}>
-                      <div className={`flex items-start gap-3 ${row.isVariantChild ? 'ml-5' : ''}`}>
-                        {!row.isVariantChild &&
-                          row.variants.some((variant) => {
-                            const name = variant.variantName.trim();
-                            return name.length > 0 && !isDefaultVariantTitle(name);
-                          }) && (
-                          <button
-                            type="button"
-                            onClick={() => toggleCollapsed(row.shopifyProductId)}
-                            className="mt-0.5 inline-flex size-5 items-center justify-center rounded border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
-                            aria-label={
-                              collapsedProducts[row.shopifyProductId]
-                                ? 'Разгарнуць варыянты'
-                                : 'Згарнуць варыянты'
-                            }
-                            title={
-                              collapsedProducts[row.shopifyProductId]
-                                ? 'Разгарнуць варыянты'
-                                : 'Згарнуць варыянты'
-                            }
-                          >
-                            <span aria-hidden>{collapsedProducts[row.shopifyProductId] ? '▸' : '▾'}</span>
-                          </button>
-                        )}
-                        {row.isVariantChild && (
-                          <span className="mt-0.5 inline-flex items-center gap-1 text-gray-400" aria-hidden>
-                            <span className="h-5 w-px bg-gray-300" />
-                            <span className="w-5 border-t border-gray-300" />
-                          </span>
-                        )}
-                        {row.mainImageUrl ? (
-                          <a
-                            href={row.mainImageUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                            aria-label={`Адкрыць арыгінал выявы: ${row.productName}`}
-                          >
-                            <img
-                              src={row.mainImageUrl}
-                              alt={row.productName}
-                              className="size-8 rounded-md border border-gray-200 object-cover"
-                              loading="lazy"
-                            />
-                          </a>
-                        ) : (
-                          <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
-                        )}
-                        <div className="flex min-w-0 flex-1 items-start gap-2">
-                          <div className="min-w-0 space-y-1">
-                            {row.productAdminUrl ? (
-                              <a
-                                href={row.productAdminUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 hover:underline"
+                    <tr
+                      key={row.rowKey}
+                      className={`transition hover:bg-gray-50/80 ${
+                        isOverpaid
+                          ? 'bg-violet-50/80'
+                          : isSupplyOverride
+                            ? 'bg-amber-50/70'
+                            : row.isVariantChild
+                              ? 'bg-gray-50/40'
+                              : ''
+                      }`}
+                    >
+                      <td
+                        className={`py-3.5 font-medium text-gray-900 ${row.isVariantChild ? 'pl-12 pr-6' : 'px-6'}`}
+                      >
+                        <div
+                          className={`flex items-start gap-3 ${row.isVariantChild ? 'ml-5' : ''}`}
+                        >
+                          {!row.isVariantChild &&
+                            row.variants.some((variant) => {
+                              const name = variant.variantName.trim();
+                              return (
+                                name.length > 0 && !isDefaultVariantTitle(name)
+                              );
+                            }) && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  toggleCollapsed(row.shopifyProductId)
+                                }
+                                className="mt-0.5 inline-flex size-5 items-center justify-center rounded border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
+                                aria-label={
+                                  collapsedProducts[row.shopifyProductId]
+                                    ? 'Разгарнуць варыянты'
+                                    : 'Згарнуць варыянты'
+                                }
+                                title={
+                                  collapsedProducts[row.shopifyProductId]
+                                    ? 'Разгарнуць варыянты'
+                                    : 'Згарнуць варыянты'
+                                }
                               >
-                                {row.isVariantChild ? row.variantName : row.productName}
-                                <FiExternalLink className="size-3.5 shrink-0 text-gray-500" aria-hidden />
-                              </a>
-                            ) : (
-                              <span>{row.isVariantChild ? row.variantName : row.productName}</span>
+                                <span aria-hidden>
+                                  {collapsedProducts[row.shopifyProductId]
+                                    ? '▸'
+                                    : '▾'}
+                                </span>
+                              </button>
                             )}
-                            {isOverpaid && (
-                              <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
-                                пераплата {overpaidQty}
+                          {row.isVariantChild && (
+                            <span
+                              className="mt-0.5 inline-flex items-center gap-1 text-gray-400"
+                              aria-hidden
+                            >
+                              <span className="h-5 w-px bg-gray-300" />
+                              <span className="w-5 border-t border-gray-300" />
+                            </span>
+                          )}
+                          {row.mainImageUrl ? (
+                            <a
+                              href={row.mainImageUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                              aria-label={`Адкрыць арыгінал выявы: ${row.productName}`}
+                            >
+                              <img
+                                src={row.mainImageUrl}
+                                alt={row.productName}
+                                className="size-8 rounded-md border border-gray-200 object-cover"
+                                loading="lazy"
+                              />
+                            </a>
+                          ) : (
+                            <div className="size-8 rounded-md border border-gray-200 bg-gray-100" />
+                          )}
+                          <div className="flex min-w-0 flex-1 items-start gap-2">
+                            <div className="min-w-0 space-y-1">
+                              {row.productAdminUrl ? (
+                                <a
+                                  href={row.productAdminUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 hover:underline"
+                                >
+                                  {row.isVariantChild
+                                    ? row.variantName
+                                    : row.productName}
+                                  <FiExternalLink
+                                    className="size-3.5 shrink-0 text-gray-500"
+                                    aria-hidden
+                                  />
+                                </a>
+                              ) : (
+                                <span>
+                                  {row.isVariantChild
+                                    ? row.variantName
+                                    : row.productName}
+                                </span>
+                              )}
+                              {isOverpaid && (
+                                <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
+                                  пераплата {overpaidQty}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void openHistory(row);
+                              }}
+                              className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                              aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
+                              title="Гісторыя прадукту"
+                            >
+                              <FiClock className="size-3.5" aria-hidden />
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums">
+                        <div className="inline-flex items-center gap-2">
+                          {row.rowSource === 'supply' &&
+                            row.hasSupplyQuantityOverride && (
+                              <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/30">
+                                з пастаўкі
                               </span>
                             )}
-                          </div>
+                          {row.quantityInStock <= 0 ? (
+                            <span className="inline-flex rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
+                              0
+                            </span>
+                          ) : (
+                            <span className="text-gray-700">
+                              {row.quantityInStock}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums text-gray-700">
+                        {row.shopifyQuantityInStock}
+                      </td>
+                      <td className="px-6 py-3.5 text-gray-700">
+                        {row.supplierName}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-3.5 text-right">
+                        <div className="inline-flex flex-wrap items-center justify-end gap-2">
                           <button
                             type="button"
                             onClick={() => {
                               void openHistory(row);
                             }}
-                            className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
                             aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
                             title="Гісторыя прадукту"
                           >
-                            <FiClock className="size-3.5" aria-hidden />
+                            <FiClock
+                              className="size-3.5 shrink-0"
+                              aria-hidden
+                            />
+                            Гісторыя
                           </button>
+                          {row.rowSource === 'supply' && row.supplierId ? (
+                            <button
+                              type="button"
+                              onClick={() => handleSyncRow(row)}
+                              disabled={syncingRowKey === row.rowKey}
+                              className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:opacity-50"
+                            >
+                              {syncingRowKey === row.rowKey && (
+                                <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+                              )}
+                              Сінхранізаваць
+                            </button>
+                          ) : null}
                         </div>
-                      </div>
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums">
-                      <div className="inline-flex items-center gap-2">
-                        {row.rowSource === 'supply' && row.hasSupplyQuantityOverride && (
-                          <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/30">
-                            з пастаўкі
-                          </span>
-                        )}
-                        {row.quantityInStock <= 0 ? (
-                          <span className="inline-flex rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
-                            0
-                          </span>
-                        ) : (
-                          <span className="text-gray-700">{row.quantityInStock}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-3.5 text-right tabular-nums text-gray-700">
-                      {row.shopifyQuantityInStock}
-                    </td>
-                    <td className="px-6 py-3.5 text-gray-700">
-                      {row.supplierName}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-3.5 text-right">
-                      <div className="inline-flex flex-wrap items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void openHistory(row);
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
-                          aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
-                          title="Гісторыя прадукту"
-                        >
-                          <FiClock className="size-3.5 shrink-0" aria-hidden />
-                          Гісторыя
-                        </button>
-                        {row.rowSource === 'supply' && row.supplierId ? (
-                          <button
-                            type="button"
-                            onClick={() => handleSyncRow(row)}
-                            disabled={syncingRowKey === row.rowKey}
-                            className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:opacity-50"
-                          >
-                            {syncingRowKey === row.rowKey && (
-                              <span className="size-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-                            )}
-                            Сінхранізаваць
-                          </button>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
@@ -809,7 +935,10 @@ export default function ProductsClient() {
           <div
             ref={supplierMenuRef}
             className="fixed z-[70] w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
-            style={{ top: `${menuPosition.top}px`, left: `${menuPosition.left}px` }}
+            style={{
+              top: `${menuPosition.top}px`,
+              left: `${menuPosition.left}px`,
+            }}
           >
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
               Фільтр пастаўшчыкоў
@@ -845,7 +974,10 @@ export default function ProductsClient() {
           <div
             ref={typeMenuRef}
             className="fixed z-[70] w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
-            style={{ top: `${typeMenuPosition.top}px`, left: `${typeMenuPosition.left}px` }}
+            style={{
+              top: `${typeMenuPosition.top}px`,
+              left: `${typeMenuPosition.left}px`,
+            }}
           >
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
               Фільтр па тыпе

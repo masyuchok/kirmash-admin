@@ -10,7 +10,10 @@ type Props = {
   linkToHome?: boolean;
 };
 
-export default function KirmaLogo({ className = '', linkToHome = true }: Props) {
+export default function KirmaLogo({
+  className = '',
+  linkToHome = true,
+}: Props) {
   const inner = (
     <div className={`relative mx-auto h-16 w-full max-w-[160px] ${className}`}>
       <Image

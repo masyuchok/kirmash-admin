@@ -1,6 +1,7 @@
 ﻿using backend.Data;
 using backend.Services;
 using backend.Services.Auth;
+using backend.Services.Odoo;
 using backend.Services.Shopify;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -61,8 +62,11 @@ builder.Services.AddCors( options =>
 
 builder.Services.AddControllers( );
 builder.Services.AddHttpClient( "Shopify" );
+builder.Services.AddHttpClient( "Odoo" );
 
 builder.Services.AddScoped<JwtService>( );
+builder.Services.AddScoped<OdooJsonRpcClient>( );
+builder.Services.AddScoped<OdooAuthService>( );
 builder.Services.AddScoped<SupplierService>( );
 builder.Services.AddScoped<SupplierInventoryService>( );
 builder.Services.AddScoped<ProductLedgerService>( );
@@ -97,7 +101,18 @@ var app = builder.Build( );
 using (var scope = app.Services.CreateScope( ))
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>( );
-    db.Database.Migrate( );
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>( ).CreateLogger( "Startup" );
+    try
+    {
+        logger.LogInformation( "Applying database migrations..." );
+        db.Database.Migrate( );
+        logger.LogInformation( "Database migrations applied." );
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical( ex, "Database migration failed. Backend will not start." );
+        throw;
+    }
 }
 
 // Configure the HTTP request pipeline.

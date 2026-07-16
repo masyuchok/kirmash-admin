@@ -23,8 +23,23 @@ import {
   type FinancePersonOverview,
   type FinanceRecurringExpense,
 } from '@/lib/api/finances';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { FiChevronDown, FiChevronRight, FiEdit2, FiLock, FiPlus, FiTrash2, FiUnlock, FiX } from 'react-icons/fi';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
+import {
+  FiChevronDown,
+  FiChevronRight,
+  FiEdit2,
+  FiLock,
+  FiPlus,
+  FiTrash2,
+  FiUnlock,
+  FiX,
+} from 'react-icons/fi';
 
 function todayIso(): string {
   const d = new Date();
@@ -41,7 +56,10 @@ function formatIsoDate(iso: string): string {
   return `${d}.${m}.${y}`;
 }
 
-function formatRecurringPeriod(startDate: string, endDate: string | null): string {
+function formatRecurringPeriod(
+  startDate: string,
+  endDate: string | null
+): string {
   const start = formatIsoDate(startDate);
   if (!endDate) return `${start} — …`;
   return `${start} — ${formatIsoDate(endDate)}`;
@@ -92,12 +110,16 @@ export default function FinancesClient() {
   const [error, setError] = useState<string | null>(null);
 
   const [movementFormOpen, setMovementFormOpen] = useState(false);
-  const [editingMovement, setEditingMovement] = useState<FinanceMovement | null>(null);
-  const [movementForm, setMovementForm] = useState<MovementFormState>(emptyMovementForm);
+  const [editingMovement, setEditingMovement] =
+    useState<FinanceMovement | null>(null);
+  const [movementForm, setMovementForm] =
+    useState<MovementFormState>(emptyMovementForm);
 
   const [recurringFormOpen, setRecurringFormOpen] = useState(false);
-  const [editingRecurring, setEditingRecurring] = useState<FinanceRecurringExpense | null>(null);
-  const [recurringForm, setRecurringForm] = useState<RecurringFormState>(emptyRecurringForm);
+  const [editingRecurring, setEditingRecurring] =
+    useState<FinanceRecurringExpense | null>(null);
+  const [recurringForm, setRecurringForm] =
+    useState<RecurringFormState>(emptyRecurringForm);
 
   const [newPersonName, setNewPersonName] = useState('');
 
@@ -178,7 +200,8 @@ export default function FinancesClient() {
   };
 
   const handleDeletePerson = async (id: number) => {
-    if (!window.confirm('Выдаліць гэтую асобу і ўсе яе фінансавыя дадзеныя?')) return;
+    if (!window.confirm('Выдаліць гэтую асобу і ўсе яе фінансавыя дадзеныя?'))
+      return;
     setSaving(true);
     setError(null);
     try {
@@ -464,8 +487,14 @@ export default function FinancesClient() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <SummaryCard label="Аплаты асобы" value={formatMoney(summary.totalPayment)} />
-            <SummaryCard label="Выплаты Кірмашу" value={formatMoney(summary.totalKirmaPayout)} />
+            <SummaryCard
+              label="Аплаты асобы"
+              value={formatMoney(summary.totalPayment)}
+            />
+            <SummaryCard
+              label="Выплаты Кірмашу"
+              value={formatMoney(summary.totalKirmaPayout)}
+            />
           </div>
 
           <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -491,7 +520,9 @@ export default function FinancesClient() {
           <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">Рэгулярныя расходы</h2>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Рэгулярныя расходы
+                </h2>
                 <p className="text-sm text-gray-500">
                   Аўтаматычна дадаюцца кожны месяц у межах перыяду (дзень 1–28)
                 </p>
@@ -530,7 +561,11 @@ export default function FinancesClient() {
 
       {recurringFormOpen && (
         <FormModal
-          title={editingRecurring ? 'Рэдагаваць рэгулярны расход' : 'Новы рэгулярны расход'}
+          title={
+            editingRecurring
+              ? 'Рэдагаваць рэгулярны расход'
+              : 'Новы рэгулярны расход'
+          }
           onClose={() => setRecurringFormOpen(false)}
           onSubmit={() => void submitRecurring()}
           saving={saving}
@@ -546,7 +581,9 @@ export default function FinancesClient() {
               <input
                 type="date"
                 value={recurringForm.startDate}
-                onChange={(e) => setRecurringForm((p) => ({ ...p, startDate: e.target.value }))}
+                onChange={(e) =>
+                  setRecurringForm((p) => ({ ...p, startDate: e.target.value }))
+                }
                 className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
               />
             </label>
@@ -555,7 +592,9 @@ export default function FinancesClient() {
               <input
                 type="date"
                 value={recurringForm.endDate}
-                onChange={(e) => setRecurringForm((p) => ({ ...p, endDate: e.target.value }))}
+                onChange={(e) =>
+                  setRecurringForm((p) => ({ ...p, endDate: e.target.value }))
+                }
                 className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
               />
               <span className="mt-1 block text-xs font-normal text-gray-500">
@@ -570,7 +609,9 @@ export default function FinancesClient() {
               min={1}
               max={28}
               value={recurringForm.dayOfMonth}
-              onChange={(e) => setRecurringForm((p) => ({ ...p, dayOfMonth: e.target.value }))}
+              onChange={(e) =>
+                setRecurringForm((p) => ({ ...p, dayOfMonth: e.target.value }))
+              }
               className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
             />
           </label>
@@ -579,7 +620,12 @@ export default function FinancesClient() {
               <input
                 type="checkbox"
                 checked={recurringForm.isActive}
-                onChange={(e) => setRecurringForm((p) => ({ ...p, isActive: e.target.checked }))}
+                onChange={(e) =>
+                  setRecurringForm((p) => ({
+                    ...p,
+                    isActive: e.target.checked,
+                  }))
+                }
               />
               Актыўны
             </label>
@@ -614,7 +660,9 @@ function SummaryCard({
 
   return (
     <div className={`rounded-lg border px-4 py-3 ${boxClass}`}>
-      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+        {label}
+      </p>
       <p className={`mt-1 text-xl font-semibold ${valueClass}`}>{value}</p>
     </div>
   );
@@ -638,7 +686,9 @@ function groupMovementsByYearMonth(rows: FinanceMovement[]): YearMonthGroup[] {
   }
 
   const monthLabel = (year: number, month: number) =>
-    new Intl.DateTimeFormat('be-BY', { month: 'long' }).format(new Date(year, month - 1, 1));
+    new Intl.DateTimeFormat('be-BY', { month: 'long' }).format(
+      new Date(year, month - 1, 1)
+    );
 
   return [...byYear.entries()]
     .sort(([a], [b]) => b - a)
@@ -649,7 +699,10 @@ function groupMovementsByYearMonth(rows: FinanceMovement[]): YearMonthGroup[] {
         .map(([month, monthRows]) => ({
           key: `${year}-${month}`,
           label: monthLabel(year, month),
-          rows: monthRows.sort((a, b) => b.movementDate.localeCompare(a.movementDate) || b.id - a.id),
+          rows: monthRows.sort(
+            (a, b) =>
+              b.movementDate.localeCompare(a.movementDate) || b.id - a.id
+          ),
         })),
     }));
 }
@@ -719,14 +772,14 @@ function MovementsHistory({
 
   const monthKeysSignature = useMemo(
     () => grouped.flatMap((g) => g.months.map((m) => m.key)).join(','),
-    [grouped],
+    [grouped]
   );
 
   useEffect(() => {
     setCollapsed((prev) => {
       const yearKeys = [...prev].filter((k) => k.startsWith('y:'));
       const monthKeys = grouped.flatMap(({ months }) =>
-        months.map(({ key }) => monthCollapseKey(key)),
+        months.map(({ key }) => monthCollapseKey(key))
       );
       return new Set([...yearKeys, ...monthKeys]);
     });
@@ -754,140 +807,167 @@ function MovementsHistory({
         const yearClosed = isCollapsed(yearKey);
 
         return (
-        <div key={year} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <button
-            type="button"
-            onClick={() => toggle(yearKey)}
-            className="flex w-full items-center gap-3 border-b border-gray-200 bg-gray-100 px-4 py-3 text-left transition hover:bg-gray-200/60"
-            aria-expanded={!yearClosed}
+          <div
+            key={year}
+            className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm"
           >
-            {yearClosed ? (
-              <FiChevronRight className="size-4 shrink-0 text-gray-600" aria-hidden />
-            ) : (
-              <FiChevronDown className="size-4 shrink-0 text-gray-600" aria-hidden />
-            )}
-            <span className="rounded-md bg-gray-800 px-2.5 py-0.5 text-sm font-bold tracking-wide text-white">
-              {year}
-            </span>
-            <PeriodNetLabel rows={months.flatMap((m) => m.rows)} />
-          </button>
+            <button
+              type="button"
+              onClick={() => toggle(yearKey)}
+              className="flex w-full items-center gap-3 border-b border-gray-200 bg-gray-100 px-4 py-3 text-left transition hover:bg-gray-200/60"
+              aria-expanded={!yearClosed}
+            >
+              {yearClosed ? (
+                <FiChevronRight
+                  className="size-4 shrink-0 text-gray-600"
+                  aria-hidden
+                />
+              ) : (
+                <FiChevronDown
+                  className="size-4 shrink-0 text-gray-600"
+                  aria-hidden
+                />
+              )}
+              <span className="rounded-md bg-gray-800 px-2.5 py-0.5 text-sm font-bold tracking-wide text-white">
+                {year}
+              </span>
+              <PeriodNetLabel rows={months.flatMap((m) => m.rows)} />
+            </button>
 
-          {!yearClosed && (
-          <div className="space-y-3 bg-gray-50/80 p-3">
-            {months.map(({ key, label, rows: monthRows }) => {
-              const monthKey = monthCollapseKey(key);
-              const monthClosed = isCollapsed(monthKey);
+            {!yearClosed && (
+              <div className="space-y-3 bg-gray-50/80 p-3">
+                {months.map(({ key, label, rows: monthRows }) => {
+                  const monthKey = monthCollapseKey(key);
+                  const monthClosed = isCollapsed(monthKey);
 
-              return (
-              <div
-                key={key}
-                className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm"
-              >
-                <button
-                  type="button"
-                  onClick={() => toggle(monthKey)}
-                  className="flex w-full items-center gap-2 border-b border-primary/15 bg-primary/10 px-3 py-2.5 text-left transition hover:bg-primary/15"
-                  aria-expanded={!monthClosed}
-                >
-                  {monthClosed ? (
-                    <FiChevronRight className="size-3.5 shrink-0 text-primary/70" aria-hidden />
-                  ) : (
-                    <FiChevronDown className="size-3.5 shrink-0 text-primary/70" aria-hidden />
-                  )}
-                  <span className="text-sm font-semibold capitalize text-primary">{label}</span>
-                  <PeriodNetLabel rows={monthRows} />
-                </button>
+                  return (
+                    <div
+                      key={key}
+                      className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggle(monthKey)}
+                        className="flex w-full items-center gap-2 border-b border-primary/15 bg-primary/10 px-3 py-2.5 text-left transition hover:bg-primary/15"
+                        aria-expanded={!monthClosed}
+                      >
+                        {monthClosed ? (
+                          <FiChevronRight
+                            className="size-3.5 shrink-0 text-primary/70"
+                            aria-hidden
+                          />
+                        ) : (
+                          <FiChevronDown
+                            className="size-3.5 shrink-0 text-primary/70"
+                            aria-hidden
+                          />
+                        )}
+                        <span className="text-sm font-semibold capitalize text-primary">
+                          {label}
+                        </span>
+                        <PeriodNetLabel rows={monthRows} />
+                      </button>
 
-                {!monthClosed && (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-200 bg-white text-xs uppercase text-gray-500">
-                        <th className="px-3 py-2">Дзень</th>
-                        <th className="px-3 py-2">Тып</th>
-                        <th className="px-3 py-2">Апісанне</th>
-                        <th className="px-3 py-2 text-right">Сума</th>
-                        <th className="px-3 py-2 w-32" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monthRows.map((row) => (
-                        <tr key={row.id} className="border-b border-gray-100 bg-white last:border-b-0 hover:bg-gray-50">
-                          <td className="px-3 py-2 whitespace-nowrap text-gray-600">
-                            {formatMovementDay(row.movementDate)}
-                          </td>
-                          <td className="px-3 py-2">{movementKindLabel(row.kind)}</td>
-                          <td className="px-3 py-2">
-                            {row.description}
-                            {row.isFromRecurring && (
-                              <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
-                                рэгулярны
-                              </span>
-                            )}
-                            {row.isVatAutoPayment && row.isVatAmountLocked && (
-                              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
-                                VAT зафіксаваны
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-right font-medium">{formatMoney(row.amount)}</td>
-                          <td className="px-3 py-2">
-                            <div className="flex justify-end gap-1">
-                              {row.isVatAutoPayment && (
-                                <button
-                                  type="button"
-                                  onClick={() => onToggleVatLock(row)}
-                                  className={`rounded p-1.5 ${
-                                    row.isVatAmountLocked
-                                      ? 'text-amber-700 hover:bg-amber-50'
-                                      : 'text-gray-500 hover:bg-gray-100'
-                                  }`}
-                                  title={
-                                    row.isVatAmountLocked
-                                      ? 'Зняць фіксацыю сумы VAT (абнаўляць пры пераразліку)'
-                                      : 'Зафіксаваць суму VAT (не абнаўляць пры пераразліку)'
-                                  }
-                                  aria-label={
-                                    row.isVatAmountLocked ? 'Зняць фіксацыю VAT' : 'Зафіксаваць VAT'
-                                  }
+                      {!monthClosed && (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-left text-sm">
+                            <thead>
+                              <tr className="border-b border-gray-200 bg-white text-xs uppercase text-gray-500">
+                                <th className="px-3 py-2">Дзень</th>
+                                <th className="px-3 py-2">Тып</th>
+                                <th className="px-3 py-2">Апісанне</th>
+                                <th className="px-3 py-2 text-right">Сума</th>
+                                <th className="px-3 py-2 w-32" />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {monthRows.map((row) => (
+                                <tr
+                                  key={row.id}
+                                  className="border-b border-gray-100 bg-white last:border-b-0 hover:bg-gray-50"
                                 >
-                                  {row.isVatAmountLocked ? (
-                                    <FiLock className="size-4" />
-                                  ) : (
-                                    <FiUnlock className="size-4" />
-                                  )}
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => onEdit(row)}
-                                className="rounded p-1.5 text-gray-600 hover:bg-gray-100"
-                                aria-label="Рэдагаваць"
-                              >
-                                <FiEdit2 className="size-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onDelete(row.id)}
-                                className="rounded p-1.5 text-red-600 hover:bg-red-50"
-                                aria-label="Выдаліць"
-                              >
-                                <FiTrash2 className="size-4" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                )}
+                                  <td className="px-3 py-2 whitespace-nowrap text-gray-600">
+                                    {formatMovementDay(row.movementDate)}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {movementKindLabel(row.kind)}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {row.description}
+                                    {row.isFromRecurring && (
+                                      <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
+                                        рэгулярны
+                                      </span>
+                                    )}
+                                    {row.isVatAutoPayment &&
+                                      row.isVatAmountLocked && (
+                                        <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                                          VAT зафіксаваны
+                                        </span>
+                                      )}
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-medium">
+                                    {formatMoney(row.amount)}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="flex justify-end gap-1">
+                                      {row.isVatAutoPayment && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onToggleVatLock(row)}
+                                          className={`rounded p-1.5 ${
+                                            row.isVatAmountLocked
+                                              ? 'text-amber-700 hover:bg-amber-50'
+                                              : 'text-gray-500 hover:bg-gray-100'
+                                          }`}
+                                          title={
+                                            row.isVatAmountLocked
+                                              ? 'Зняць фіксацыю сумы VAT (абнаўляць пры пераразліку)'
+                                              : 'Зафіксаваць суму VAT (не абнаўляць пры пераразліку)'
+                                          }
+                                          aria-label={
+                                            row.isVatAmountLocked
+                                              ? 'Зняць фіксацыю VAT'
+                                              : 'Зафіксаваць VAT'
+                                          }
+                                        >
+                                          {row.isVatAmountLocked ? (
+                                            <FiLock className="size-4" />
+                                          ) : (
+                                            <FiUnlock className="size-4" />
+                                          )}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => onEdit(row)}
+                                        className="rounded p-1.5 text-gray-600 hover:bg-gray-100"
+                                        aria-label="Рэдагаваць"
+                                      >
+                                        <FiEdit2 className="size-4" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => onDelete(row.id)}
+                                        className="rounded p-1.5 text-red-600 hover:bg-red-50"
+                                        aria-label="Выдаліць"
+                                      >
+                                        <FiTrash2 className="size-4" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-            );
-            })}
+            )}
           </div>
-          )}
-        </div>
         );
       })}
     </div>
@@ -923,15 +1003,22 @@ function RecurringTable({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id} className="border-b border-gray-50 hover:bg-gray-50/80">
+            <tr
+              key={row.id}
+              className="border-b border-gray-50 hover:bg-gray-50/80"
+            >
               <td className="px-2 py-2">{row.dayOfMonth}</td>
               <td className="px-2 py-2 whitespace-nowrap text-gray-600">
                 {formatRecurringPeriod(row.startDate, row.endDate)}
               </td>
               <td className="px-2 py-2">{movementKindLabel(row.kind)}</td>
               <td className="px-2 py-2">{row.description}</td>
-              <td className="px-2 py-2 text-right font-medium">{formatMoney(row.amount)}</td>
-              <td className="px-2 py-2">{row.isActive ? 'Актыўны' : 'Выключаны'}</td>
+              <td className="px-2 py-2 text-right font-medium">
+                {formatMoney(row.amount)}
+              </td>
+              <td className="px-2 py-2">
+                {row.isActive ? 'Актыўны' : 'Выключаны'}
+              </td>
               <td className="px-2 py-2">
                 <div className="flex justify-end gap-1">
                   <button
@@ -966,7 +1053,9 @@ function MovementFields({
   hideDate,
 }: {
   form: MovementFieldsState & { movementDate?: string };
-  onChange: (patch: Partial<MovementFieldsState & { movementDate?: string }>) => void;
+  onChange: (
+    patch: Partial<MovementFieldsState & { movementDate?: string }>
+  ) => void;
   hideDate?: boolean;
 }) {
   return (
@@ -975,7 +1064,9 @@ function MovementFields({
         Тып
         <select
           value={form.kind}
-          onChange={(e) => onChange({ kind: e.target.value as FinanceMovementKind })}
+          onChange={(e) =>
+            onChange({ kind: e.target.value as FinanceMovementKind })
+          }
           className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
         >
           {MOVEMENT_KIND_OPTIONS.map((opt) => (
@@ -1037,7 +1128,11 @@ function FormModal({
       <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-          <button type="button" onClick={onClose} className="rounded p-1 text-gray-500 hover:bg-gray-100">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-gray-500 hover:bg-gray-100"
+          >
             <FiX className="size-5" />
           </button>
         </div>

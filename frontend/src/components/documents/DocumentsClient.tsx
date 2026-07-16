@@ -1,7 +1,13 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FiChevronDown, FiChevronRight, FiLock, FiRefreshCw, FiUnlock } from 'react-icons/fi';
+import {
+  FiChevronDown,
+  FiChevronRight,
+  FiLock,
+  FiRefreshCw,
+  FiUnlock,
+} from 'react-icons/fi';
 import { useRouter } from 'next/navigation';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { useTopbar } from '@/components/topbar/TopbarContext';
@@ -21,7 +27,10 @@ const documentsTabs: { id: DocumentsTabId; label: string }[] = [
 ];
 
 function formatAmount(value: number): string {
-  return value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return value.toLocaleString('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 const MONTH_NAMES = [
@@ -56,7 +65,9 @@ export default function DocumentsClient() {
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [periods, setPeriods] = useState<VatReportPeriod[]>([]);
-  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(() => new Set());
+  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(
+    () => new Set()
+  );
   const yearsCollapseInitialized = useRef(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +77,8 @@ export default function DocumentsClient() {
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [regeneratingId, setRegeneratingId] = useState<number | null>(null);
-  const [pendingRegeneratePeriod, setPendingRegeneratePeriod] = useState<VatReportPeriod | null>(null);
+  const [pendingRegeneratePeriod, setPendingRegeneratePeriod] =
+    useState<VatReportPeriod | null>(null);
   const [lockingReportId, setLockingReportId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<DocumentsTabId>('reports');
 
@@ -91,7 +103,9 @@ export default function DocumentsClient() {
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Памылка загрузкі справаздач');
+          setError(
+            err instanceof Error ? err.message : 'Памылка загрузкі справаздач'
+          );
         }
       })
       .finally(() => {
@@ -113,9 +127,14 @@ export default function DocumentsClient() {
       ]);
 
       const created = results
-        .filter((r): r is PromiseFulfilledResult<VatReport> => r.status === 'fulfilled')
+        .filter(
+          (r): r is PromiseFulfilledResult<VatReport> =>
+            r.status === 'fulfilled'
+        )
         .map((r) => r.value);
-      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
 
       if (created.length > 0) {
         const refreshed = await fetchVatReportPeriods();
@@ -124,13 +143,17 @@ export default function DocumentsClient() {
       } else if (rejected.length > 0) {
         const message = rejected
           .map((item) =>
-            item.reason instanceof Error ? item.reason.message : 'Памылка генерацыі справаздачы'
+            item.reason instanceof Error
+              ? item.reason.message
+              : 'Памылка генерацыі справаздачы'
           )
           .join('\n');
         setGenerateError(message);
       }
     } catch (err: unknown) {
-      setGenerateError(err instanceof Error ? err.message : 'Памылка генерацыі справаздачы');
+      setGenerateError(
+        err instanceof Error ? err.message : 'Памылка генерацыі справаздачы'
+      );
     } finally {
       setGenerating(false);
     }
@@ -162,7 +185,11 @@ export default function DocumentsClient() {
     yearsCollapseInitialized.current = true;
     const years = [...new Set(periods.map((p) => p.periodYear))];
     setCollapsedYears(
-      new Set(years.filter((year) => year !== currentCalendarYear).map((year) => yearCollapseKey(year)))
+      new Set(
+        years
+          .filter((year) => year !== currentCalendarYear)
+          .map((year) => yearCollapseKey(year))
+      )
     );
   }, [periods, currentCalendarYear]);
 
@@ -176,7 +203,8 @@ export default function DocumentsClient() {
     });
   };
 
-  const isYearCollapsed = (year: number) => collapsedYears.has(yearCollapseKey(year));
+  const isYearCollapsed = (year: number) =>
+    collapsedYears.has(yearCollapseKey(year));
 
   const refreshPeriods = async () => {
     const refreshed = await fetchVatReportPeriods();
@@ -201,28 +229,43 @@ export default function DocumentsClient() {
   };
 
   const handleRegenerate = async (period: VatReportPeriod) => {
-    const primaryReport = period.reports.find((r) => r.type === 'poland') ?? period.reports[0];
+    const primaryReport =
+      period.reports.find((r) => r.type === 'poland') ?? period.reports[0];
     if (!primaryReport) return;
     setRegeneratingId(primaryReport.id);
     setError(null);
     try {
-      const targets = period.reports.length > 0 ? period.reports : [primaryReport];
-      const results = await Promise.allSettled(targets.map((item) => regenerateVatReport(item.id)));
+      const targets =
+        period.reports.length > 0 ? period.reports : [primaryReport];
+      const results = await Promise.allSettled(
+        targets.map((item) => regenerateVatReport(item.id))
+      );
       const updatedItems = results
-        .filter((r): r is PromiseFulfilledResult<VatReport> => r.status === 'fulfilled')
+        .filter(
+          (r): r is PromiseFulfilledResult<VatReport> =>
+            r.status === 'fulfilled'
+        )
         .map((r) => r.value);
       if (updatedItems.length > 0) {
         await refreshPeriods();
       }
-      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
       if (rejected.length > 0 && updatedItems.length === 0) {
         const message = rejected
-          .map((r) => (r.reason instanceof Error ? r.reason.message : 'Памылка перегенерацыі справаздачы'))
+          .map((r) =>
+            r.reason instanceof Error
+              ? r.reason.message
+              : 'Памылка перегенерацыі справаздачы'
+          )
           .join('\n');
         setError(message);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Памылка перегенерацыі справаздачы');
+      setError(
+        err instanceof Error ? err.message : 'Памылка перегенерацыі справаздачы'
+      );
     } finally {
       setRegeneratingId(null);
       setPendingRegeneratePeriod(null);
@@ -270,7 +313,9 @@ export default function DocumentsClient() {
         {activeTab === 'reports' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-gray-900">Згенераваныя справаздачы</h3>
+              <h3 className="text-base font-semibold text-gray-900">
+                Згенераваныя справаздачы
+              </h3>
               <button
                 type="button"
                 onClick={() => setGenerateModalOpen(true)}
@@ -289,7 +334,9 @@ export default function DocumentsClient() {
                   {error}
                 </div>
               ) : periods.length === 0 ? (
-                <p className="py-6 text-sm text-gray-500">Справаздач пакуль няма.</p>
+                <p className="py-6 text-sm text-gray-500">
+                  Справаздач пакуль няма.
+                </p>
               ) : (
                 <div className="space-y-4">
                   {groupedByYear.map(({ year, periods: yearPeriods }) => {
@@ -307,9 +354,15 @@ export default function DocumentsClient() {
                           aria-expanded={!yearClosed}
                         >
                           {yearClosed ? (
-                            <FiChevronRight className="size-4 shrink-0 text-gray-600" aria-hidden />
+                            <FiChevronRight
+                              className="size-4 shrink-0 text-gray-600"
+                              aria-hidden
+                            />
                           ) : (
-                            <FiChevronDown className="size-4 shrink-0 text-gray-600" aria-hidden />
+                            <FiChevronDown
+                              className="size-4 shrink-0 text-gray-600"
+                              aria-hidden
+                            />
                           )}
                           <span className="rounded-md bg-gray-800 px-2.5 py-0.5 text-sm font-bold tracking-wide text-white">
                             {year}
@@ -326,17 +379,25 @@ export default function DocumentsClient() {
                               <thead>
                                 <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
                                   <th className="px-3 py-2.5">Месяц</th>
-                                  <th className="px-3 py-2.5 text-right">VAT да аплаты</th>
-                                  <th className="px-3 py-2.5 text-right">Прыбытак</th>
-                                  <th className="px-3 py-2.5 text-right">Дзеянне</th>
+                                  <th className="px-3 py-2.5 text-right">
+                                    VAT да аплаты
+                                  </th>
+                                  <th className="px-3 py-2.5 text-right">
+                                    Прыбытак
+                                  </th>
+                                  <th className="px-3 py-2.5 text-right">
+                                    Дзеянне
+                                  </th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-gray-100">
                                 {yearPeriods.map((period) => {
                                   const primaryReport =
-                                    period.reports.find((r) => r.type === 'poland') ??
-                                    period.reports[0];
-                                  const actionReportId = primaryReport?.id ?? period.primaryReportId;
+                                    period.reports.find(
+                                      (r) => r.type === 'poland'
+                                    ) ?? period.reports[0];
+                                  const actionReportId =
+                                    primaryReport?.id ?? period.primaryReportId;
                                   const isLocked = period.isLocked;
 
                                   return (
@@ -344,7 +405,9 @@ export default function DocumentsClient() {
                                       key={`${period.periodYear}-${period.periodMonth}`}
                                       className={`cursor-pointer bg-white transition hover:bg-primary/10 ${isLocked ? 'bg-gray-50/80' : ''}`}
                                       onClick={() =>
-                                        router.push(`/documents/reports/${period.primaryReportId}`)
+                                        router.push(
+                                          `/documents/reports/${period.primaryReportId}`
+                                        )
                                       }
                                     >
                                       <td className="px-3 py-3 font-medium text-gray-900">
@@ -373,25 +436,38 @@ export default function DocumentsClient() {
                                               e.stopPropagation();
                                               void handleToggleLock(period);
                                             }}
-                                            disabled={lockingReportId === actionReportId}
+                                            disabled={
+                                              lockingReportId === actionReportId
+                                            }
                                             className={`inline-flex size-8 items-center justify-center rounded-full border bg-white shadow-sm transition disabled:opacity-60 ${
                                               isLocked
                                                 ? 'border-amber-200 text-amber-700 hover:bg-amber-50'
                                                 : 'border-gray-200 text-gray-700 hover:border-primary/40 hover:bg-primary/10 hover:text-primary'
                                             }`}
                                             aria-label={
-                                              isLocked ? 'Разблакаваць перыяд' : 'Заблакаваць перыяд'
+                                              isLocked
+                                                ? 'Разблакаваць перыяд'
+                                                : 'Заблакаваць перыяд'
                                             }
                                             title={
-                                              isLocked ? 'Разблакаваць перыяд' : 'Заблакаваць перыяд'
+                                              isLocked
+                                                ? 'Разблакаваць перыяд'
+                                                : 'Заблакаваць перыяд'
                                             }
                                           >
-                                            {lockingReportId === actionReportId ? (
+                                            {lockingReportId ===
+                                            actionReportId ? (
                                               <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
                                             ) : isLocked ? (
-                                              <FiUnlock className="size-4" aria-hidden />
+                                              <FiUnlock
+                                                className="size-4"
+                                                aria-hidden
+                                              />
                                             ) : (
-                                              <FiLock className="size-4" aria-hidden />
+                                              <FiLock
+                                                className="size-4"
+                                                aria-hidden
+                                              />
                                             )}
                                           </button>
                                           <button
@@ -399,9 +475,14 @@ export default function DocumentsClient() {
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               if (isLocked) return;
-                                              setPendingRegeneratePeriod(period);
+                                              setPendingRegeneratePeriod(
+                                                period
+                                              );
                                             }}
-                                            disabled={isLocked || regeneratingId === actionReportId}
+                                            disabled={
+                                              isLocked ||
+                                              regeneratingId === actionReportId
+                                            }
                                             className="inline-flex size-8 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                                             aria-label="Перегенераваць справаздачу"
                                             title={
@@ -410,10 +491,14 @@ export default function DocumentsClient() {
                                                 : 'Перегенераваць справаздачу'
                                             }
                                           >
-                                            {regeneratingId === actionReportId ? (
+                                            {regeneratingId ===
+                                            actionReportId ? (
                                               <span className="size-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
                                             ) : (
-                                              <FiRefreshCw className="size-4" aria-hidden />
+                                              <FiRefreshCw
+                                                className="size-4"
+                                                aria-hidden
+                                              />
                                             )}
                                           </button>
                                         </div>
@@ -444,7 +529,9 @@ export default function DocumentsClient() {
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white shadow-xl">
             <div className="border-b border-gray-100 px-5 py-4">
-              <h3 className="text-base font-semibold text-gray-900">Генерацыя справаздачы</h3>
+              <h3 className="text-base font-semibold text-gray-900">
+                Генерацыя справаздачы
+              </h3>
             </div>
             <div className="space-y-4 px-5 py-4">
               {generateError && (
@@ -456,7 +543,9 @@ export default function DocumentsClient() {
                 <span className="text-sm font-medium text-gray-700">Месяц</span>
                 <select
                   value={selectedMonth}
-                  onChange={(e) => setSelectedMonth(Number(e.currentTarget.value))}
+                  onChange={(e) =>
+                    setSelectedMonth(Number(e.currentTarget.value))
+                  }
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                 >
                   {Array.from({ length: 12 }, (_, i) => i + 1).map((month) => (
@@ -473,7 +562,9 @@ export default function DocumentsClient() {
                   min={2000}
                   max={3000}
                   value={selectedYear}
-                  onChange={(e) => setSelectedYear(Number(e.currentTarget.value))}
+                  onChange={(e) =>
+                    setSelectedYear(Number(e.currentTarget.value))
+                  }
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
                 />
               </label>
@@ -500,7 +591,8 @@ export default function DocumentsClient() {
             </div>
             {alreadyExistsForPeriod && (
               <p className="px-5 pb-4 text-xs text-amber-700">
-                Справаздачы за гэты месяц ужо існуюць (Польшча і Замежжа). Выкарыстайце кнопку «Перегенераваць».
+                Справаздачы за гэты месяц ужо існуюць (Польшча і Замежжа).
+                Выкарыстайце кнопку «Перегенераваць».
               </p>
             )}
           </div>
@@ -519,7 +611,9 @@ export default function DocumentsClient() {
             className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="text-base font-semibold text-gray-900">Пацвердзіце перегенерацыю</div>
+            <div className="text-base font-semibold text-gray-900">
+              Пацвердзіце перегенерацыю
+            </div>
             <p className="mt-2 text-sm text-gray-600">
               Перагенераваць справаздачу за{' '}
               {formatPeriod(

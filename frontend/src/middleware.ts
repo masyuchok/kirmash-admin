@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { decodeJwt } from 'jose';
-import { getAuthLoginUrl } from '@/lib/api/common';
-
-const COOKIE = process.env.AUTH_COOKIE_NAME || 'jwt_token';
+import {
+  getBukinistkaAuthCookieName,
+  getKirmaAuthCookieName,
+} from '@/lib/auth/cookie';
+import { redirectPublic } from '@/lib/auth/public-url';
+import { getTokenOrganization, isAuthTokenValid } from '@/lib/auth/session';
 
 function redirectToLogin(req: NextRequest): NextResponse {
-  const url = getAuthLoginUrl(req.url);
-  url.searchParams.set('shop', process.env.NEXT_PUBLIC_SHOP_DOMAIN!);
-  return NextResponse.redirect(url);
+  return redirectPublic(req, '/login');
+}
+
+function redirectToBukinistka(req: NextRequest): NextResponse {
+  return redirectPublic(req, '/bukinistka');
 }
 
 export function middleware(req: NextRequest) {
@@ -19,29 +23,49 @@ export function middleware(req: NextRequest) {
     '/robots.txt',
     '/sitemap.xml',
     '/login',
+    '/auth/logout',
+    '/auth/bukinistka/logout',
     '/api',
   ];
   if (publicPaths.some((p) => pathname.startsWith(p))) {
     return NextResponse.next();
   }
 
-  const token = req.cookies.get(COOKIE)?.value;
+  const kirmaCookie = getKirmaAuthCookieName();
+  const bukinistkaCookie = getBukinistkaAuthCookieName();
+  const kirmaToken = req.cookies.get(kirmaCookie)?.value;
+  const bukinistkaToken = req.cookies.get(bukinistkaCookie)?.value;
+  const kirmaValid = isAuthTokenValid(kirmaToken);
+  const bukinistkaValid = isAuthTokenValid(bukinistkaToken);
+  const isBukinistkaRoute =
+    pathname === '/bukinistka' || pathname.startsWith('/bukinistka/');
 
-  if (!token) {
-    return redirectToLogin(req);
-  }
-
-  try {
-    const { exp } = decodeJwt(token);
-    const now = Math.floor(Date.now() / 1000);
-    if (exp && exp < now) {
+  if (isBukinistkaRoute) {
+    if (!bukinistkaValid) {
       return redirectToLogin(req);
     }
-  } catch {
-    return redirectToLogin(req);
+
+    const org = getTokenOrganization(bukinistkaToken);
+    if (org && org !== 'bukinistka') {
+      return redirectToLogin(req);
+    }
+
+    return NextResponse.next();
   }
 
-  return NextResponse.next();
+  // Kirma panel routes require a Kirma (Shopify) session.
+  // Bukinistka-only users go to login so they can choose Kirma / sign in —
+  // not to an absolute internal Docker URL.
+  if (kirmaValid) {
+    const org = getTokenOrganization(kirmaToken);
+    if (org === 'bukinistka') {
+      return redirectToBukinistka(req);
+    }
+
+    return NextResponse.next();
+  }
+
+  return redirectToLogin(req);
 }
 
 export const config = { matcher: ['/:path*'] };

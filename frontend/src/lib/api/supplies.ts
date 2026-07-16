@@ -1,5 +1,9 @@
 import type { SupplyDetails, SupplyListItem } from '@/types/supply';
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 
 function readInt(v: unknown): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -46,11 +50,10 @@ function mapSupplyJsonToListItem(raw: unknown): SupplyListItem {
   const productNumber = readInt(
     r.productNumber ?? r.ProductNumber ?? r.booksNumber ?? r.BooksNumber
   );
-  const totalQuantityRaw = r.totalQuantity ?? r.TotalQuantity ?? r.quantityTotal ?? r.QuantityTotal;
+  const totalQuantityRaw =
+    r.totalQuantity ?? r.TotalQuantity ?? r.quantityTotal ?? r.QuantityTotal;
   const totalQuantity =
-    totalQuantityRaw == null
-      ? productNumber
-      : readInt(totalQuantityRaw);
+    totalQuantityRaw == null ? productNumber : readInt(totalQuantityRaw);
 
   const dateVal = r.date ?? r.Date;
   let date = '';
@@ -119,14 +122,22 @@ export async function fetchSupplyById(id: number): Promise<SupplyDetails> {
         const r = row as Record<string, unknown>;
         const quantity = readInt(r.quantity ?? r.Quantity);
         return {
-          shopifyProductId: String(r.shopifyProductId ?? r.ShopifyProductId ?? ''),
-          shopifyVariantId: String(r.shopifyVariantId ?? r.ShopifyVariantId ?? ''),
+          shopifyProductId: String(
+            r.shopifyProductId ?? r.ShopifyProductId ?? ''
+          ),
+          shopifyVariantId: String(
+            r.shopifyVariantId ?? r.ShopifyVariantId ?? ''
+          ),
           quantity,
           supplierPrice: readNumber(r.supplierPrice ?? r.SupplierPrice),
-          vatRatePercent: readNumber(r.vatRatePercent ?? r.VatRatePercent ?? 23),
+          vatRatePercent: readNumber(
+            r.vatRatePercent ?? r.VatRatePercent ?? 23
+          ),
           marginPercent: readNumber(r.marginPercent ?? r.MarginPercent),
           salePrice: readNumber(r.salePrice ?? r.SalePrice),
-          syncWithShopify: Boolean(r.syncWithShopify ?? r.SyncWithShopify ?? true),
+          syncWithShopify: Boolean(
+            r.syncWithShopify ?? r.SyncWithShopify ?? true
+          ),
           isReturnFinalized: Boolean(
             r.isReturnFinalized ?? r.IsReturnFinalized ?? quantity < 0
           ),
@@ -155,13 +166,19 @@ export async function fetchSupplyCatalogProducts(
   supplierId?: number
 ): Promise<SupplyCatalogProduct[]> {
   const query = supplierId && supplierId > 0 ? `?supplierId=${supplierId}` : '';
-  const res = await fetch(`${getApiBaseUrl()}/Supply/catalog-products${query}`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Supply/catalog-products${query}`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць тавары з паставак');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць тавары з паставак'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as unknown;
@@ -192,13 +209,19 @@ export async function fetchSupplierProductBalances(
   if (excludeSupplyId && excludeSupplyId > 0) {
     params.set('excludeSupplyId', String(excludeSupplyId));
   }
-  const res = await fetch(`${getApiBaseUrl()}/Supply/supplier-product-balances?${params}`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Supply/supplier-product-balances?${params}`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць баланс тавараў пастаўшчыка');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць баланс тавараў пастаўшчыка'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as unknown;

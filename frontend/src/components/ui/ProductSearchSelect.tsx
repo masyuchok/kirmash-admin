@@ -34,14 +34,19 @@ export default function ProductSearchSelect({
   );
 
   const sortedProducts = useMemo(
-    () => [...products].sort((a, b) => a.productName.localeCompare(b.productName, 'be')),
+    () =>
+      [...products].sort((a, b) =>
+        a.productName.localeCompare(b.productName, 'be')
+      ),
     [products]
   );
 
   const filtered = useMemo(() => {
     const search = query.trim().toLowerCase();
     if (!search) return sortedProducts;
-    return sortedProducts.filter((p) => p.productName.toLowerCase().includes(search));
+    return sortedProducts.filter((p) =>
+      p.productName.toLowerCase().includes(search)
+    );
   }, [sortedProducts, query]);
 
   const displayValue = open ? query : (selected?.productName ?? query);
@@ -130,14 +135,22 @@ export default function ProductSearchSelect({
           role="listbox"
         >
           {filtered.length === 0 ? (
-            <li className="px-3 py-2.5 text-sm text-gray-500">{emptyMessage}</li>
+            <li className="px-3 py-2.5 text-sm text-gray-500">
+              {emptyMessage}
+            </li>
           ) : (
             filtered.map((product) => (
-              <li key={product.shopifyProductId} role="option" aria-selected={product.shopifyProductId === value}>
+              <li
+                key={product.shopifyProductId}
+                role="option"
+                aria-selected={product.shopifyProductId === value}
+              >
                 <button
                   type="button"
                   className={`w-full px-3 py-2.5 text-left text-sm transition hover:bg-gray-50 ${
-                    product.shopifyProductId === value ? 'bg-primary/5 font-medium text-primary' : 'text-gray-800'
+                    product.shopifyProductId === value
+                      ? 'bg-primary/5 font-medium text-primary'
+                      : 'text-gray-800'
                   }`}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => pickProduct(product)}

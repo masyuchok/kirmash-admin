@@ -17,6 +17,9 @@ export type SupplierInventoryRow = {
   grossUnitPrice: number;
   supplierIsVatPayer: boolean;
   hasPriceOverride: boolean;
+  marginPercent: number;
+  salePrice: number;
+  shopifyPrice: number;
   receivedQuantity: number;
   quantityInStock: number;
   soldQuantity: number;

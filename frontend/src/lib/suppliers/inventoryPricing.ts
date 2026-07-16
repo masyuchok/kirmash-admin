@@ -14,7 +14,10 @@ export function calcGrossUnitPrice(
 }
 
 /** Net from supply gross when supplier is a VAT payer (matches expense VAT extraction). */
-export function calcNetUnitPriceFromGross(grossUnitPrice: number, vatRatePercent: number): number {
+export function calcNetUnitPriceFromGross(
+  grossUnitPrice: number,
+  vatRatePercent: number
+): number {
   if (grossUnitPrice <= 0 || vatRatePercent <= 0) {
     return roundMoney(grossUnitPrice);
   }
@@ -29,12 +32,18 @@ export function calcGrossLineTotal(
   supplierIsVatPayer: boolean,
   quantity: number
 ): number {
-  return roundMoney(calcGrossUnitPrice(netUnitPrice, vatRatePercent, supplierIsVatPayer) * quantity);
+  return roundMoney(
+    calcGrossUnitPrice(netUnitPrice, vatRatePercent, supplierIsVatPayer) *
+      quantity
+  );
 }
 
 export function formatMoneyInput(value: number): string {
   if (!Number.isFinite(value)) return '';
-  return value.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return value.toLocaleString('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 export function parseMoneyInput(raw: string): number | null {
@@ -57,4 +66,46 @@ export function inventoryRowKey(row: {
   shopifyVariantId: string;
 }): string {
   return `${row.supplierId}:${row.shopifyProductId}:${row.shopifyVariantId}`;
+}
+
+export function normalizeCatalogVatRate(value: number): 5 | 23 {
+  return value <= 5.5 ? 5 : 23;
+}
+
+export function roundPercent(value: number): number {
+  return Math.round(value);
+}
+
+/** Sale price shown in inventory: override first, else live Shopify price. */
+export function resolveDisplaySalePrice(row: {
+  salePrice: number;
+  shopifyPrice: number;
+}): number {
+  if (row.salePrice > 0) return row.salePrice;
+  return row.shopifyPrice;
+}
+
+export function recalcSaleByMargin(
+  netCost: number,
+  marginPercent: number,
+  vatRatePercent: number
+): { saleGross: number; saleNet: number; vatAmount: number } {
+  const marginFactor = 1 - marginPercent / 100;
+  const saleNet =
+    marginFactor > 0 ? roundMoney(netCost / marginFactor) : netCost;
+  const saleGross = roundMoney(saleNet * (1 + vatRatePercent / 100));
+  const vatAmount = roundMoney(saleGross - saleNet);
+  return { saleGross, saleNet, vatAmount };
+}
+
+export function recalcMarginBySaleGross(
+  netCost: number,
+  saleGross: number,
+  vatRatePercent: number
+): { marginPercent: number; saleNet: number; vatAmount: number } {
+  const saleNet = roundMoney((saleGross * 100) / (100 + vatRatePercent));
+  const vatAmount = roundMoney(saleGross - saleNet);
+  const marginPercent =
+    saleNet > 0 ? roundPercent(((saleNet - netCost) / saleNet) * 100) : 0;
+  return { marginPercent, saleNet, vatAmount };
 }

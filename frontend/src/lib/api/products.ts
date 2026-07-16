@@ -1,6 +1,13 @@
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 import type { ProductWithSuppliers } from '@/types/product';
-import type { ProductHistory, ProductHistoryQuery } from '@/types/product-history';
+import type {
+  ProductHistory,
+  ProductHistoryQuery,
+} from '@/types/product-history';
 
 function readString(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -24,7 +31,9 @@ function readNumber(v: unknown): number {
   return 0;
 }
 
-export async function fetchProductsWithSuppliers(forceFresh = false): Promise<ProductWithSuppliers[]> {
+export async function fetchProductsWithSuppliers(
+  forceFresh = false
+): Promise<ProductWithSuppliers[]> {
   const suffix = forceFresh ? `?_=${Date.now()}` : '';
   const res = await fetch(`${getApiBaseUrl()}/Products${suffix}`, {
     method: 'GET',
@@ -45,7 +54,9 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
     const r = row as Record<string, unknown>;
     const suppliersRaw = r.suppliers ?? r.Suppliers;
     const suppliers = Array.isArray(suppliersRaw)
-      ? suppliersRaw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+      ? suppliersRaw.filter(
+          (s): s is string => typeof s === 'string' && s.trim().length > 0
+        )
       : [];
     const supplierPricesRaw = r.supplierPrices ?? r.SupplierPrices;
     const supplierPrices = Array.isArray(supplierPricesRaw)
@@ -89,9 +100,15 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
           return {
             supplierId: readInt(o.supplierId ?? o.SupplierId),
             supplierName: readString(o.supplierName ?? o.SupplierName),
-            shopifyProductId: readString(o.shopifyProductId ?? o.ShopifyProductId),
-            shopifyVariantId: readString(o.shopifyVariantId ?? o.ShopifyVariantId),
-            shopifyVariantTitle: readString(o.shopifyVariantTitle ?? o.ShopifyVariantTitle),
+            shopifyProductId: readString(
+              o.shopifyProductId ?? o.ShopifyProductId
+            ),
+            shopifyVariantId: readString(
+              o.shopifyVariantId ?? o.ShopifyVariantId
+            ),
+            shopifyVariantTitle: readString(
+              o.shopifyVariantTitle ?? o.ShopifyVariantTitle
+            ),
             overpaidQuantity: readInt(o.overpaidQuantity ?? o.OverpaidQuantity),
           };
         })
@@ -105,11 +122,15 @@ export async function fetchProductsWithSuppliers(forceFresh = false): Promise<Pr
       productAdminUrl: readString(r.productAdminUrl ?? r.ProductAdminUrl),
       mainImageUrl: readString(r.mainImageUrl ?? r.MainImageUrl) || null,
       quantityInStock: readInt(r.quantityInStock ?? r.QuantityInStock),
-      shopifyQuantityInStock: readInt(r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock),
+      shopifyQuantityInStock: readInt(
+        r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock
+      ),
       hasSupplyQuantityOverride: Boolean(
         r.hasSupplyQuantityOverride ?? r.HasSupplyQuantityOverride ?? false
       ),
-      lastSyncedSupplierName: readString(r.lastSyncedSupplierName ?? r.LastSyncedSupplierName),
+      lastSyncedSupplierName: readString(
+        r.lastSyncedSupplierName ?? r.LastSyncedSupplierName
+      ),
       suppliers,
       unsyncedSuppliers,
       variants,
@@ -141,13 +162,19 @@ export async function fetchProductHistory(
   }
   const suffix = params.toString() ? `?${params.toString()}` : '';
   const encodedId = encodeURIComponent(shopifyProductId);
-  const res = await fetch(`${getApiBaseUrl()}/Products/${encodedId}/history${suffix}`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Products/${encodedId}/history${suffix}`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць гісторыю прадукту');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць гісторыю прадукту'
+    );
     throw new Error(msg);
   }
 
@@ -164,7 +191,9 @@ export async function fetchProductHistory(
           supplyId: readInt(s.supplyId ?? s.SupplyId),
           supplierId: readInt(s.supplierId ?? s.SupplierId),
           supplierName: readString(s.supplierName ?? s.SupplierName),
-          shopifyVariantId: readString(s.shopifyVariantId ?? s.ShopifyVariantId),
+          shopifyVariantId: readString(
+            s.shopifyVariantId ?? s.ShopifyVariantId
+          ),
           variantTitle: readString(s.variantTitle ?? s.VariantTitle),
           quantity: readInt(s.quantity ?? s.Quantity),
         };
@@ -179,7 +208,9 @@ export async function fetchProductHistory(
           source: readString(s.source ?? s.Source),
           orderNumber: readString(s.orderNumber ?? s.OrderNumber),
           reportId: readNullableInt(s.reportId ?? s.ReportId),
-          shopifyVariantId: readString(s.shopifyVariantId ?? s.ShopifyVariantId),
+          shopifyVariantId: readString(
+            s.shopifyVariantId ?? s.ShopifyVariantId
+          ),
           variantTitle: readString(s.variantTitle ?? s.VariantTitle),
           quantity: readInt(s.quantity ?? s.Quantity),
         };
@@ -196,7 +227,9 @@ export async function fetchProductHistory(
           supplierId: readNullableInt(p.supplierId ?? p.SupplierId),
           supplierName: readString(p.supplierName ?? p.SupplierName),
           invoiceNumber: readString(p.invoiceNumber ?? p.InvoiceNumber),
-          shopifyVariantId: readString(p.shopifyVariantId ?? p.ShopifyVariantId),
+          shopifyVariantId: readString(
+            p.shopifyVariantId ?? p.ShopifyVariantId
+          ),
           variantTitle: readString(p.variantTitle ?? p.VariantTitle),
           quantity: readInt(p.quantity ?? p.Quantity),
         };
@@ -204,7 +237,9 @@ export async function fetchProductHistory(
     : [];
 
   return {
-    shopifyProductId: readString(data.shopifyProductId ?? data.ShopifyProductId),
+    shopifyProductId: readString(
+      data.shopifyProductId ?? data.ShopifyProductId
+    ),
     productName: readString(data.productName ?? data.ProductName),
     supplies,
     sales,
@@ -215,7 +250,11 @@ export async function fetchProductHistory(
 export async function syncUnsyncedProductRow(
   shopifyProductId: string,
   supplierId: number
-): Promise<{ syncedQuantity: number; previousAvailable: number; newAvailable: number }> {
+): Promise<{
+  syncedQuantity: number;
+  previousAvailable: number;
+  newAvailable: number;
+}> {
   const res = await fetch(`${getApiBaseUrl()}/Products/sync-unsynced`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -223,7 +262,10 @@ export async function syncUnsyncedProductRow(
     body: JSON.stringify({ shopifyProductId, supplierId }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося сінхранізаваць радок з Shopify');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося сінхранізаваць радок з Shopify'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as {
@@ -232,8 +274,10 @@ export async function syncUnsyncedProductRow(
     newAvailable?: number;
   };
   return {
-    syncedQuantity: typeof data.syncedQuantity === 'number' ? data.syncedQuantity : 0,
-    previousAvailable: typeof data.previousAvailable === 'number' ? data.previousAvailable : 0,
+    syncedQuantity:
+      typeof data.syncedQuantity === 'number' ? data.syncedQuantity : 0,
+    previousAvailable:
+      typeof data.previousAvailable === 'number' ? data.previousAvailable : 0,
     newAvailable: typeof data.newAvailable === 'number' ? data.newAvailable : 0,
   };
 }

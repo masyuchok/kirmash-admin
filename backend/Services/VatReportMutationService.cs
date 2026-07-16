@@ -971,36 +971,28 @@ public class VatReportMutationService
                     throw new InvalidOperationException( "Пастаўшчык не знойдзены." );
                 }
 
-                List<SupplyProductLineKeyRow> supplierProductLines = await _db.SupplyProducts
+                // Belonging is by product, not exact supply-line variant key: inventory/catalog
+                // remaps legacy/empty variant IDs, so product+variant equality rejects valid lines.
+                List<string> supplierProductIds = await _db.SupplyProducts
                     .AsNoTracking()
                     .Where( sp => sp.Supply.SupplierId == request.SupplierId.Value )
-                    .Select( sp => new SupplyProductLineKeyRow
-                    {
-                        ShopifyProductId = sp.ShopifyProductId,
-                        ShopifyVariantId = sp.ShopifyVariantId
-                    } )
+                    .Select( sp => sp.ShopifyProductId )
                     .ToListAsync();
-                allowedProductIds = supplierProductLines
-                    .Select( line => BuildSupplyLineKey( line.ShopifyProductId, line.ShopifyVariantId ) )
+                allowedProductIds = supplierProductIds
+                    .Select( id => ShopifyIds.NormalizeProductId( id.Trim() ) )
+                    .Where( id => !string.IsNullOrWhiteSpace( id ) )
                     .ToHashSet( StringComparer.OrdinalIgnoreCase );
                 supplierId = supplier.Id;
             }
 
             foreach (VatReportExpenseProductCreateRequest line in productLines)
             {
-                string normalizedProductId = ShopifyIds.NormalizeGid(
-                    line.ShopifyProductId.Trim(),
-                    "gid://shopify/Product/"
-                ).Trim();
-                if (allowedProductIds is not null)
+                string normalizedProductId = ShopifyIds.NormalizeProductId( line.ShopifyProductId.Trim() );
+                if (allowedProductIds is not null && !allowedProductIds.Contains( normalizedProductId ))
                 {
-                    string lineKey = BuildSupplyLineKey( normalizedProductId, line.ShopifyVariantId );
-                    if (!allowedProductIds.Contains( lineKey ))
-                    {
-                        throw new InvalidOperationException(
-                            $"Тавар «{line.ProductTitle}» не належыць выбранаму пастаўшчыку."
-                        );
-                    }
+                    throw new InvalidOperationException(
+                        $"Тавар «{line.ProductTitle}» не належыць выбранаму пастаўшчыку."
+                    );
                 }
             }
 
@@ -1069,21 +1061,6 @@ public class VatReportMutationService
             Quantity = line.Quantity,
             UnitGrossPrice = VatReportHelpers.Round2( line.UnitGrossPrice )
         };
-
-    private static string BuildSupplyLineKey( string shopifyProductId, string? shopifyVariantId )
-    {
-        string productId = ShopifyIds.NormalizeProductId( shopifyProductId.Trim() );
-        string variantId = string.IsNullOrWhiteSpace( shopifyVariantId )
-            ? string.Empty
-            : ShopifyIds.NormalizeVariantId( shopifyVariantId.Trim() );
-        return string.IsNullOrEmpty( variantId ) ? productId : $"{productId}::{variantId}";
-    }
-
-    private sealed class SupplyProductLineKeyRow
-    {
-        public string ShopifyProductId { get; set; } = string.Empty;
-        public string ShopifyVariantId { get; set; } = string.Empty;
-    }
 
     private async Task<VatReport> ResolveOrCreateForeignReportAsync( int year, int month )
     {

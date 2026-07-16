@@ -33,7 +33,10 @@ function variantLinesMatch(
   }
 
   if (rowVariantName && lineVariantName) {
-    return normalizeVariantName(rowVariantName) === normalizeVariantName(lineVariantName);
+    return (
+      normalizeVariantName(rowVariantName) ===
+      normalizeVariantName(lineVariantName)
+    );
   }
 
   return false;
@@ -58,7 +61,8 @@ export function getRowOverpaidQuantity(
 
   return lines.reduce((sum, line) => {
     if (normalizeProductId(line.shopifyProductId) !== productId) return sum;
-    if (scope.supplierId != null && line.supplierId !== scope.supplierId) return sum;
+    if (scope.supplierId != null && line.supplierId !== scope.supplierId)
+      return sum;
 
     if (scope.isVariantChild) {
       const rowVariant = normalizeVariantId(scope.shopifyVariantId ?? '');
@@ -66,7 +70,14 @@ export function getRowOverpaidQuantity(
       const rowVariantName = scope.variantName?.trim() ?? '';
       const lineVariantName = line.shopifyVariantTitle?.trim() ?? '';
 
-      if (!variantLinesMatch(rowVariant, rowVariantName, lineVariant, lineVariantName)) {
+      if (
+        !variantLinesMatch(
+          rowVariant,
+          rowVariantName,
+          lineVariant,
+          lineVariantName
+        )
+      ) {
         return sum;
       }
     }

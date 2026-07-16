@@ -45,6 +45,86 @@ public class ShopifyInventoryService
         await SetVariantPriceByProductKeyAsync( shop, accessToken, shopifyProductId, salePrice, client );
     }
 
+    public async Task<Dictionary<string, decimal>> GetVariantPricesByProductKeysAsync(
+        string shop,
+        string accessToken,
+        IEnumerable<(string ProductId, string VariantId)> lineKeys )
+    {
+        Dictionary<string, decimal> prices = new( StringComparer.OrdinalIgnoreCase );
+        IEnumerable<(string ProductId, string VariantId)> normalizedKeys = lineKeys
+            .Select( key =>
+            (
+                ProductId: ShopifyIds.NormalizeProductId( key.ProductId ),
+                VariantId: ShopifyIds.NormalizeVariantId( key.VariantId )
+            ) )
+            .Where( key => !string.IsNullOrWhiteSpace( key.ProductId ) )
+            .Distinct();
+
+        HttpClient client = _httpClientFactory.CreateClient( "Shopify" );
+        foreach (IGrouping<string, (string ProductId, string VariantId)> productGroup in normalizedKeys.GroupBy( x => x.ProductId, StringComparer.OrdinalIgnoreCase ))
+        {
+            long? productId = ShopifyIds.TryParseNumericProductId( productGroup.Key );
+            if (!productId.HasValue)
+            {
+                continue;
+            }
+
+            JsonElement product;
+            try
+            {
+                product = await GetProductJsonAsync( client, shop, productId.Value, accessToken );
+            }
+            catch
+            {
+                continue;
+            }
+
+            JsonElement variants = product.GetProperty( "variants" );
+            Dictionary<string, decimal> variantPrices = new( StringComparer.OrdinalIgnoreCase );
+            string? defaultVariantId = null;
+            foreach (JsonElement variant in variants.EnumerateArray())
+            {
+                string variantId = variant.GetProperty( "id" ).GetInt64().ToString( );
+                variantPrices[variantId] = ParseShopifyPrice( variant );
+                defaultVariantId ??= variantId;
+            }
+
+            foreach ((string ProductId, string VariantId) key in productGroup)
+            {
+                string lookupVariantId = string.IsNullOrWhiteSpace( key.VariantId )
+                    ? defaultVariantId ?? string.Empty
+                    : key.VariantId;
+                if (string.IsNullOrWhiteSpace( lookupVariantId ))
+                {
+                    continue;
+                }
+
+                if (variantPrices.TryGetValue( lookupVariantId, out decimal price ))
+                {
+                    prices[BuildLinePriceKey( key.ProductId, key.VariantId )] = price;
+                }
+            }
+        }
+
+        return prices;
+    }
+
+    private static string BuildLinePriceKey( string productId, string variantId ) =>
+        string.IsNullOrWhiteSpace( variantId ) ? productId : $"{productId}::{variantId}";
+
+    private static decimal ParseShopifyPrice( JsonElement variant )
+    {
+        if (!variant.TryGetProperty( "price", out JsonElement priceEl ))
+        {
+            return 0m;
+        }
+
+        string? raw = priceEl.GetString();
+        return decimal.TryParse( raw, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal parsed )
+            ? parsed
+            : 0m;
+    }
+
     public async Task<List<SupplyInventoryUpdateResult>> ApplySupplySyncAsync(
         string shop,
         string accessToken,

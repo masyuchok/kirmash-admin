@@ -105,6 +105,42 @@ namespace backend.Controllers
             string jwt = _jwt.GenerateJwtToken( shop, tokenResponse.access_token );
 
             string cookieName = _config["Auth:CookieName"] ?? "jwt_token";
+            Response.Cookies.Append( cookieName, jwt, BuildAuthCookieOptions( ) );
+
+            string? clientUrl = GetRequiredPublicUrl( "ClientUrl" );
+            if (string.IsNullOrWhiteSpace( clientUrl ))
+            {
+                return StatusCode( 500, "ClientUrl is not configured." );
+            }
+
+            return Redirect( $"{clientUrl}/" );
+        }
+
+        [HttpPost( "logout" )]
+        public IActionResult Logout()
+        {
+            ClearAuthCookie( );
+            return Ok( new { success = true } );
+        }
+
+        private void ClearAuthCookie()
+        {
+            string cookieName = _config["Auth:CookieName"] ?? "jwt_token";
+            CookieOptions options = BuildAuthCookieOptions( );
+            options.Expires = DateTimeOffset.UnixEpoch;
+            Response.Cookies.Append( cookieName, string.Empty, options );
+
+            if (!string.IsNullOrEmpty( options.Domain ))
+            {
+                CookieOptions hostOnly = BuildAuthCookieOptions( );
+                hostOnly.Domain = null;
+                hostOnly.Expires = DateTimeOffset.UnixEpoch;
+                Response.Cookies.Append( cookieName, string.Empty, hostOnly );
+            }
+        }
+
+        private CookieOptions BuildAuthCookieOptions()
+        {
             bool useSecureCookie = Request.IsHttps
                 || (!_env.IsDevelopment( ) && !IsLocalhostRequest( ));
             CookieOptions cookieOptions = new CookieOptions
@@ -121,14 +157,7 @@ namespace backend.Controllers
                 cookieOptions.Domain = ".kirma.sh";
             }
 
-            Response.Cookies.Append( cookieName, jwt, cookieOptions );
-
-            if (string.IsNullOrWhiteSpace( clientUrl ))
-            {
-                return StatusCode( 500, "ClientUrl is not configured." );
-            }
-
-            return Redirect( $"{clientUrl}/" );
+            return cookieOptions;
         }
 
         /// <summary>

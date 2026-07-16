@@ -13,9 +13,13 @@ type Props = {
   emptyMessage?: string;
 };
 
-function buildProductTitle(option: VatReportOverpaidExpenseProductOption): string {
+function buildProductTitle(
+  option: VatReportOverpaidExpenseProductOption
+): string {
   const variantName = option.shopifyVariantTitle?.trim() ?? '';
-  return variantName ? `${option.productTitle} — ${variantName}` : option.productTitle;
+  return variantName
+    ? `${option.productTitle} — ${variantName}`
+    : option.productTitle;
 }
 
 function buildOptionLabel(
@@ -45,7 +49,9 @@ export default function OverpaidExpenseProductSearchSelect({
   const [query, setQuery] = useState('');
 
   const selected = useMemo(
-    () => options.find((option) => String(option.expenseProductId) === value) ?? null,
+    () =>
+      options.find((option) => String(option.expenseProductId) === value) ??
+      null,
     [options, value]
   );
 
@@ -60,7 +66,9 @@ export default function OverpaidExpenseProductSearchSelect({
   const filtered = useMemo(() => {
     const search = query.trim().toLowerCase();
     if (!search) return sortedOptions;
-    return sortedOptions.filter((option) => buildProductTitle(option).toLowerCase().includes(search));
+    return sortedOptions.filter((option) =>
+      buildProductTitle(option).toLowerCase().includes(search)
+    );
   }, [sortedOptions, query]);
 
   const selectedLabel = selected ? buildOptionLabel(selected, formatDate) : '';
@@ -148,17 +156,25 @@ export default function OverpaidExpenseProductSearchSelect({
           role="listbox"
         >
           {filtered.length === 0 ? (
-            <li className="px-3 py-2.5 text-sm text-gray-500">{emptyMessage}</li>
+            <li className="px-3 py-2.5 text-sm text-gray-500">
+              {emptyMessage}
+            </li>
           ) : (
             filtered.map((option) => {
               const optionId = String(option.expenseProductId);
               const isSelected = optionId === value;
               return (
-                <li key={option.expenseProductId} role="option" aria-selected={isSelected}>
+                <li
+                  key={option.expenseProductId}
+                  role="option"
+                  aria-selected={isSelected}
+                >
                   <button
                     type="button"
                     className={`w-full px-3 py-2.5 text-left text-sm transition hover:bg-gray-50 ${
-                      isSelected ? 'bg-primary/5 font-medium text-primary' : 'text-gray-800'
+                      isSelected
+                        ? 'bg-primary/5 font-medium text-primary'
+                        : 'text-gray-800'
                     }`}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => pickOption(option)}

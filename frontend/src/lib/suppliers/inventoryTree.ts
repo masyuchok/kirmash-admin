@@ -1,8 +1,14 @@
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
-import { formatProductNameWithAuthor, isBookProductType } from '@/lib/supply-draft';
+import {
+  formatProductNameWithAuthor,
+  isBookProductType,
+} from '@/lib/supply-draft';
 
 export function formatInventoryProductTitle(
-  row: Pick<SupplierInventoryRow, 'productName' | 'productAuthor' | 'productType'>
+  row: Pick<
+    SupplierInventoryRow,
+    'productName' | 'productAuthor' | 'productType'
+  >
 ): string {
   return isBookProductType(row.productType)
     ? formatProductNameWithAuthor(row.productName, row.productAuthor)
@@ -10,7 +16,10 @@ export function formatInventoryProductTitle(
 }
 
 export function formatInventoryLineName(
-  row: Pick<SupplierInventoryRow, 'productName' | 'productAuthor' | 'productType' | 'variantTitle'>
+  row: Pick<
+    SupplierInventoryRow,
+    'productName' | 'productAuthor' | 'productType' | 'variantTitle'
+  >
 ): string {
   const baseName = formatInventoryProductTitle(row);
   if (isNamedInventoryVariantTitle(row.variantTitle)) {
@@ -30,12 +39,25 @@ export type InventoryProductGroup = {
 
 export type InventoryGroupTotals = Pick<
   SupplierInventoryRow,
-  'receivedQuantity' | 'paidQuantity' | 'quantityInStock' | 'soldQuantity' | 'quantityToPay'
+  | 'receivedQuantity'
+  | 'paidQuantity'
+  | 'quantityInStock'
+  | 'soldQuantity'
+  | 'quantityToPay'
 >;
 
 export type InventoryDisplayRow =
-  | { type: 'parent'; group: InventoryProductGroup; totals: InventoryGroupTotals }
-  | { type: 'variant'; row: SupplierInventoryRow; groupKey: string; isVariantChild: boolean };
+  | {
+      type: 'parent';
+      group: InventoryProductGroup;
+      totals: InventoryGroupTotals;
+    }
+  | {
+      type: 'variant';
+      row: SupplierInventoryRow;
+      groupKey: string;
+      isVariantChild: boolean;
+    };
 
 export function inventoryGroupKey(
   row: SupplierInventoryRow,
@@ -85,10 +107,14 @@ export function isNamedInventoryVariantTitle(variantTitle: string): boolean {
 
 export function shouldShowInventoryTree(group: InventoryProductGroup): boolean {
   if (group.variants.length > 1) return true;
-  return group.variants.some((row) => isNamedInventoryVariantTitle(row.variantTitle));
+  return group.variants.some((row) =>
+    isNamedInventoryVariantTitle(row.variantTitle)
+  );
 }
 
-export function sumInventoryGroup(variants: SupplierInventoryRow[]): InventoryGroupTotals {
+export function sumInventoryGroup(
+  variants: SupplierInventoryRow[]
+): InventoryGroupTotals {
   return variants.reduce<InventoryGroupTotals>(
     (acc, row) => ({
       receivedQuantity: acc.receivedQuantity + row.receivedQuantity,

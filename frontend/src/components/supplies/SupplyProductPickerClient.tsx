@@ -1,20 +1,25 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
-import { FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
+import { FiExternalLink, FiRefreshCw, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { fetchSupplierProductBalances } from '@/lib/api/supplies';
-import { formatProductNameWithAuthor, readFieldValue } from '@/lib/supply-draft';
+import {
+  formatProductNameWithAuthor,
+  readFieldValue,
+} from '@/lib/supply-draft';
 import { makeSupplyLineKey } from '@/lib/supply-line-key';
 import type { ProductWithSuppliers, ProductVariant } from '@/types/product';
 
 function visibleVariants(product: ProductWithSuppliers): ProductVariant[] {
   return (product.variants ?? []).filter(
-    (v) => (v.variantId?.trim() || v.variantName?.trim()) && v.variantName !== 'Default Title'
+    (v) =>
+      (v.variantId?.trim() || v.variantName?.trim()) &&
+      v.variantName !== 'Default Title'
   );
 }
 
@@ -67,18 +72,25 @@ export default function SupplyProductPickerClient({
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [rows, setRows] = useState<ProductWithSuppliers[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(selectedProductIds);
-  const [draftQuantities, setDraftQuantities] = useState<Record<string, string>>(selectedProductQuantities);
+  const [draftQuantities, setDraftQuantities] = useState<
+    Record<string, string>
+  >(selectedProductQuantities);
   const [page, setPage] = useState(1);
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const [menuMounted, setMenuMounted] = useState(false);
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
-  const [typeTriggerEl, setTypeTriggerEl] = useState<HTMLButtonElement | null>(null);
+  const [typeTriggerEl, setTypeTriggerEl] = useState<HTMLButtonElement | null>(
+    null
+  );
   const [typeMenuEl, setTypeMenuEl] = useState<HTMLDivElement | null>(null);
-  const [supplierNetBalances, setSupplierNetBalances] = useState<Record<string, number>>({});
+  const [supplierNetBalances, setSupplierNetBalances] = useState<
+    Record<string, number>
+  >({});
 
   const getMaxReturnableQuantity = (lineKey: string): number =>
     Math.max(0, supplierNetBalances[lineKey] ?? 0);
@@ -92,26 +104,32 @@ export default function SupplyProductPickerClient({
     };
   }, [setTopbarButtons, setTopbarPage]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
+  const loadProducts = useCallback(async (forceFresh = false) => {
+    if (forceFresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
-    fetchProductsWithSuppliers()
-      .then((data) => {
-        if (!cancelled) setRows(data);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Памылка загрузкі прадуктаў');
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const data = await fetchProductsWithSuppliers(forceFresh);
+      setRows(data);
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error ? err.message : 'Памылка загрузкі прадуктаў'
+      );
+    } finally {
+      if (forceFresh) {
+        setRefreshing(false);
+      } else {
+        setLoading(false);
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    void loadProducts(false);
+  }, [loadProducts]);
 
   useEffect(() => {
     const supplierIdNumber = Number(supplierId);
@@ -128,7 +146,10 @@ export default function SupplyProductPickerClient({
         if (cancelled) return;
         const map: Record<string, number> = {};
         for (const row of rows) {
-          const key = makeSupplyLineKey(row.shopifyProductId, row.shopifyVariantId || undefined);
+          const key = makeSupplyLineKey(
+            row.shopifyProductId,
+            row.shopifyVariantId || undefined
+          );
           map[key] = row.netQuantity;
         }
         setSupplierNetBalances(map);
@@ -143,20 +164,29 @@ export default function SupplyProductPickerClient({
 
   const typeOptions = useMemo(
     () =>
-      Array.from(new Set(rows.map((r) => r.productType).filter((t) => t.trim().length > 0))).sort((a, b) =>
-        a.localeCompare(b, 'be')
-      ),
+      Array.from(
+        new Set(
+          rows.map((r) => r.productType).filter((t) => t.trim().length > 0)
+        )
+      ).sort((a, b) => a.localeCompare(b, 'be')),
     [rows]
   );
 
   const visibleRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const byType =
-      selectedTypes.length === 0 ? rows : rows.filter((r) => selectedTypes.includes(r.productType));
-    return q ? byType.filter((r) => r.productName.toLowerCase().includes(q)) : byType;
+      selectedTypes.length === 0
+        ? rows
+        : rows.filter((r) => selectedTypes.includes(r.productType));
+    return q
+      ? byType.filter((r) => r.productName.toLowerCase().includes(q))
+      : byType;
   }, [rows, selectedTypes, searchQuery]);
 
-  const pickerLines = useMemo(() => expandPickerLines(visibleRows), [visibleRows]);
+  const pickerLines = useMemo(
+    () => expandPickerLines(visibleRows),
+    [visibleRows]
+  );
 
   const totalPages = Math.max(1, Math.ceil(pickerLines.length / pageSize));
   const pagedLines = useMemo(() => {
@@ -170,7 +200,9 @@ export default function SupplyProductPickerClient({
   }, [searchQuery, selectedTypes]);
 
   const toggleType = (type: string) => {
-    setSelectedTypes((prev) => (prev.includes(type) ? prev.filter((x) => x !== type) : [...prev, type]));
+    setSelectedTypes((prev) =>
+      prev.includes(type) ? prev.filter((x) => x !== type) : [...prev, type]
+    );
   };
 
   const updateTypeMenuPosition = () => {
@@ -238,15 +270,19 @@ export default function SupplyProductPickerClient({
     if (date) query.set('date', date);
     if (supplierId) query.set('supplierId', supplierId);
     if (supplierName) query.set('supplierName', supplierName);
-    if (selectedIds.length > 0) query.set('selectedProductIds', selectedIds.join(','));
+    if (selectedIds.length > 0)
+      query.set('selectedProductIds', selectedIds.join(','));
     if (selectedIds.length > 0) {
-      const quantitiesPayload = selectedIds.reduce<Record<string, string>>((acc, id) => {
-        const quantity = draftQuantities[id];
-        if (typeof quantity === 'string' && quantity.trim() !== '') {
-          acc[id] = quantity;
-        }
-        return acc;
-      }, {});
+      const quantitiesPayload = selectedIds.reduce<Record<string, string>>(
+        (acc, id) => {
+          const quantity = draftQuantities[id];
+          if (typeof quantity === 'string' && quantity.trim() !== '') {
+            acc[id] = quantity;
+          }
+          return acc;
+        },
+        {}
+      );
       query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
     }
     query.set('restoreDraft', '1');
@@ -282,7 +318,11 @@ export default function SupplyProductPickerClient({
         </button>
       </div>
 
-      {error && <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {error}
+        </div>
+      )}
 
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="border-b border-gray-100 bg-gray-50/50 px-6 py-4">
@@ -297,7 +337,11 @@ export default function SupplyProductPickerClient({
                 className="w-full border-0 bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none"
               />
               {searchQuery.trim() && (
-                <button type="button" onClick={() => setSearchQuery('')} className="text-gray-400 hover:text-gray-600">
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="text-gray-400 hover:text-gray-600"
+                >
                   <FiX className="size-4" />
                 </button>
               )}
@@ -314,6 +358,20 @@ export default function SupplyProductPickerClient({
                 <span aria-hidden>{typeMenuOpen ? '▴' : '▾'}</span>
               </button>
             </div>
+            <button
+              type="button"
+              onClick={() => void loadProducts(true)}
+              disabled={loading || refreshing}
+              className="inline-flex size-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+              aria-label="Абнавіць спіс тавараў"
+              title="Абнавіць спіс тавараў"
+            >
+              {refreshing ? (
+                <span className="size-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
+              ) : (
+                <FiRefreshCw className="size-4" aria-hidden />
+              )}
+            </button>
           </div>
         </div>
 
@@ -365,12 +423,22 @@ export default function SupplyProductPickerClient({
                           <div className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100" />
                         )}
                         <div className="space-y-1">
-                          <a href={row.productAdminUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:underline">
-                            {formatProductNameWithAuthor(row.productName, row.productAuthor)}
+                          <a
+                            href={row.productAdminUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 hover:underline"
+                          >
+                            {formatProductNameWithAuthor(
+                              row.productName,
+                              row.productAuthor
+                            )}
                             <FiExternalLink className="size-3.5 text-gray-500" />
                           </a>
                           {variant?.variantName && (
-                            <p className="text-xs font-normal text-gray-500">{variant.variantName}</p>
+                            <p className="text-xs font-normal text-gray-500">
+                              {variant.variantName}
+                            </p>
                           )}
                         </div>
                       </div>
@@ -378,21 +446,28 @@ export default function SupplyProductPickerClient({
                     <td className="px-4 py-3.5 text-center">
                       {(() => {
                         const maxReturnable = getMaxReturnableQuantity(lineKey);
-                        const quantityValue = Number(draftQuantities[lineKey] ?? '');
-                        const isReturn = Number.isFinite(quantityValue) && quantityValue < 0;
+                        const quantityValue = Number(
+                          draftQuantities[lineKey] ?? ''
+                        );
+                        const isReturn =
+                          Number.isFinite(quantityValue) && quantityValue < 0;
                         return (
                           <input
                             type="number"
                             min={maxReturnable > 0 ? -maxReturnable : 0}
                             step="1"
                             value={draftQuantities[lineKey] ?? ''}
-                            onChange={(e) => updateQuantity(lineKey, readFieldValue(e))}
+                            onChange={(e) =>
+                              updateQuantity(lineKey, readFieldValue(e))
+                            }
                             onFocus={() => {
                               if (!selectedIds.includes(lineKey)) {
                                 setSelectedIds((prev) => [...prev, lineKey]);
                               }
                               setDraftQuantities((prev) =>
-                                prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
+                                prev[lineKey]
+                                  ? prev
+                                  : { ...prev, [lineKey]: '1' }
                               );
                             }}
                             title={
@@ -409,7 +484,9 @@ export default function SupplyProductPickerClient({
                       })()}
                     </td>
                     <td className="px-6 py-3.5 text-right tabular-nums text-gray-700">
-                      {variant ? variant.quantityInStock : row.shopifyQuantityInStock}
+                      {variant
+                        ? variant.quantityInStock
+                        : row.shopifyQuantityInStock}
                     </td>
                   </tr>
                 ))}
@@ -449,7 +526,10 @@ export default function SupplyProductPickerClient({
           <div
             ref={setTypeMenuEl}
             className="fixed z-[70] w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
-            style={{ top: `${typeMenuPosition.top}px`, left: `${typeMenuPosition.left}px` }}
+            style={{
+              top: `${typeMenuPosition.top}px`,
+              left: `${typeMenuPosition.left}px`,
+            }}
           >
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
               Фільтр па тыпе

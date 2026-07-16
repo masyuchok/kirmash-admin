@@ -1,4 +1,8 @@
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 
 export type FinanceMovementKind =
   | 'outgoingTransfer'
@@ -55,7 +59,11 @@ export type FinancePersonOverview = {
   recurringExpenses: FinanceRecurringExpense[];
 };
 
-function pick<T>(row: Record<string, unknown>, camel: string, pascal: string): T {
+function pick<T>(
+  row: Record<string, unknown>,
+  camel: string,
+  pascal: string
+): T {
   return (row[camel] ?? row[pascal]) as T;
 }
 
@@ -98,9 +106,14 @@ function mapMovement(row: Record<string, unknown>): FinanceMovement {
     movementDate: String(pick(row, 'movementDate', 'MovementDate') ?? ''),
     isFromRecurring: Boolean(pick(row, 'isFromRecurring', 'IsFromRecurring')),
     recurringExpenseId:
-      pick<number | null>(row, 'recurringExpenseId', 'RecurringExpenseId') ?? null,
-    isVatAutoPayment: Boolean(pick(row, 'isVatAutoPayment', 'IsVatAutoPayment')),
-    isVatAmountLocked: Boolean(pick(row, 'isVatAmountLocked', 'IsVatAmountLocked')),
+      pick<number | null>(row, 'recurringExpenseId', 'RecurringExpenseId') ??
+      null,
+    isVatAutoPayment: Boolean(
+      pick(row, 'isVatAutoPayment', 'IsVatAutoPayment')
+    ),
+    isVatAmountLocked: Boolean(
+      pick(row, 'isVatAmountLocked', 'IsVatAmountLocked')
+    ),
   };
 }
 
@@ -128,17 +141,23 @@ function mapSummary(row: Record<string, unknown>): FinanceSummary {
     Number(pick(row, 'totalDebtFromKirma', 'TotalDebtFromKirma')) ||
     0;
   return {
-    totalOutgoingTransfer: Number(pick(row, 'totalOutgoingTransfer', 'TotalOutgoingTransfer')) || 0,
-    totalIncomingTransfer: Number(pick(row, 'totalIncomingTransfer', 'TotalIncomingTransfer')) || 0,
+    totalOutgoingTransfer:
+      Number(pick(row, 'totalOutgoingTransfer', 'TotalOutgoingTransfer')) || 0,
+    totalIncomingTransfer:
+      Number(pick(row, 'totalIncomingTransfer', 'TotalIncomingTransfer')) || 0,
     totalPayment: Number(pick(row, 'totalPayment', 'TotalPayment')) || 0,
-    totalKirmaPayout: Number(pick(row, 'totalKirmaPayout', 'TotalKirmaPayout')) || 0,
+    totalKirmaPayout:
+      Number(pick(row, 'totalKirmaPayout', 'TotalKirmaPayout')) || 0,
     personOwesKirma: personOwes,
     kirmaOwesPerson: kirmaOwes,
   };
 }
 
 /** Types available when creating/editing a movement. */
-export const MOVEMENT_KIND_OPTIONS: { value: FinanceMovementKind; label: string }[] = [
+export const MOVEMENT_KIND_OPTIONS: {
+  value: FinanceMovementKind;
+  label: string;
+}[] = [
   { value: 'payment', label: 'Аплата' },
   { value: 'kirmaPayout', label: 'Выплата' },
 ];
@@ -171,14 +190,18 @@ export async function fetchFinancePersons(): Promise<FinancePerson[]> {
     cache: 'no-store',
   });
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося загрузіць спіс асоб'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося загрузіць спіс асоб')
+    );
   }
   const data = (await res.json()) as unknown;
   if (!Array.isArray(data)) return [];
   return data.map((row) => mapPerson(row as Record<string, unknown>));
 }
 
-export async function createFinancePerson(name: string): Promise<FinancePerson> {
+export async function createFinancePerson(
+  name: string
+): Promise<FinancePerson> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/persons`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -191,7 +214,10 @@ export async function createFinancePerson(name: string): Promise<FinancePerson> 
   return mapPerson((await res.json()) as Record<string, unknown>);
 }
 
-export async function updateFinancePerson(id: number, name: string): Promise<FinancePerson> {
+export async function updateFinancePerson(
+  id: number,
+  name: string
+): Promise<FinancePerson> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/persons/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -214,20 +240,32 @@ export async function deleteFinancePerson(id: number): Promise<void> {
   }
 }
 
-export async function fetchFinanceOverview(personId: number): Promise<FinancePersonOverview> {
-  const res = await fetch(`${getApiBaseUrl()}/Finances/persons/${personId}/overview`, {
-    method: 'GET',
-    credentials: apiCredentials,
-    cache: 'no-store',
-  });
+export async function fetchFinanceOverview(
+  personId: number
+): Promise<FinancePersonOverview> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Finances/persons/${personId}/overview`,
+    {
+      method: 'GET',
+      credentials: apiCredentials,
+      cache: 'no-store',
+    }
+  );
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося загрузіць фінансы'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося загрузіць фінансы')
+    );
   }
   const data = (await res.json()) as Record<string, unknown>;
-  const person = mapPerson((data.person ?? data.Person) as Record<string, unknown>);
-  const summary = mapSummary((data.summary ?? data.Summary) as Record<string, unknown>);
+  const person = mapPerson(
+    (data.person ?? data.Person) as Record<string, unknown>
+  );
+  const summary = mapSummary(
+    (data.summary ?? data.Summary) as Record<string, unknown>
+  );
   const movementsRaw = (data.movements ?? data.Movements) as unknown;
-  const recurringRaw = (data.recurringExpenses ?? data.RecurringExpenses) as unknown;
+  const recurringRaw = (data.recurringExpenses ??
+    data.RecurringExpenses) as unknown;
   return {
     person,
     summary,
@@ -248,7 +286,9 @@ export type FinanceMovementPayload = {
   movementDate: string;
 };
 
-export async function createFinanceMovement(payload: FinanceMovementPayload): Promise<FinanceMovement> {
+export async function createFinanceMovement(
+  payload: FinanceMovementPayload
+): Promise<FinanceMovement> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/movements`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -263,7 +303,7 @@ export async function createFinanceMovement(payload: FinanceMovementPayload): Pr
 
 export async function updateFinanceMovement(
   id: number,
-  payload: Omit<FinanceMovementPayload, 'personId'>,
+  payload: Omit<FinanceMovementPayload, 'personId'>
 ): Promise<FinanceMovement> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/movements/${id}`, {
     method: 'PUT',
@@ -289,16 +329,21 @@ export async function deleteFinanceMovement(id: number): Promise<void> {
 
 export async function setVatPaymentAmountLocked(
   movementId: number,
-  locked: boolean,
+  locked: boolean
 ): Promise<FinanceMovement> {
-  const res = await fetch(`${getApiBaseUrl()}/Finances/movements/${movementId}/vat-lock`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify({ locked }),
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Finances/movements/${movementId}/vat-lock`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({ locked }),
+    }
+  );
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося змяніць фіксацыю VAT'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося змяніць фіксацыю VAT')
+    );
   }
   return mapMovement((await res.json()) as Record<string, unknown>);
 }
@@ -313,7 +358,9 @@ export type FinanceRecurringPayload = {
   endDate?: string | null;
 };
 
-export async function createFinanceRecurring(payload: FinanceRecurringPayload): Promise<FinanceRecurringExpense> {
+export async function createFinanceRecurring(
+  payload: FinanceRecurringPayload
+): Promise<FinanceRecurringExpense> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/recurring`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -321,14 +368,16 @@ export async function createFinanceRecurring(payload: FinanceRecurringPayload): 
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося дадаць рэгулярны расход'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося дадаць рэгулярны расход')
+    );
   }
   return mapRecurring((await res.json()) as Record<string, unknown>);
 }
 
 export async function updateFinanceRecurring(
   id: number,
-  payload: Omit<FinanceRecurringPayload, 'personId'> & { isActive: boolean },
+  payload: Omit<FinanceRecurringPayload, 'personId'> & { isActive: boolean }
 ): Promise<FinanceRecurringExpense> {
   const res = await fetch(`${getApiBaseUrl()}/Finances/recurring/${id}`, {
     method: 'PUT',
@@ -337,7 +386,9 @@ export async function updateFinanceRecurring(
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося абнавіць рэгулярны расход'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося абнавіць рэгулярны расход')
+    );
   }
   return mapRecurring((await res.json()) as Record<string, unknown>);
 }
@@ -348,6 +399,8 @@ export async function deleteFinanceRecurring(id: number): Promise<void> {
     credentials: apiCredentials,
   });
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, 'Не ўдалося выдаліць рэгулярны расход'));
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося выдаліць рэгулярны расход')
+    );
   }
 }

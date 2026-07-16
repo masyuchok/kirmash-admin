@@ -1,5 +1,8 @@
 import * as XLSX from 'xlsx';
-import { calcGrossLineTotal, roundMoney } from '@/lib/suppliers/inventoryPricing';
+import {
+  calcGrossLineTotal,
+  roundMoney,
+} from '@/lib/suppliers/inventoryPricing';
 import { formatInventoryLineName } from '@/lib/suppliers/inventoryTree';
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
 
@@ -7,7 +10,10 @@ function formatLineName(row: SupplierInventoryRow): string {
   return formatInventoryLineName(row);
 }
 
-function grossLineTotal(row: SupplierInventoryRow, unpaidQuantity: number): number {
+function grossLineTotal(
+  row: SupplierInventoryRow,
+  unpaidQuantity: number
+): number {
   return calcGrossLineTotal(
     row.supplierPrice,
     row.vatRatePercent,
@@ -41,8 +47,13 @@ export function exportUnpaidSupplierInventoryToExcel(
     })
     .sort((a, b) => a.name.localeCompare(b.name, 'be'));
 
-  const totalQuantity = unpaidRows.reduce((sum, row) => sum + row.soldQuantity, 0);
-  const totalGross = roundMoney(unpaidRows.reduce((sum, row) => sum + row.grossTotal, 0));
+  const totalQuantity = unpaidRows.reduce(
+    (sum, row) => sum + row.soldQuantity,
+    0
+  );
+  const totalGross = roundMoney(
+    unpaidRows.reduce((sum, row) => sum + row.grossTotal, 0)
+  );
 
   const sheetRows: (string | number)[][] = [
     ['Назва', 'Кошт нета адзінкі', 'Колькасць прададзенага', 'Сума брута'],

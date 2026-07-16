@@ -1,4 +1,8 @@
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 
 export type InvoiceSettingsPayload = {
   companyName: string;
@@ -27,7 +31,10 @@ export async function fetchInvoiceSettings(): Promise<InvoiceSettingsPayload> {
     cache: 'no-store',
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць налады фактур');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць налады фактур'
+    );
     throw new Error(msg);
   }
 
@@ -43,7 +50,9 @@ export async function fetchInvoiceSettings(): Promise<InvoiceSettingsPayload> {
   };
 }
 
-export async function saveInvoiceSettings(payload: InvoiceSettingsPayload): Promise<void> {
+export async function saveInvoiceSettings(
+  payload: InvoiceSettingsPayload
+): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Settings/invoice`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -51,19 +60,27 @@ export async function saveInvoiceSettings(payload: InvoiceSettingsPayload): Prom
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося захаваць налады фактур');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося захаваць налады фактур'
+    );
     throw new Error(msg);
   }
 }
 
-export async function fetchExpenseInvoiceTypes(): Promise<ExpenseInvoiceType[]> {
+export async function fetchExpenseInvoiceTypes(): Promise<
+  ExpenseInvoiceType[]
+> {
   const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types`, {
     method: 'GET',
     credentials: apiCredentials,
     cache: 'no-store',
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць тыпы расходных фактур');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць тыпы расходных фактур'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as unknown;
@@ -86,20 +103,32 @@ export async function createExpenseInvoiceType(name: string): Promise<void> {
     body: JSON.stringify({ name }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося дадаць тып расходнай фактуры');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося дадаць тып расходнай фактуры'
+    );
     throw new Error(msg);
   }
 }
 
-export async function updateExpenseInvoiceType(id: number, name: string): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: apiCredentials,
-    body: JSON.stringify({ name }),
-  });
+export async function updateExpenseInvoiceType(
+  id: number,
+  name: string
+): Promise<void> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({ name }),
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося абнавіць тып расходнай фактуры');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося абнавіць тып расходнай фактуры'
+    );
     throw new Error(msg);
   }
 }
@@ -111,7 +140,10 @@ export async function fetchVatAutoFinanceSettings(): Promise<VatAutoFinanceSetti
     cache: 'no-store',
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць налады аўтарасходу VAT');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць налады аўтарасходу VAT'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as Record<string, unknown>;
@@ -122,7 +154,9 @@ export async function fetchVatAutoFinanceSettings(): Promise<VatAutoFinanceSetti
   };
 }
 
-export async function saveVatAutoFinanceSettings(payload: VatAutoFinanceSettings): Promise<void> {
+export async function saveVatAutoFinanceSettings(
+  payload: VatAutoFinanceSettings
+): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Settings/vat-auto-finance`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -133,18 +167,27 @@ export async function saveVatAutoFinanceSettings(payload: VatAutoFinanceSettings
     }),
   });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося захаваць налады аўтарасходу VAT');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося захаваць налады аўтарасходу VAT'
+    );
     throw new Error(msg);
   }
 }
 
 export async function deleteExpenseInvoiceType(id: number): Promise<void> {
-  const res = await fetch(`${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`, {
-    method: 'DELETE',
-    credentials: apiCredentials,
-  });
+  const res = await fetch(
+    `${getApiBaseUrl()}/Settings/invoice-expense-types/${id}`,
+    {
+      method: 'DELETE',
+      credentials: apiCredentials,
+    }
+  );
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося выдаліць тып расходнай фактуры');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося выдаліць тып расходнай фактуры'
+    );
     throw new Error(msg);
   }
 }

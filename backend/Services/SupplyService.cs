@@ -11,17 +11,20 @@ public class SupplyService
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ShopifyInventoryService _shopifyInventory;
     private readonly ShopifyProductCatalogService _shopifyCatalog;
+    private readonly SupplierInventoryService _inventoryService;
 
     public SupplyService(
         AppDbContext db,
         IHttpContextAccessor httpContextAccessor,
         ShopifyInventoryService shopifyInventory,
-        ShopifyProductCatalogService shopifyCatalog )
+        ShopifyProductCatalogService shopifyCatalog,
+        SupplierInventoryService inventoryService )
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _shopifyInventory = shopifyInventory;
         _shopifyCatalog = shopifyCatalog;
+        _inventoryService = inventoryService;
     }
 
         public async Task<List<Supply>> GetAllAsync()
@@ -359,6 +362,30 @@ public class SupplyService
 
     public async Task<List<SupplyCatalogProductItem>> GetCatalogProductsAsync( int? supplierId )
     {
+        Dictionary<string, string> productNames = await BuildProductNamesAsync();
+        if (supplierId.HasValue && supplierId.Value > 0)
+        {
+            Dictionary<string, (decimal GrossUnitPrice, decimal VatRatePercent)> inventoryPricing =
+                await _inventoryService.GetExpenseCatalogPricingAsync( supplierId.Value );
+
+            return inventoryPricing
+                .Select( entry =>
+                {
+                    (string productId, string variantId) = ParseShopifySyncKey( entry.Key );
+                    productNames.TryGetValue( productId, out string? productName );
+                    return new SupplyCatalogProductItem
+                    {
+                        ShopifyProductId = productId,
+                        ShopifyVariantId = variantId,
+                        ProductName = string.IsNullOrWhiteSpace( productName ) ? productId : productName,
+                        VatRatePercent = entry.Value.VatRatePercent,
+                        SupplierPrice = entry.Value.GrossUnitPrice
+                    };
+                } )
+                .OrderBy( x => x.ProductName, StringComparer.OrdinalIgnoreCase )
+                .ToList();
+        }
+
         IQueryable<SupplyProduct> query = _db.SupplyProducts
             .AsNoTracking()
             .Include( sp => sp.Supply );
@@ -378,8 +405,6 @@ public class SupplyService
                 SupplyId = sp.Supply.Id
             } )
             .ToListAsync();
-
-        Dictionary<string, string> productNames = await BuildProductNamesAsync();
 
         return rows
             .Select( row =>

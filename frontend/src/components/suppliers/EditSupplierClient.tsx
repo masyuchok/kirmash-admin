@@ -64,7 +64,10 @@ export default function EditSupplierClient({ supplierId }: Props) {
       ]);
       return clear;
     }
-    setTopbarPage({ title: 'Рэдагаваць пастаўшчыка', subtitle: `ID: ${supplierId}` });
+    setTopbarPage({
+      title: 'Рэдагаваць пастаўшчыка',
+      subtitle: `ID: ${supplierId}`,
+    });
     setTopbarButtons([
       {
         label: 'Да спісу',
@@ -74,7 +77,15 @@ export default function EditSupplierClient({ supplierId }: Props) {
       },
     ]);
     return clear;
-  }, [loading, loadError, form, supplierId, router, setTopbarButtons, setTopbarPage]);
+  }, [
+    loading,
+    loadError,
+    form,
+    supplierId,
+    router,
+    setTopbarButtons,
+    setTopbarPage,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,8 +143,13 @@ export default function EditSupplierClient({ supplierId }: Props) {
   if (loadError || !form) {
     return (
       <div className="mx-auto w-full max-w-3xl space-y-4 rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-        <p className="text-sm text-red-600">{loadError ?? 'Даныя недаступныя'}</p>
-        <Link href="/suppliers" className="text-sm font-medium text-primary hover:text-primary-hover hover:underline">
+        <p className="text-sm text-red-600">
+          {loadError ?? 'Даныя недаступныя'}
+        </p>
+        <Link
+          href="/suppliers"
+          className="text-sm font-medium text-primary hover:text-primary-hover hover:underline"
+        >
           Вярнуцца да спісу
         </Link>
       </div>
@@ -155,7 +171,10 @@ export default function EditSupplierClient({ supplierId }: Props) {
             >
               Захаваць змены
             </button>
-            <Link href="/suppliers" className={`inline-flex items-center justify-center ${btnSecondary}`}>
+            <Link
+              href="/suppliers"
+              className={`inline-flex items-center justify-center ${btnSecondary}`}
+            >
               Адмена
             </Link>
           </div>
@@ -170,7 +189,10 @@ export default function EditSupplierClient({ supplierId }: Props) {
           aria-labelledby="save-confirm-title"
         >
           <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
-            <h2 id="save-confirm-title" className="text-lg font-semibold text-gray-900">
+            <h2
+              id="save-confirm-title"
+              className="text-lg font-semibold text-gray-900"
+            >
               Пацверджанне
             </h2>
             <p className="mt-2 text-sm text-gray-600">

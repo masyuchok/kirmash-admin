@@ -19,16 +19,21 @@ export type SupplyProductDraft = {
 };
 
 /** Read input/select value synchronously (safe for React synthetic events). */
-export function readFieldValue(e: ChangeEvent<HTMLInputElement | HTMLSelectElement>): string {
+export function readFieldValue(
+  e: ChangeEvent<HTMLInputElement | HTMLSelectElement>
+): string {
   return e.target.value;
 }
 
 /** Ensures lineKey/productId exist (legacy session rows may omit lineKey). */
-export function normalizeSupplyDraftRow(row: Partial<SupplyProductDraft>): SupplyProductDraft {
+export function normalizeSupplyDraftRow(
+  row: Partial<SupplyProductDraft>
+): SupplyProductDraft {
   const productId = String(row.productId ?? '').trim();
   const variantId = String(row.variantId ?? '').trim();
   const lineKey =
-    String(row.lineKey ?? '').trim() || makeSupplyLineKey(productId, variantId || undefined);
+    String(row.lineKey ?? '').trim() ||
+    makeSupplyLineKey(productId, variantId || undefined);
   return {
     lineKey,
     productId,
@@ -46,7 +51,10 @@ export function normalizeSupplyDraftRow(row: Partial<SupplyProductDraft>): Suppl
   };
 }
 
-export function formatProductNameWithAuthor(productName: string, author?: string | null): string {
+export function formatProductNameWithAuthor(
+  productName: string,
+  author?: string | null
+): string {
   const name = productName.trim() || '—';
   const trimmedAuthor = author?.trim();
   if (!trimmedAuthor) return name;
@@ -117,11 +125,16 @@ export function createDraftRowFromSupplyProduct(
   normalizeVatRatePercent: (value: number) => number
 ): SupplyProductDraft {
   const match = productMap.get(product.shopifyProductId);
-  const variantMatch = match?.variants.find((v) => v.variantId === product.shopifyVariantId);
+  const variantMatch = match?.variants.find(
+    (v) => v.variantId === product.shopifyVariantId
+  );
   const quantity = product.quantity;
   const isReturnFinalized = product.isReturnFinalized ?? quantity < 0;
   return normalizeSupplyDraftRow({
-    lineKey: makeSupplyLineKey(product.shopifyProductId, product.shopifyVariantId),
+    lineKey: makeSupplyLineKey(
+      product.shopifyProductId,
+      product.shopifyVariantId
+    ),
     productId: product.shopifyProductId,
     variantId: product.shopifyVariantId ?? '',
     variantName: variantMatch?.variantName ?? '',
@@ -132,14 +145,19 @@ export function createDraftRowFromSupplyProduct(
     quantity: formatDraftQuantity(quantity),
     supplierPrice: formatDraftMoney(product.supplierPrice),
     vatRatePercent: String(
-      normalizeVatRatePercent(product.vatRatePercent > 0 ? product.vatRatePercent : 23)
+      normalizeVatRatePercent(
+        product.vatRatePercent > 0 ? product.vatRatePercent : 23
+      )
     ),
     marginPercent: formatDraftMargin(product.marginPercent),
     salePrice: formatDraftMoney(product.salePrice),
   });
 }
 
-export function displayDraftLabel(row: SupplyProductDraft, author?: string | null): string {
+export function displayDraftLabel(
+  row: SupplyProductDraft,
+  author?: string | null
+): string {
   const title = formatProductNameWithAuthor(row.productName, author);
   if (row.variantName.trim()) {
     return `${title} — ${row.variantName}`;
@@ -153,7 +171,9 @@ export function createDraftLinesForProduct(
   defaultVatRatePercent: number
 ): SupplyProductDraft[] {
   const variants = (product.variants ?? []).filter(
-    (v) => (v.variantId?.trim() || v.variantName?.trim()) && v.variantName !== 'Default Title'
+    (v) =>
+      (v.variantId?.trim() || v.variantName?.trim()) &&
+      v.variantName !== 'Default Title'
   );
 
   const base = {
@@ -190,9 +210,7 @@ export function createDraftLinesForProduct(
       variantId: only?.variantId ?? '',
       variantName: only?.variantName ?? '',
       quantity:
-        quantities[lineKey] ??
-        quantities[product.shopifyProductId] ??
-        '',
+        quantities[lineKey] ?? quantities[product.shopifyProductId] ?? '',
     },
   ];
 }

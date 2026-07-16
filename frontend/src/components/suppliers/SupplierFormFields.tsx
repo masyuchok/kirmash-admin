@@ -31,7 +31,9 @@ export default function SupplierFormFields({
   return (
     <div className="space-y-4">
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">Назва*</label>
+        <label className="mb-1 block text-sm font-medium text-gray-700">
+          Назва*
+        </label>
         <input
           name="name"
           required
@@ -41,7 +43,9 @@ export default function SupplierFormFields({
           className={inputClass}
         />
         {showDuplicateNameHint && (
-          <p className="mt-1 text-xs text-gray-500">Будзе праверка на дублікаты па назве</p>
+          <p className="mt-1 text-xs text-gray-500">
+            Будзе праверка на дублікаты па назве
+          </p>
         )}
       </div>
 
@@ -59,7 +63,9 @@ export default function SupplierFormFields({
           />
         </div>
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Сайт</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Сайт
+          </label>
           <input
             type="url"
             name="website"
@@ -73,7 +79,9 @@ export default function SupplierFormFields({
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Краіна</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Краіна
+          </label>
           <input
             name="country"
             value={values.country}
@@ -83,7 +91,9 @@ export default function SupplierFormFields({
           />
         </div>
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Горад</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Горад
+          </label>
           <input
             name="city"
             value={values.city}
@@ -96,7 +106,9 @@ export default function SupplierFormFields({
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Валюта*</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Валюта*
+          </label>
           <input
             name="currency"
             required
@@ -132,7 +144,9 @@ export default function SupplierFormFields({
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Email</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Email
+          </label>
           <input
             type="email"
             name="email"
@@ -142,7 +156,9 @@ export default function SupplierFormFields({
           />
         </div>
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Instagram</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Instagram
+          </label>
           <input
             name="instagram"
             value={values.instagram}
@@ -152,7 +168,9 @@ export default function SupplierFormFields({
           />
         </div>
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Telegram</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Telegram
+          </label>
           <input
             name="tgContact"
             value={values.tgContact}
@@ -164,7 +182,9 @@ export default function SupplierFormFields({
       </div>
 
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">Тэлефон</label>
+        <label className="mb-1 block text-sm font-medium text-gray-700">
+          Тэлефон
+        </label>
         <input
           name="phone"
           value={values.phone}

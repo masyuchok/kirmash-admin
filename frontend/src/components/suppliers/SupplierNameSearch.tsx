@@ -12,7 +12,11 @@ type Props = {
   onChange: (value: string) => void;
 };
 
-export default function SupplierNameSearch({ suppliers, value, onChange }: Props) {
+export default function SupplierNameSearch({
+  suppliers,
+  value,
+  onChange,
+}: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
 

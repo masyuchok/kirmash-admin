@@ -41,7 +41,11 @@ export function usePortalMenu(options: Options = {}) {
 
     const onDocClick = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      if (
+        menuRef.current?.contains(target) ||
+        triggerRef.current?.contains(target)
+      )
+        return;
       setOpen(false);
     };
     const onViewportChange = () => updatePosition();

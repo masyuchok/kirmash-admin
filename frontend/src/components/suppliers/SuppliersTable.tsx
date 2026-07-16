@@ -15,7 +15,12 @@ interface Props {
 const ghostBtn =
   'inline-flex size-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30';
 
-const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Props) => {
+const SuppliersTable = ({
+  suppliers,
+  onEdit,
+  onInventory,
+  hasActiveFilter,
+}: Props) => {
   if (suppliers.length === 0) {
     return (
       <div className="px-6 py-16 text-center">
@@ -23,7 +28,9 @@ const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Pro
           {hasActiveFilter ? 'Нічога не знойдзена' : 'Пастаўшчыкоў пакуль няма'}
         </p>
         <p className="mt-1 text-sm text-gray-500">
-          {hasActiveFilter ? 'Паспрабуйце змяніць запыт пошуку.' : 'Дадайце першага пастаўшчыка праз кнопку ўверсе.'}
+          {hasActiveFilter
+            ? 'Паспрабуйце змяніць запыт пошуку.'
+            : 'Дадайце першага пастаўшчыка праз кнопку ўверсе.'}
         </p>
       </div>
     );
@@ -40,14 +47,21 @@ const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Pro
             <th className="whitespace-nowrap px-4 py-3.5">Краіна</th>
             <th className="whitespace-nowrap px-4 py-3.5">Горад</th>
             <th className="whitespace-nowrap px-4 py-3.5">VAT</th>
-            <th className="whitespace-nowrap px-6 py-3.5 text-right">Дзеянні</th>
+            <th className="whitespace-nowrap px-6 py-3.5 text-right">
+              Дзеянні
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
           {suppliers.map((s) => (
             <tr key={s.id} className="transition hover:bg-gray-50/80">
-              <td className="whitespace-nowrap px-6 py-3.5 font-medium text-gray-900">{s.name}</td>
-              <td className="max-w-[10rem] truncate px-4 py-3.5 text-gray-600" title={s.telegram}>
+              <td className="whitespace-nowrap px-6 py-3.5 font-medium text-gray-900">
+                {s.name}
+              </td>
+              <td
+                className="max-w-[10rem] truncate px-4 py-3.5 text-gray-600"
+                title={s.telegram}
+              >
                 {s.telegram}
               </td>
               <td className="max-w-[14rem] px-4 py-3.5">
@@ -61,8 +75,12 @@ const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Pro
                   {s.website}
                 </a>
               </td>
-              <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">{s.country}</td>
-              <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">{s.city}</td>
+              <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">
+                {s.country}
+              </td>
+              <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">
+                {s.city}
+              </td>
               <td className="px-4 py-3.5">
                 {s.isVatPayer ? (
                   <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800 ring-1 ring-inset ring-emerald-600/15">
@@ -96,7 +114,11 @@ const SuppliersTable = ({ suppliers, onEdit, onInventory, hasActiveFilter }: Pro
                   >
                     <ImBooks className="size-4" />
                   </button>
-                  <button type="button" className={ghostBtn} aria-label="Дакументы">
+                  <button
+                    type="button"
+                    className={ghostBtn}
+                    aria-label="Дакументы"
+                  >
                     <TiDocumentText className="size-4" />
                   </button>
                 </div>

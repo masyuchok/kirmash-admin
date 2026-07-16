@@ -15,6 +15,9 @@ namespace backend.Models
         public decimal GrossUnitPrice { get; set; }
         public bool SupplierIsVatPayer { get; set; }
         public bool HasPriceOverride { get; set; }
+        public decimal MarginPercent { get; set; }
+        public decimal SalePrice { get; set; }
+        public decimal ShopifyPrice { get; set; }
         public int ReceivedQuantity { get; set; }
         public int QuantityInStock { get; set; }
         public int SoldQuantity { get; set; }

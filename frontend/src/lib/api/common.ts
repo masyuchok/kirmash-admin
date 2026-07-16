@@ -32,9 +32,16 @@ export const apiCredentials: RequestCredentials = 'include';
  * Best-effort message from a failed JSON API response (`error` or `message`),
  * otherwise response text, otherwise `fallback`.
  */
-export function readErrorMessage(res: Response, fallback: string): Promise<string> {
+export function readErrorMessage(
+  res: Response,
+  fallback: string
+): Promise<string> {
   return res
     .json()
-    .then((data) => (typeof data?.error === 'string' ? data.error : data?.message) || fallback)
+    .then(
+      (data) =>
+        (typeof data?.error === 'string' ? data.error : data?.message) ||
+        fallback
+    )
     .catch(() => res.text().catch(() => fallback));
 }

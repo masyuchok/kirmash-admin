@@ -12,19 +12,35 @@ type Props = {
   }>;
 };
 
-export default async function SupplyDetailsPage({ params, searchParams }: Props) {
+export default async function SupplyDetailsPage({
+  params,
+  searchParams,
+}: Props) {
   const { id } = await params;
   const query = await searchParams;
   const selectedProductIds =
-    typeof query.selectedProductIds === 'string' && query.selectedProductIds.trim()
-      ? query.selectedProductIds.split(',').map((x) => x.trim()).filter(Boolean)
+    typeof query.selectedProductIds === 'string' &&
+    query.selectedProductIds.trim()
+      ? query.selectedProductIds
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean)
       : [];
   let selectedProductQuantities: Record<string, string> = {};
-  if (typeof query.selectedProductQuantities === 'string' && query.selectedProductQuantities.trim()) {
+  if (
+    typeof query.selectedProductQuantities === 'string' &&
+    query.selectedProductQuantities.trim()
+  ) {
     try {
-      const parsed = JSON.parse(query.selectedProductQuantities) as Record<string, unknown>;
+      const parsed = JSON.parse(query.selectedProductQuantities) as Record<
+        string,
+        unknown
+      >;
       selectedProductQuantities = Object.fromEntries(
-        Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : String(value ?? '')])
+        Object.entries(parsed).map(([key, value]) => [
+          key,
+          typeof value === 'string' ? value : String(value ?? ''),
+        ])
       );
     } catch {
       selectedProductQuantities = {};
@@ -34,8 +50,12 @@ export default async function SupplyDetailsPage({ params, searchParams }: Props)
   return (
     <NewSupplyClient
       supplyId={id}
-      initialSupplierId={typeof query.supplierId === 'string' ? query.supplierId : ''}
-      initialSupplierName={typeof query.supplierName === 'string' ? query.supplierName : ''}
+      initialSupplierId={
+        typeof query.supplierId === 'string' ? query.supplierId : ''
+      }
+      initialSupplierName={
+        typeof query.supplierName === 'string' ? query.supplierName : ''
+      }
       initialDate={typeof query.date === 'string' ? query.date : ''}
       selectedProductIds={selectedProductIds}
       selectedProductQuantities={selectedProductQuantities}

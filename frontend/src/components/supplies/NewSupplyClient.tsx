@@ -8,7 +8,11 @@ import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { fetchSupplierOptions } from '@/lib/api/suppliers';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
-import { deleteSupply, fetchSupplierProductBalances, fetchSupplyById } from '@/lib/api/supplies';
+import {
+  deleteSupply,
+  fetchSupplierProductBalances,
+  fetchSupplyById,
+} from '@/lib/api/supplies';
 import {
   createDraftLinesForProduct,
   createDraftRowFromSupplyProduct,
@@ -54,7 +58,9 @@ function supplyDraftSessionKey(supplyId: string | undefined): string {
   return `${SUPPLY_DRAFT_SESSION_PREFIX}${supplyId ?? 'new'}`;
 }
 
-function peekDraftSessionAfterPicker(supplyId: string | undefined): SupplyDraftSessionPayload | null {
+function peekDraftSessionAfterPicker(
+  supplyId: string | undefined
+): SupplyDraftSessionPayload | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = window.sessionStorage.getItem(supplyDraftSessionKey(supplyId));
@@ -110,26 +116,35 @@ export default function NewSupplyClient({
 
   const resolveDefaultVatRatePercent = (productType: string): number => {
     const t = productType.trim().toLowerCase();
-    if (t.includes('кніг') || t.includes('книга') || t.includes('book')) return VAT_BOOK * 100;
+    if (t.includes('кніг') || t.includes('книга') || t.includes('book'))
+      return VAT_BOOK * 100;
     return VAT_DEFAULT * 100;
   };
 
   const normalizeVatRateOption = (value: number): number => {
-    return VAT_RATE_OPTIONS.includes(value as (typeof VAT_RATE_OPTIONS)[number]) ? value : 23;
+    return VAT_RATE_OPTIONS.includes(value as (typeof VAT_RATE_OPTIONS)[number])
+      ? value
+      : 23;
   };
 
-  const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+  const round2 = (value: number): number =>
+    Math.round((value + Number.EPSILON) * 100) / 100;
 
   const router = useRouter();
   const { setTopbarButtons, setTopbarPage } = useTopbar();
   const [currentSupplierId, setCurrentSupplierId] = useState(initialSupplierId);
-  const [currentSupplierName, setCurrentSupplierName] = useState(initialSupplierName);
+  const [currentSupplierName, setCurrentSupplierName] =
+    useState(initialSupplierName);
   const [currentDate, setCurrentDate] = useState(initialDate);
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
-  const [selectedProducts, setSelectedProducts] = useState<ProductWithSuppliers[]>([]);
-  const [productCatalog, setProductCatalog] = useState<ProductWithSuppliers[]>([]);
+  const [, setSelectedProducts] = useState<ProductWithSuppliers[]>([]);
+  const [productCatalog, setProductCatalog] = useState<ProductWithSuppliers[]>(
+    []
+  );
   const [productDrafts, setProductDrafts] = useState<SupplyProductDraft[]>([]);
-  const [baselineDrafts, setBaselineDrafts] = useState<SupplyProductDraft[]>([]);
+  const [baselineDrafts, setBaselineDrafts] = useState<SupplyProductDraft[]>(
+    []
+  );
   const [baselineSupplierId, setBaselineSupplierId] = useState('');
   const [baselineSupplierName, setBaselineSupplierName] = useState('');
   const [baselineDate, setBaselineDate] = useState('');
@@ -142,7 +157,9 @@ export default function NewSupplyClient({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(Boolean(supplyId));
-  const [supplierNetBalances, setSupplierNetBalances] = useState<Record<string, number>>({});
+  const [supplierNetBalances, setSupplierNetBalances] = useState<
+    Record<string, number>
+  >({});
 
   const handleSaveRef = useRef<() => Promise<void>>(async () => {});
   const handleResetToBaselineRef = useRef<() => void>(() => {});
@@ -157,7 +174,10 @@ export default function NewSupplyClient({
         currentSupplierName,
         currentDate,
       };
-      window.sessionStorage.setItem(supplyDraftSessionKey(supplyId), JSON.stringify(payload));
+      window.sessionStorage.setItem(
+        supplyDraftSessionKey(supplyId),
+        JSON.stringify(payload)
+      );
     } catch {
       /* ignore quota / private mode */
     }
@@ -171,12 +191,16 @@ export default function NewSupplyClient({
     if (currentSupplierName) query.set('supplierName', currentSupplierName);
     if (currentDate) query.set('date', currentDate);
     const currentIds = productDrafts.map((p) => p.lineKey);
-    if (currentIds.length > 0) query.set('selectedProductIds', currentIds.join(','));
+    if (currentIds.length > 0)
+      query.set('selectedProductIds', currentIds.join(','));
     if (currentIds.length > 0) {
-      const quantitiesPayload = productDrafts.reduce<Record<string, string>>((acc, row) => {
-        if (row.quantity.trim()) acc[row.lineKey] = row.quantity;
-        return acc;
-      }, {});
+      const quantitiesPayload = productDrafts.reduce<Record<string, string>>(
+        (acc, row) => {
+          if (row.quantity.trim()) acc[row.lineKey] = row.quantity;
+          return acc;
+        },
+        {}
+      );
       query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
     }
     router.push(`/supplies/products?${query.toString()}`);
@@ -298,7 +322,10 @@ export default function NewSupplyClient({
         if (cancelled) return;
         const map: Record<string, number> = {};
         for (const row of rows) {
-          const key = makeSupplyLineKey(row.shopifyProductId, row.shopifyVariantId || undefined);
+          const key = makeSupplyLineKey(
+            row.shopifyProductId,
+            row.shopifyVariantId || undefined
+          );
           map[key] = row.netQuantity;
         }
         setSupplierNetBalances(map);
@@ -318,7 +345,9 @@ export default function NewSupplyClient({
     if (!sessionPayload) return;
 
     setCurrentSupplierId(sessionPayload.currentSupplierId || currentSupplierId);
-    setCurrentSupplierName(sessionPayload.currentSupplierName || currentSupplierName);
+    setCurrentSupplierName(
+      sessionPayload.currentSupplierName || currentSupplierName
+    );
     setCurrentDate(sessionPayload.currentDate || currentDate);
 
     let cancelled = false;
@@ -360,16 +389,23 @@ export default function NewSupplyClient({
     }
     let cancelled = false;
     setInitialLoading(true);
-    Promise.all([fetchSupplyById(Number(supplyId)), fetchProductsWithSuppliers()])
+    Promise.all([
+      fetchSupplyById(Number(supplyId)),
+      fetchProductsWithSuppliers(),
+    ])
       .then(([supply, products]) => {
         if (cancelled) return;
-        const sessionPayload = restoreDraft ? peekDraftSessionAfterPicker(supplyId) : null;
+        const sessionPayload = restoreDraft
+          ? peekDraftSessionAfterPicker(supplyId)
+          : null;
         setProductCatalog(products);
         setCurrentSupplierId(String(supply.supplierId || ''));
         setCurrentSupplierName(supply.supplierName || '');
         setCurrentDate(supply.date || '');
 
-        const productMap = new Map(products.map((p) => [p.shopifyProductId, p]));
+        const productMap = new Map(
+          products.map((p) => [p.shopifyProductId, p])
+        );
         const supplierIdStr = String(supply.supplierId || '');
         const supplierNm = supply.supplierName || '';
         const dateStr = supply.date || '';
@@ -382,8 +418,12 @@ export default function NewSupplyClient({
         setBaselineSupplierName(supplierNm);
         setBaselineDate(dateStr);
         if (sessionPayload) {
-          setCurrentSupplierId(sessionPayload.currentSupplierId || supplierIdStr);
-          setCurrentSupplierName(sessionPayload.currentSupplierName || supplierNm);
+          setCurrentSupplierId(
+            sessionPayload.currentSupplierId || supplierIdStr
+          );
+          setCurrentSupplierName(
+            sessionPayload.currentSupplierName || supplierNm
+          );
           setCurrentDate(sessionPayload.currentDate || dateStr);
         }
         // Prefer in-memory drafts over DB for the same productId so returning from the picker
@@ -392,7 +432,8 @@ export default function NewSupplyClient({
           const byId = new Map<string, SupplyProductDraft>();
           if (sessionPayload) {
             for (const row of dbDrafts) byId.set(row.lineKey, row);
-            for (const row of cloneDrafts(sessionPayload.productDrafts)) byId.set(row.lineKey, row);
+            for (const row of cloneDrafts(sessionPayload.productDrafts))
+              byId.set(row.lineKey, row);
             removeDraftSessionIfPresent(supplyId);
           } else {
             for (const row of dbDrafts) byId.set(row.lineKey, row);
@@ -402,7 +443,9 @@ export default function NewSupplyClient({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setSaveError(err instanceof Error ? err.message : 'Не ўдалося загрузіць пастаўку');
+          setSaveError(
+            err instanceof Error ? err.message : 'Не ўдалося загрузіць пастаўку'
+          );
         }
       })
       .finally(() => {
@@ -423,7 +466,9 @@ export default function NewSupplyClient({
     setAddingProductsLoading(true);
     const selectedKeys = new Set(selectedProductIds);
     const productIds = new Set(
-      selectedProductIds.map((key) => parseSupplyLineKey(key).productId).filter(Boolean)
+      selectedProductIds
+        .map((key) => parseSupplyLineKey(key).productId)
+        .filter(Boolean)
     );
     fetchProductsWithSuppliers()
       .then((rows) => {
@@ -442,7 +487,8 @@ export default function NewSupplyClient({
             );
             for (const line of lines) {
               const shouldAdd =
-                selectedKeys.has(line.lineKey) || selectedKeys.has(product.shopifyProductId);
+                selectedKeys.has(line.lineKey) ||
+                selectedKeys.has(product.shopifyProductId);
               if (shouldAdd && !prevMap.has(line.lineKey)) {
                 next.push(line);
                 prevMap.set(line.lineKey, line);
@@ -465,10 +511,17 @@ export default function NewSupplyClient({
 
   const updateDraftField = (
     lineKey: string,
-    field: 'quantity' | 'supplierPrice' | 'vatRatePercent' | 'marginPercent' | 'salePrice',
+    field:
+      | 'quantity'
+      | 'supplierPrice'
+      | 'vatRatePercent'
+      | 'marginPercent'
+      | 'salePrice',
     value: string
   ) => {
-    const selectedSupplier = suppliers.find((s) => String(s.id) === currentSupplierId);
+    const selectedSupplier = suppliers.find(
+      (s) => String(s.id) === currentSupplierId
+    );
     const isSupplierVatPayer = selectedSupplier?.isVatPayer ?? true;
 
     const recalcByMargin = (
@@ -479,14 +532,18 @@ export default function NewSupplyClient({
       const marginFactor = 1 - marginPct / 100;
       if (!isSupplierVatPayer) {
         const saleNet =
-          marginFactor > 0 ? round2(supplierPriceValue / marginFactor) : supplierPriceValue;
+          marginFactor > 0
+            ? round2(supplierPriceValue / marginFactor)
+            : supplierPriceValue;
         const saleGross = round2((saleNet * (100 + vatRatePercentValue)) / 100);
         const vatGrossPart = round2(saleGross - saleNet);
         return { saleGross, vatAmount: vatGrossPart, netSale: saleNet };
       }
 
       const saleGross =
-        marginFactor > 0 ? round2(supplierPriceValue / marginFactor) : supplierPriceValue;
+        marginFactor > 0
+          ? round2(supplierPriceValue / marginFactor)
+          : supplierPriceValue;
       const saleNet = round2((saleGross * 100) / (100 + vatRatePercentValue));
       const vatGrossPart = round2(saleGross - saleNet);
       return { saleGross, vatAmount: vatGrossPart, netSale: saleNet };
@@ -497,7 +554,6 @@ export default function NewSupplyClient({
       saleGross: number,
       vatRatePercentValue: number
     ): { marginPct: number; vatAmount: number; netSale: number } => {
-      const vatRate = vatRatePercentValue / 100;
       const saleNet = round2((saleGross * 100) / (100 + vatRatePercentValue));
       const vatGrossPart = round2(saleGross - saleNet);
       const marginPct = isSupplierVatPayer
@@ -528,33 +584,74 @@ export default function NewSupplyClient({
         const vatRatePercentValue = vatRatePercent ?? 23;
 
         // If user edits margin, auto-calc sale price (gross) from net margin logic.
-        if (field === 'marginPercent' && supplierPrice !== null && marginPercent !== null) {
-          const calculated = recalcByMargin(supplierPrice, marginPercent, vatRatePercentValue);
+        if (
+          field === 'marginPercent' &&
+          supplierPrice !== null &&
+          marginPercent !== null
+        ) {
+          const calculated = recalcByMargin(
+            supplierPrice,
+            marginPercent,
+            vatRatePercentValue
+          );
           next.salePrice = formatDecimal(calculated.saleGross);
         }
 
         // If user edits sale price (gross), auto-calc margin from net sale.
-        if (field === 'salePrice' && supplierPrice !== null && supplierPrice > 0 && salePrice !== null) {
-          const calculated = recalcByGross(supplierPrice, salePrice, vatRatePercentValue);
+        if (
+          field === 'salePrice' &&
+          supplierPrice !== null &&
+          supplierPrice > 0 &&
+          salePrice !== null
+        ) {
+          const calculated = recalcByGross(
+            supplierPrice,
+            salePrice,
+            vatRatePercentValue
+          );
           next.marginPercent = formatPercent(calculated.marginPct);
         }
 
         // If supplier net price changes, keep sale/margin synced.
-        if (field === 'supplierPrice' && supplierPrice !== null && supplierPrice > 0) {
+        if (
+          field === 'supplierPrice' &&
+          supplierPrice !== null &&
+          supplierPrice > 0
+        ) {
           if (marginPercent !== null) {
-            const calculated = recalcByMargin(supplierPrice, marginPercent, vatRatePercentValue);
+            const calculated = recalcByMargin(
+              supplierPrice,
+              marginPercent,
+              vatRatePercentValue
+            );
             next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const calculated = recalcByGross(supplierPrice, salePrice, vatRatePercentValue);
+            const calculated = recalcByGross(
+              supplierPrice,
+              salePrice,
+              vatRatePercentValue
+            );
             next.marginPercent = formatPercent(calculated.marginPct);
           }
         }
-        if (field === 'vatRatePercent' && supplierPrice !== null && supplierPrice > 0) {
+        if (
+          field === 'vatRatePercent' &&
+          supplierPrice !== null &&
+          supplierPrice > 0
+        ) {
           if (marginPercent !== null) {
-            const calculated = recalcByMargin(supplierPrice, marginPercent, vatRatePercentValue);
+            const calculated = recalcByMargin(
+              supplierPrice,
+              marginPercent,
+              vatRatePercentValue
+            );
             next.salePrice = formatDecimal(calculated.saleGross);
           } else if (salePrice !== null) {
-            const calculated = recalcByGross(supplierPrice, salePrice, vatRatePercentValue);
+            const calculated = recalcByGross(
+              supplierPrice,
+              salePrice,
+              vatRatePercentValue
+            );
             next.marginPercent = formatPercent(calculated.marginPct);
           }
         }
@@ -577,7 +674,9 @@ export default function NewSupplyClient({
       const next = prev.filter((row) => row.lineKey !== lineKey);
       const stillHasProduct = next.some((row) => row.productId === productId);
       if (!stillHasProduct) {
-        setSelectedProducts((sp) => sp.filter((row) => row.shopifyProductId !== productId));
+        setSelectedProducts((sp) =>
+          sp.filter((row) => row.shopifyProductId !== productId)
+        );
       }
       return next;
     });
@@ -619,7 +718,9 @@ export default function NewSupplyClient({
     setCurrentDate(baselineDate);
     setProductDrafts(cloneDrafts(baselineDrafts));
     const allowedProducts = new Set(baselineDrafts.map((r) => r.productId));
-    setSelectedProducts((prev) => prev.filter((p) => allowedProducts.has(p.shopifyProductId)));
+    setSelectedProducts((prev) =>
+      prev.filter((p) => allowedProducts.has(p.shopifyProductId))
+    );
   };
 
   const handleSave = async () => {
@@ -644,7 +745,9 @@ export default function NewSupplyClient({
       const vatRatePercent = Number(row.vatRatePercent);
       const salePrice = Number(row.salePrice);
       if (!Number.isFinite(quantity) || quantity === 0) {
-        setSaveError(`Праверце колькасць для "${displayDraftLabel(row)}" (не можа быць 0).`);
+        setSaveError(
+          `Праверце колькасць для "${displayDraftLabel(row)}" (не можа быць 0).`
+        );
         return;
       }
       if (quantity < 0 && !row.isReturnFinalized) {
@@ -663,15 +766,22 @@ export default function NewSupplyClient({
         }
       }
       if (!Number.isFinite(supplierPrice) || supplierPrice < 0) {
-        setSaveError(`Праверце цану пастаўшчыка для "${displayDraftLabel(row)}".`);
+        setSaveError(
+          `Праверце цану пастаўшчыка для "${displayDraftLabel(row)}".`
+        );
         return;
       }
       if (!Number.isFinite(marginPercent) || marginPercent < 0) {
         setSaveError(`Праверце "Маржа" для "${displayDraftLabel(row)}".`);
         return;
       }
-      if (!Number.isFinite(vatRatePercent) || !VAT_RATE_OPTIONS.includes(vatRatePercent as 5 | 23)) {
-        setSaveError(`Праверце "VAT %" для "${displayDraftLabel(row)}" (5% або 23%).`);
+      if (
+        !Number.isFinite(vatRatePercent) ||
+        !VAT_RATE_OPTIONS.includes(vatRatePercent as 5 | 23)
+      ) {
+        setSaveError(
+          `Праверце "VAT %" для "${displayDraftLabel(row)}" (5% або 23%).`
+        );
         return;
       }
       if (!Number.isFinite(salePrice) || salePrice < 0) {
@@ -736,11 +846,19 @@ export default function NewSupplyClient({
       } else if (supplyId) {
         try {
           const supply = await fetchSupplyById(Number(supplyId));
-          const productMap = new Map(productCatalog.map((p) => [p.shopifyProductId, p]));
-          const dbDrafts = supply.products.map((p) =>
-            createDraftRowFromSupplyProduct(p, productMap, normalizeVatRateOption)
+          const productMap = new Map(
+            productCatalog.map((p) => [p.shopifyProductId, p])
           );
-          const synced = cloneDrafts(dbDrafts.length > 0 ? dbDrafts : savedDrafts);
+          const dbDrafts = supply.products.map((p) =>
+            createDraftRowFromSupplyProduct(
+              p,
+              productMap,
+              normalizeVatRateOption
+            )
+          );
+          const synced = cloneDrafts(
+            dbDrafts.length > 0 ? dbDrafts : savedDrafts
+          );
           setProductDrafts(synced);
           setBaselineDrafts(synced);
         } catch {
@@ -772,7 +890,9 @@ export default function NewSupplyClient({
       setDeleteConfirmOpen(false);
       router.push('/supplies');
     } catch (err: unknown) {
-      setSaveError(err instanceof Error ? err.message : 'Памылка выдалення пастаўкі');
+      setSaveError(
+        err instanceof Error ? err.message : 'Памылка выдалення пастаўкі'
+      );
     } finally {
       setDeleting(false);
     }
@@ -792,7 +912,9 @@ export default function NewSupplyClient({
         prev.map((row) => {
           const live = productMap.get(row.productId);
           if (!live) return row;
-          const variantMatch = live.variants.find((v) => v.variantId === row.variantId);
+          const variantMatch = live.variants.find(
+            (v) => v.variantId === row.variantId
+          );
           return {
             ...row,
             productName: live.productName,
@@ -811,7 +933,9 @@ export default function NewSupplyClient({
 
       setSaveOk('Даныя па таварах абноўлены з Shopify.');
     } catch (err: unknown) {
-      setSaveError(err instanceof Error ? err.message : 'Памылка абнаўлення з Shopify');
+      setSaveError(
+        err instanceof Error ? err.message : 'Памылка абнаўлення з Shopify'
+      );
     } finally {
       setRefreshing(false);
     }
@@ -843,7 +967,9 @@ export default function NewSupplyClient({
       <div className="rounded-xl border border-gray-200 bg-white px-6 py-4 shadow-sm">
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1">
-            <span className="text-sm font-medium text-gray-900">Пастаўшчык</span>
+            <span className="text-sm font-medium text-gray-900">
+              Пастаўшчык
+            </span>
             <select
               value={currentSupplierId}
               onChange={(e) => {
@@ -862,13 +988,15 @@ export default function NewSupplyClient({
                 </option>
               ))}
               {currentSupplierId &&
-                !suppliers.some((supplier) => String(supplier.id) === currentSupplierId) && (
-                  <option value={currentSupplierId}>{supplierName}</option>
-                )}
+                !suppliers.some(
+                  (supplier) => String(supplier.id) === currentSupplierId
+                ) && <option value={currentSupplierId}>{supplierName}</option>}
             </select>
           </label>
           <label className="space-y-1">
-            <span className="text-sm font-medium text-gray-900">Дата пастаўкі</span>
+            <span className="text-sm font-medium text-gray-900">
+              Дата пастаўкі
+            </span>
             <input
               type="date"
               value={currentDate}
@@ -916,12 +1044,18 @@ export default function NewSupplyClient({
                 <th className="whitespace-nowrap px-4 py-3.5 w-14"></th>
                 <th className="whitespace-nowrap px-6 py-3.5">Назва</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Колькасць</th>
-                <th className="whitespace-nowrap px-4 py-3.5">Цана пастаўшчыка</th>
+                <th className="whitespace-nowrap px-4 py-3.5">
+                  Цана пастаўшчыка
+                </th>
                 <th className="whitespace-nowrap px-4 py-3.5">VAT %</th>
                 <th className="whitespace-nowrap px-4 py-3.5">Маржа</th>
                 <th className="whitespace-nowrap px-6 py-3.5">Цана продажу</th>
-                <th className="whitespace-nowrap px-4 py-3.5 text-center">Shopify</th>
-                <th className="whitespace-nowrap px-4 py-3.5 text-right">Дзеянні</th>
+                <th className="whitespace-nowrap px-4 py-3.5 text-center">
+                  Shopify
+                </th>
+                <th className="whitespace-nowrap px-4 py-3.5 text-right">
+                  Дзеянні
+                </th>
               </tr>
             </thead>
             <tbody className="bg-white">
@@ -934,20 +1068,32 @@ export default function NewSupplyClient({
               ) : productDrafts.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="px-6 py-16 text-center">
-                    <p className="text-sm font-medium text-gray-900">Тавары яшчэ не дададзеныя</p>
-                    <p className="mt-1 text-sm text-gray-500">Націсніце «+» пад датай пастаўкі, каб выбраць прадукты.</p>
+                    <p className="text-sm font-medium text-gray-900">
+                      Тавары яшчэ не дададзеныя
+                    </p>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Націсніце «+» пад датай пастаўкі, каб выбраць прадукты.
+                    </p>
                   </td>
                 </tr>
               ) : (
                 productDrafts.map((row) => {
                   const meta = productMetaMap.get(row.productId);
                   const hasCurrentSupplierName = supplierName.trim().length > 0;
-                  const otherSupplierPrices = (meta?.supplierPrices ?? []).filter((price) => {
-                    if (Number.isFinite(currentSupplierIdNum) && currentSupplierIdNum > 0) {
+                  const otherSupplierPrices = (
+                    meta?.supplierPrices ?? []
+                  ).filter((price) => {
+                    if (
+                      Number.isFinite(currentSupplierIdNum) &&
+                      currentSupplierIdNum > 0
+                    ) {
                       return price.supplierId !== currentSupplierIdNum;
                     }
                     if (hasCurrentSupplierName) {
-                      return price.supplierName.toLowerCase() !== supplierName.trim().toLowerCase();
+                      return (
+                        price.supplierName.toLowerCase() !==
+                        supplierName.trim().toLowerCase()
+                      );
                     }
                     return true;
                   });
@@ -958,187 +1104,236 @@ export default function NewSupplyClient({
                     : displayDraftLabel(row, author);
 
                   return (
-                  <tr
-                    key={row.lineKey}
-                    className={`border-b border-gray-100 last:border-b-0 ${
-                      hasOtherSupplierStock ? 'bg-purple-100/80' : ''
-                    }`}
-                  >
-                    <td className="px-4 py-3.5">
-                      {meta?.mainImageUrl ? (
-                        <a
-                          href={meta.mainImageUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex overflow-hidden rounded-md border border-gray-200 bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                          aria-label={`Адкрыць выяву: ${titleLabel}`}
-                        >
-                          <img
-                            src={meta.mainImageUrl}
-                            alt={row.productName}
-                            className="h-12 w-8 object-cover object-center"
-                            loading="lazy"
-                          />
-                        </a>
-                      ) : (
-                        <div className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100" aria-hidden />
-                      )}
-                    </td>
-                    <td className="px-6 py-3.5 text-gray-900">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          {hasOtherSupplierStock && (
-                            <span className="inline-flex rounded-full bg-purple-700 px-2 py-0.5 text-[11px] font-semibold text-white">
-                              Іншы пастаўшчык
-                            </span>
-                          )}
-                          <p>{titleLabel}</p>
-                        </div>
-                        {row.variantName.trim() && (
-                          <p className="text-xs text-gray-600">{row.variantName}</p>
-                        )}
-                        {hasOtherSupplierStock && (
-                          <div className="rounded-md border border-purple-300 bg-purple-100 px-2.5 py-1.5 text-xs text-purple-950">
-                            <p className="font-medium">Ёсць у іншых пастаўшчыкоў:</p>
-                            <ul className="mt-1 space-y-0.5">
-                              {otherSupplierPrices.map((price) => (
-                                <li key={`${row.productId}:${price.supplierId}`}>
-                                  {price.supplierName}: закуп. {formatMoney(price.supplierPrice)} / продаж{' '}
-                                  {formatMoney(price.salePrice)}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3.5">
-                      {(() => {
-                        const maxReturnable = getMaxReturnableQuantity(row.lineKey);
-                        const quantityValue = Number(row.quantity);
-                        const isReturn = Number.isFinite(quantityValue) && quantityValue < 0;
-                        const isFinalizedReturn = isReturn && row.isReturnFinalized;
-                        return (
-                          <div className="space-y-1">
-                            <input
-                              type="number"
-                              min={isFinalizedReturn ? undefined : maxReturnable > 0 ? -maxReturnable : 0}
-                              step="1"
-                              value={row.quantity}
-                              onChange={(e) =>
-                                updateDraftField(row.lineKey, 'quantity', readFieldValue(e))
-                              }
-                              title={
-                                isFinalizedReturn
-                                  ? 'Закрэпленае вяртанне — толькі для гісторыі'
-                                  : maxReturnable > 0
-                                    ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
-                                    : undefined
-                              }
-                              className={`w-24 rounded-lg border bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 ${
-                                isReturn
-                                  ? isFinalizedReturn
-                                    ? 'border-emerald-300 bg-emerald-50 ring-emerald-100'
-                                    : 'border-amber-300 ring-amber-100'
-                                  : 'border-gray-200'
-                              }`}
+                    <tr
+                      key={row.lineKey}
+                      className={`border-b border-gray-100 last:border-b-0 ${
+                        hasOtherSupplierStock ? 'bg-purple-100/80' : ''
+                      }`}
+                    >
+                      <td className="px-4 py-3.5">
+                        {meta?.mainImageUrl ? (
+                          <a
+                            href={meta.mainImageUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex overflow-hidden rounded-md border border-gray-200 bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                            aria-label={`Адкрыць выяву: ${titleLabel}`}
+                          >
+                            <img
+                              src={meta.mainImageUrl}
+                              alt={row.productName}
+                              className="h-12 w-8 object-cover object-center"
+                              loading="lazy"
                             />
-                            {isReturn && (
-                              <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
-                                <input
-                                  type="checkbox"
-                                  className="size-3.5 rounded border-gray-300 accent-primary focus:ring-primary"
-                                  checked={row.isReturnFinalized}
-                                  onChange={() => toggleReturnFinalized(row.lineKey)}
-                                />
-                                <span>Ужо вернута</span>
-                              </label>
+                          </a>
+                        ) : (
+                          <div
+                            className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100"
+                            aria-hidden
+                          />
+                        )}
+                      </td>
+                      <td className="px-6 py-3.5 text-gray-900">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            {hasOtherSupplierStock && (
+                              <span className="inline-flex rounded-full bg-purple-700 px-2 py-0.5 text-[11px] font-semibold text-white">
+                                Іншы пастаўшчык
+                              </span>
                             )}
-                            {!isFinalizedReturn && maxReturnable > 0 && (
-                              <p className="text-[11px] text-gray-500">Вяртанне: да −{maxReturnable}</p>
-                            )}
+                            <p>{titleLabel}</p>
                           </div>
-                        );
-                      })()}
-                    </td>
-                    <td className="px-4 py-3.5">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={row.supplierPrice}
-                        onChange={(e) =>
-                          updateDraftField(row.lineKey, 'supplierPrice', readFieldValue(e))
-                        }
-                        className="w-28 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-                      />
-                    </td>
-                    <td className="px-4 py-3.5">
-                      <select
-                        value={row.vatRatePercent}
-                        onChange={(e) =>
-                          updateDraftField(row.lineKey, 'vatRatePercent', readFieldValue(e))
-                        }
-                        className="w-24 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-                      >
-                        <option value="5">5%</option>
-                        <option value="23">23%</option>
-                      </select>
-                    </td>
-                    <td className="px-4 py-3.5">
-                      <div className="relative inline-flex w-24 items-center">
+                          {row.variantName.trim() && (
+                            <p className="text-xs text-gray-600">
+                              {row.variantName}
+                            </p>
+                          )}
+                          {hasOtherSupplierStock && (
+                            <div className="rounded-md border border-purple-300 bg-purple-100 px-2.5 py-1.5 text-xs text-purple-950">
+                              <p className="font-medium">
+                                Ёсць у іншых пастаўшчыкоў:
+                              </p>
+                              <ul className="mt-1 space-y-0.5">
+                                {otherSupplierPrices.map((price) => (
+                                  <li
+                                    key={`${row.productId}:${price.supplierId}`}
+                                  >
+                                    {price.supplierName}: закуп.{' '}
+                                    {formatMoney(price.supplierPrice)} / продаж{' '}
+                                    {formatMoney(price.salePrice)}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        {(() => {
+                          const maxReturnable = getMaxReturnableQuantity(
+                            row.lineKey
+                          );
+                          const quantityValue = Number(row.quantity);
+                          const isReturn =
+                            Number.isFinite(quantityValue) && quantityValue < 0;
+                          const isFinalizedReturn =
+                            isReturn && row.isReturnFinalized;
+                          return (
+                            <div className="space-y-1">
+                              <input
+                                type="number"
+                                min={
+                                  isFinalizedReturn
+                                    ? undefined
+                                    : maxReturnable > 0
+                                      ? -maxReturnable
+                                      : 0
+                                }
+                                step="1"
+                                value={row.quantity}
+                                onChange={(e) =>
+                                  updateDraftField(
+                                    row.lineKey,
+                                    'quantity',
+                                    readFieldValue(e)
+                                  )
+                                }
+                                title={
+                                  isFinalizedReturn
+                                    ? 'Закрэпленае вяртанне — толькі для гісторыі'
+                                    : maxReturnable > 0
+                                      ? `Можна ўвесці ад -${maxReturnable} (вяртанне пастаўшчыку)`
+                                      : undefined
+                                }
+                                className={`w-24 rounded-lg border bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 ${
+                                  isReturn
+                                    ? isFinalizedReturn
+                                      ? 'border-emerald-300 bg-emerald-50 ring-emerald-100'
+                                      : 'border-amber-300 ring-amber-100'
+                                    : 'border-gray-200'
+                                }`}
+                              />
+                              {isReturn && (
+                                <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                                  <input
+                                    type="checkbox"
+                                    className="size-3.5 rounded border-gray-300 accent-primary focus:ring-primary"
+                                    checked={row.isReturnFinalized}
+                                    onChange={() =>
+                                      toggleReturnFinalized(row.lineKey)
+                                    }
+                                  />
+                                  <span>Ужо вернута</span>
+                                </label>
+                              )}
+                              {!isFinalizedReturn && maxReturnable > 0 && (
+                                <p className="text-[11px] text-gray-500">
+                                  Вяртанне: да −{maxReturnable}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-4 py-3.5">
                         <input
                           type="number"
-                          step="1"
-                          value={row.marginPercent}
+                          min="0"
+                          step="0.01"
+                          value={row.supplierPrice}
                           onChange={(e) =>
-                            updateDraftField(row.lineKey, 'marginPercent', readFieldValue(e))
+                            updateDraftField(
+                              row.lineKey,
+                              'supplierPrice',
+                              readFieldValue(e)
+                            )
                           }
-                          className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-2.5 pr-7 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                          className="w-28 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
                         />
-                        <span
-                          className="pointer-events-none absolute right-2.5 text-sm text-gray-500"
-                          aria-hidden
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <select
+                          value={row.vatRatePercent}
+                          onChange={(e) =>
+                            updateDraftField(
+                              row.lineKey,
+                              'vatRatePercent',
+                              readFieldValue(e)
+                            )
+                          }
+                          className="w-24 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
                         >
-                          %
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-3.5">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={row.salePrice}
-                        onChange={(e) => updateDraftField(row.lineKey, 'salePrice', readFieldValue(e))}
-                        className="w-28 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-                      />
-                    </td>
-                    <td className="px-4 py-3.5 text-center">
-                      <label className="inline-flex items-center gap-2 text-xs text-gray-600">
+                          <option value="5">5%</option>
+                          <option value="23">23%</option>
+                        </select>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="relative inline-flex w-24 items-center">
+                          <input
+                            type="number"
+                            step="1"
+                            value={row.marginPercent}
+                            onChange={(e) =>
+                              updateDraftField(
+                                row.lineKey,
+                                'marginPercent',
+                                readFieldValue(e)
+                              )
+                            }
+                            className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-2.5 pr-7 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                          />
+                          <span
+                            className="pointer-events-none absolute right-2.5 text-sm text-gray-500"
+                            aria-hidden
+                          >
+                            %
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-3.5">
                         <input
-                          type="checkbox"
-                          className="size-4 rounded border-gray-300 accent-primary focus:ring-primary"
-                          checked={row.syncWithShopify}
-                          disabled={row.isReturnFinalized && Number(row.quantity) < 0}
-                          onChange={() => toggleSyncWithShopify(row.lineKey)}
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={row.salePrice}
+                          onChange={(e) =>
+                            updateDraftField(
+                              row.lineKey,
+                              'salePrice',
+                              readFieldValue(e)
+                            )
+                          }
+                          className="w-28 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
                         />
-                        <span>Абнаўляць</span>
-                      </label>
-                    </td>
-                    <td className="px-4 py-3.5 text-right">
-                      <button
-                        type="button"
-                        onClick={() => removeDraft(row.lineKey)}
-                        className="inline-flex size-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
-                        aria-label={`Выдаліць ${displayDraftLabel(row, author)}`}
-                        title="Выдаліць тавар з пастаўкі"
-                      >
-                        <FiX className="size-4" />
-                      </button>
-                    </td>
-                  </tr>
-                )})
+                      </td>
+                      <td className="px-4 py-3.5 text-center">
+                        <label className="inline-flex items-center gap-2 text-xs text-gray-600">
+                          <input
+                            type="checkbox"
+                            className="size-4 rounded border-gray-300 accent-primary focus:ring-primary"
+                            checked={row.syncWithShopify}
+                            disabled={
+                              row.isReturnFinalized && Number(row.quantity) < 0
+                            }
+                            onChange={() => toggleSyncWithShopify(row.lineKey)}
+                          />
+                          <span>Абнаўляць</span>
+                        </label>
+                      </td>
+                      <td className="px-4 py-3.5 text-right">
+                        <button
+                          type="button"
+                          onClick={() => removeDraft(row.lineKey)}
+                          className="inline-flex size-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
+                          aria-label={`Выдаліць ${displayDraftLabel(row, author)}`}
+                          title="Выдаліць тавар з пастаўкі"
+                        >
+                          <FiX className="size-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -1153,8 +1348,13 @@ export default function NewSupplyClient({
           aria-labelledby="delete-supply-title"
         >
           <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
-            <h2 id="delete-supply-title" className="text-lg font-semibold text-gray-900">
-              {deleteConfirmStep === 1 ? 'Выдаліць пастаўку?' : 'Апошняе пацвярджэнне'}
+            <h2
+              id="delete-supply-title"
+              className="text-lg font-semibold text-gray-900"
+            >
+              {deleteConfirmStep === 1
+                ? 'Выдаліць пастаўку?'
+                : 'Апошняе пацвярджэнне'}
             </h2>
             <p className="mt-3 text-sm text-gray-700">
               {deleteConfirmStep === 1

@@ -25,9 +25,12 @@ export default function AnalyticsClient() {
         <div className="mx-auto inline-flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
           <FiClock className="size-6" aria-hidden />
         </div>
-        <h2 className="mt-4 text-xl font-semibold text-gray-900">Раздзел яшчэ ў распрацоўцы</h2>
+        <h2 className="mt-4 text-xl font-semibold text-gray-900">
+          Раздзел яшчэ ў распрацоўцы
+        </h2>
         <p className="mt-2 text-sm text-gray-600">
-          Тут хутка з&apos;явіцца аналітыка. Пакуль функцыянальнасць недаступная.
+          Тут хутка з&apos;явіцца аналітыка. Пакуль функцыянальнасць
+          недаступная.
         </p>
       </div>
     </div>

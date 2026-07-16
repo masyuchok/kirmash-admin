@@ -35,11 +35,14 @@ export default function SuppliesClient() {
   const [supplierLoading, setSupplierLoading] = useState(false);
   const [supplierError, setSupplierError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const [dateSortDirection, setDateSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [dateSortDirection, setDateSortDirection] = useState<'asc' | 'desc'>(
+    'desc'
+  );
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deleteModalStep, setDeleteModalStep] = useState<1 | 2>(1);
-  const [supplyPendingDelete, setSupplyPendingDelete] = useState<SupplyListItem | null>(null);
+  const [supplyPendingDelete, setSupplyPendingDelete] =
+    useState<SupplyListItem | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -100,7 +103,9 @@ export default function SuppliesClient() {
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setSupplierError(err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў');
+          setSupplierError(
+            err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў'
+          );
         }
       })
       .finally(() => {
@@ -127,8 +132,8 @@ export default function SuppliesClient() {
   };
 
   const supplierFilters = useMemo(() => {
-    return Array.from(new Set(rows.map((row) => row.supplierName))).sort((a, b) =>
-      a.localeCompare(b, 'be')
+    return Array.from(new Set(rows.map((row) => row.supplierName))).sort(
+      (a, b) => a.localeCompare(b, 'be')
     );
   }, [rows]);
 
@@ -156,7 +161,9 @@ export default function SuppliesClient() {
 
   const toggleSupplierFilter = (name: string) => {
     setSelectedSuppliers((prev) =>
-      prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name]
+      prev.includes(name)
+        ? prev.filter((item) => item !== name)
+        : [...prev, name]
     );
   };
 
@@ -198,7 +205,9 @@ export default function SuppliesClient() {
       setRows((prev) => prev.filter((r) => r.id !== supplyPendingDelete.id));
       closeDeleteModal();
     } catch (err: unknown) {
-      setDeleteError(err instanceof Error ? err.message : 'Памылка выдалення пастаўкі');
+      setDeleteError(
+        err instanceof Error ? err.message : 'Памылка выдалення пастаўкі'
+      );
     } finally {
       setDeleteSubmitting(false);
     }
@@ -211,13 +220,17 @@ export default function SuppliesClient() {
   return (
     <div className="mx-auto w-full max-w-6xl space-y-6">
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {error}
+        </div>
       )}
 
       <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
         <SuppliesTable
           supplies={visibleRows}
-          filterActive={selectedSuppliers.length > 0 && visibleRows.length === 0}
+          filterActive={
+            selectedSuppliers.length > 0 && visibleRows.length === 0
+          }
           sortDirection={dateSortDirection}
           supplierFilters={supplierFilters}
           selectedSuppliers={selectedSuppliers}
@@ -238,13 +251,21 @@ export default function SuppliesClient() {
           aria-labelledby="delete-list-supply-title"
         >
           <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
-            <h2 id="delete-list-supply-title" className="text-lg font-semibold text-gray-900">
-              {deleteModalStep === 1 ? 'Выдаліць пастаўку?' : 'Апошняе пацвярджэнне'}
+            <h2
+              id="delete-list-supply-title"
+              className="text-lg font-semibold text-gray-900"
+            >
+              {deleteModalStep === 1
+                ? 'Выдаліць пастаўку?'
+                : 'Апошняе пацвярджэнне'}
             </h2>
             <p className="mt-3 text-sm text-gray-700">
               {deleteModalStep === 1 ? (
                 <>
-                  Пастаўшчык: <span className="font-medium">{supplyPendingDelete.supplierName}</span>
+                  Пастаўшчык:{' '}
+                  <span className="font-medium">
+                    {supplyPendingDelete.supplierName}
+                  </span>
                   <br />
                   Дата:{' '}
                   <span className="font-medium">
@@ -258,7 +279,9 @@ export default function SuppliesClient() {
                 'Вы сапраўды хочаце незваротна выдаліць гэтую пастаўку з табліцы?'
               )}
             </p>
-            {deleteError && <p className="mt-3 text-sm text-red-600">{deleteError}</p>}
+            {deleteError && (
+              <p className="mt-3 text-sm text-red-600">{deleteError}</p>
+            )}
             <div className="mt-6 flex flex-wrap justify-end gap-3">
               <button
                 type="button"
@@ -302,12 +325,18 @@ export default function SuppliesClient() {
           aria-labelledby="new-supply-title"
         >
           <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
-            <h2 id="new-supply-title" className="text-lg font-semibold text-gray-900">
+            <h2
+              id="new-supply-title"
+              className="text-lg font-semibold text-gray-900"
+            >
               Новая пастаўка
             </h2>
             <div className="mt-4 space-y-4">
               <div>
-                <label htmlFor="supplierId" className="mb-1 block text-sm font-medium text-gray-700">
+                <label
+                  htmlFor="supplierId"
+                  className="mb-1 block text-sm font-medium text-gray-700"
+                >
                   Пастаўшчык*
                 </label>
                 <select
@@ -326,7 +355,10 @@ export default function SuppliesClient() {
                 </select>
               </div>
               <div>
-                <label htmlFor="supplyDate" className="mb-1 block text-sm font-medium text-gray-700">
+                <label
+                  htmlFor="supplyDate"
+                  className="mb-1 block text-sm font-medium text-gray-700"
+                >
                   Дата пастаўкі*
                 </label>
                 <input
@@ -343,14 +375,24 @@ export default function SuppliesClient() {
                   Загрузка пастаўшчыкоў...
                 </div>
               )}
-              {supplierError && <p className="text-sm text-red-600">{supplierError}</p>}
-              {!supplierLoading && !supplierError && supplierOptions.length === 0 && (
-                <p className="text-sm text-gray-500">Спіс пастаўшчыкоў пакуль пусты.</p>
+              {supplierError && (
+                <p className="text-sm text-red-600">{supplierError}</p>
               )}
+              {!supplierLoading &&
+                !supplierError &&
+                supplierOptions.length === 0 && (
+                  <p className="text-sm text-gray-500">
+                    Спіс пастаўшчыкоў пакуль пусты.
+                  </p>
+                )}
               {formError && <p className="text-sm text-red-600">{formError}</p>}
             </div>
             <div className="mt-6 flex flex-wrap justify-end gap-3">
-              <button type="button" onClick={closeModal} className={btnSecondary}>
+              <button
+                type="button"
+                onClick={closeModal}
+                className={btnSecondary}
+              >
                 Cancel
               </button>
               <button

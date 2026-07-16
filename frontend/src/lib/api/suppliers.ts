@@ -10,9 +10,16 @@ import {
   mapApiDetailToFormValues,
   mapListSupplierToFormValues,
 } from '@/lib/suppliers/supplierFormTypes';
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 import { readBoolean, readInt, readNumber, readString } from '@/lib/api/json';
-import type { SupplierInventoryResult, SupplierInventoryRow } from '@/types/supplier-inventory';
+import type {
+  SupplierInventoryResult,
+  SupplierInventoryRow,
+} from '@/types/supplier-inventory';
 
 export type SupplierOption = {
   id: number;
@@ -24,8 +31,12 @@ function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
   return {
     supplierId: readInt(row.supplierId ?? row.SupplierId),
     supplierName: String(row.supplierName ?? row.SupplierName ?? ''),
-    shopifyProductId: String(row.shopifyProductId ?? row.ShopifyProductId ?? ''),
-    shopifyVariantId: String(row.shopifyVariantId ?? row.ShopifyVariantId ?? ''),
+    shopifyProductId: String(
+      row.shopifyProductId ?? row.ShopifyProductId ?? ''
+    ),
+    shopifyVariantId: String(
+      row.shopifyVariantId ?? row.ShopifyVariantId ?? ''
+    ),
     variantTitle: String(row.variantTitle ?? row.VariantTitle ?? ''),
     productName: String(row.productName ?? row.ProductName ?? ''),
     productAuthor: String(row.productAuthor ?? row.ProductAuthor ?? ''),
@@ -33,8 +44,13 @@ function mapInventoryRow(row: Record<string, unknown>): SupplierInventoryRow {
     supplierPrice: readNumber(row.supplierPrice ?? row.SupplierPrice),
     vatRatePercent: readNumber(row.vatRatePercent ?? row.VatRatePercent) || 23,
     grossUnitPrice: readNumber(row.grossUnitPrice ?? row.GrossUnitPrice),
-    supplierIsVatPayer: Boolean(row.supplierIsVatPayer ?? row.SupplierIsVatPayer),
+    supplierIsVatPayer: Boolean(
+      row.supplierIsVatPayer ?? row.SupplierIsVatPayer
+    ),
     hasPriceOverride: Boolean(row.hasPriceOverride ?? row.HasPriceOverride),
+    marginPercent: readNumber(row.marginPercent ?? row.MarginPercent),
+    salePrice: readNumber(row.salePrice ?? row.SalePrice),
+    shopifyPrice: readNumber(row.shopifyPrice ?? row.ShopifyPrice),
     receivedQuantity: readInt(row.receivedQuantity ?? row.ReceivedQuantity),
     quantityInStock: readInt(row.quantityInStock ?? row.QuantityInStock),
     soldQuantity: readInt(row.soldQuantity ?? row.SoldQuantity),
@@ -63,13 +79,18 @@ export async function fetchSupplierInventory(
     throw new Error('Сесія скончана. Перазайдзіце праз Shopify.');
   }
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць інвентарызацыю');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць інвентарызацыю'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as unknown;
   if (Array.isArray(data)) {
     return {
-      rows: data.map((item) => mapInventoryRow(item as Record<string, unknown>)),
+      rows: data.map((item) =>
+        mapInventoryRow(item as Record<string, unknown>)
+      ),
       salesSyncedAtUtc: null,
     };
   }
@@ -79,9 +100,10 @@ export async function fetchSupplierInventory(
     rows: Array.isArray(rowsRaw)
       ? rowsRaw.map((item) => mapInventoryRow(item as Record<string, unknown>))
       : [],
-    salesSyncedAtUtc: (payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
-      ? String(payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
-      : null,
+    salesSyncedAtUtc:
+      (payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
+        ? String(payload.salesSyncedAtUtc ?? payload.SalesSyncedAtUtc)
+        : null,
   };
 }
 
@@ -91,6 +113,9 @@ export async function updateSupplierInventoryPricing(payload: {
   shopifyVariantId: string;
   netUnitPrice: number;
   vatRatePercent: number;
+  marginPercent: number;
+  salePrice: number;
+  syncWithShopify: boolean;
 }): Promise<SupplierInventoryRow> {
   const res = await fetch(`${getApiBaseUrl()}/suppliers/inventory/pricing`, {
     method: 'PATCH',
@@ -102,6 +127,9 @@ export async function updateSupplierInventoryPricing(payload: {
       shopifyVariantId: payload.shopifyVariantId,
       netUnitPrice: payload.netUnitPrice,
       vatRatePercent: payload.vatRatePercent,
+      marginPercent: payload.marginPercent,
+      salePrice: payload.salePrice,
+      syncWithShopify: payload.syncWithShopify,
     }),
   });
   if (!res.ok) {
@@ -126,10 +154,17 @@ export async function refreshSupplierInventorySales(): Promise<string | null> {
   return synced ? String(synced) : null;
 }
 
-export async function fetchSuppliers(): Promise<import('@/types/supplier').Supplier[]> {
-  const res = await fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials });
+export async function fetchSuppliers(): Promise<
+  import('@/types/supplier').Supplier[]
+> {
+  const res = await fetch(`${getApiBaseUrl()}/suppliers`, {
+    credentials: apiCredentials,
+  });
   if (!res.ok) {
-    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць пастаўшчыкоў');
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося загрузіць пастаўшчыкоў'
+    );
     throw new Error(msg);
   }
   const data = (await res.json()) as unknown;
@@ -140,15 +175,14 @@ export async function fetchSuppliers(): Promise<import('@/types/supplier').Suppl
       id: readInt(row.id ?? row.Id),
       name: readString(row.name ?? row.Name),
       telegram: readString(
-        row.telegram ??
-          row.tgContact ??
-          row.tGContact ??
-          row.TGContact
+        row.telegram ?? row.tgContact ?? row.tGContact ?? row.TGContact
       ),
       website: readString(row.website ?? row.Website),
       country: readString(row.country ?? row.Country),
       city: readString(row.city ?? row.City),
-      isVatPayer: readBoolean(row.isVATPayer ?? row.isVatPayer ?? row.IsVATPayer ?? row.IsVatPayer),
+      isVatPayer: readBoolean(
+        row.isVATPayer ?? row.isVatPayer ?? row.IsVATPayer ?? row.IsVatPayer
+      ),
     };
   });
 }
@@ -207,7 +241,9 @@ export async function updateSupplier(
 /**
  * Load one supplier for editing. Falls back to list fetch + merge if GET by id fails (optional UX).
  */
-export async function fetchSupplierById(id: number): Promise<SupplierFormValues> {
+export async function fetchSupplierById(
+  id: number
+): Promise<SupplierFormValues> {
   const res = await fetch(`${getApiBaseUrl()}/suppliers/${id}`, {
     credentials: apiCredentials,
   });
@@ -217,9 +253,14 @@ export async function fetchSupplierById(id: number): Promise<SupplierFormValues>
   }
 
   // Fallback: use list endpoint and pick row (works before dedicated GET exists).
-  const listRes = await fetch(`${getApiBaseUrl()}/suppliers`, { credentials: apiCredentials });
+  const listRes = await fetch(`${getApiBaseUrl()}/suppliers`, {
+    credentials: apiCredentials,
+  });
   if (!listRes.ok) {
-    const msg = await readErrorMessage(listRes, 'Не ўдалося загрузіць пастаўшчыка');
+    const msg = await readErrorMessage(
+      listRes,
+      'Не ўдалося загрузіць пастаўшчыка'
+    );
     throw new Error(msg);
   }
   const list = (await listRes.json()) as Supplier[];

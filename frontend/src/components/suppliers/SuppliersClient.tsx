@@ -26,7 +26,9 @@ const SuppliersClient = () => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(null);
+  const [inventorySupplierId, setInventorySupplierId] = useState<number | null>(
+    null
+  );
   const [inventorySupplierName, setInventorySupplierName] = useState('');
 
   const reloadSuppliers = useCallback(async () => {
@@ -55,7 +57,9 @@ const SuppliersClient = () => {
       case ViewMode.Inventory:
         setTopbarPage({
           title: 'Інвентарызацыя',
-          subtitle: inventorySupplierName ? inventorySupplierName : 'Усе пастаўшчыкі',
+          subtitle: inventorySupplierName
+            ? inventorySupplierName
+            : 'Усе пастаўшчыкі',
         });
         setTopbarButtons([]);
         return clear;
@@ -115,7 +119,9 @@ const SuppliersClient = () => {
     reloadSuppliers()
       .catch((err: unknown) => {
         if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў');
+        setLoadError(
+          err instanceof Error ? err.message : 'Памылка загрузкі пастаўшчыкоў'
+        );
         setSuppliers([]);
       })
       .finally(() => {

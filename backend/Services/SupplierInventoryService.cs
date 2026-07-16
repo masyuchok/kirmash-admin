@@ -11,6 +11,8 @@ namespace backend.Services
         private readonly ShopifyVariantLookupService _variantLookup;
         private readonly InventorySalesCacheService _salesCacheService;
         private readonly ProductLedgerService _ledger;
+        private readonly ShopifyInventoryService _shopifyInventory;
+        private readonly IHttpContextAccessor _httpContextAccessor;
         private Dictionary<int, Dictionary<string, int>>? _allSupplierSoldByLineKeyCache;
         private Dictionary<string, int>? _totalSoldByLineKeyCache;
 
@@ -18,12 +20,16 @@ namespace backend.Services
             AppDbContext db,
             ShopifyVariantLookupService variantLookup,
             InventorySalesCacheService salesCacheService,
-            ProductLedgerService ledger )
+            ProductLedgerService ledger,
+            ShopifyInventoryService shopifyInventory,
+            IHttpContextAccessor httpContextAccessor )
         {
             _db = db;
             _variantLookup = variantLookup;
             _salesCacheService = salesCacheService;
             _ledger = ledger;
+            _shopifyInventory = shopifyInventory;
+            _httpContextAccessor = httpContextAccessor;
         }
 
         public void InvalidateSoldAllocationCaches()
@@ -111,6 +117,12 @@ namespace backend.Services
             Dictionary<InventoryLineKey, decimal> latestVatRatePercent = supplyBatches
                 .GroupBy( x => x.LineKey )
                 .ToDictionary( g => g.Key, g => ResolveLatestSupplyVatRatePercent( g ) );
+            Dictionary<InventoryLineKey, decimal> latestMarginPercent = supplyBatches
+                .GroupBy( x => x.LineKey )
+                .ToDictionary( g => g.Key, g => ResolveLatestMarginPercent( g ) );
+            Dictionary<InventoryLineKey, decimal> latestSalePrice = supplyBatches
+                .GroupBy( x => x.LineKey )
+                .ToDictionary( g => g.Key, g => ResolveLatestSalePrice( g ) );
             Dictionary<InventoryLineKey, int> receivedBySupplierLine = supplyBatches
                 .GroupBy( x => x.LineKey )
                 .ToDictionary( g => g.Key, g => g.Sum( x => x.Quantity ) );
@@ -145,6 +157,8 @@ namespace backend.Services
             Dictionary<InventoryLineKey, PriceOverrideRow> priceOverrides =
                 await LoadPriceOverridesAsync( supplierId );
 
+            Dictionary<string, decimal> shopifyPrices = await TryLoadShopifyPricesAsync( keys );
+
             List<SupplierInventoryRow> rows = keys
                 .Where( key => !supplierId.HasValue || key.SupplierId == supplierId.Value )
                 .Select( key =>
@@ -154,6 +168,8 @@ namespace backend.Services
                     productTypes.TryGetValue( key.ProductId, out string? productType );
                     latestSupplierPrice.TryGetValue( key, out decimal supplyUnitPrice );
                     latestVatRatePercent.TryGetValue( key, out decimal supplyVatRatePercent );
+                    latestMarginPercent.TryGetValue( key, out decimal supplyMarginPercent );
+                    latestSalePrice.TryGetValue( key, out decimal supplySalePrice );
                     bool useProductTotals =
                         VariantLegacyDefaults.GetNamedVariantCount( key.ProductId, variantIdByTitle ) <= 1;
                     if (useProductTotals && supplyUnitPrice <= 0m)
@@ -172,6 +188,20 @@ namespace backend.Services
                                     batch.ShopifyProductId,
                                     key.ProductId,
                                     StringComparison.OrdinalIgnoreCase ) ) );
+                        supplyMarginPercent = ResolveLatestMarginPercent(
+                            supplyBatches.Where( batch =>
+                                batch.SupplierId == key.SupplierId &&
+                                string.Equals(
+                                    batch.ShopifyProductId,
+                                    key.ProductId,
+                                    StringComparison.OrdinalIgnoreCase ) ) );
+                        supplySalePrice = ResolveLatestSalePrice(
+                            supplyBatches.Where( batch =>
+                                batch.SupplierId == key.SupplierId &&
+                                string.Equals(
+                                    batch.ShopifyProductId,
+                                    key.ProductId,
+                                    StringComparison.OrdinalIgnoreCase ) ) );
                     }
                     int soldQuantity = useProductTotals
                         ? SumQuantityForSupplierProduct( soldBySupplierLine, key )
@@ -180,17 +210,27 @@ namespace backend.Services
                         ? SumQuantityForSupplierProduct( paidBySupplierLine, key )
                         : paidBySupplierLine.GetValueOrDefault( key );
                     receivedBySupplierLine.TryGetValue( key, out int receivedQuantity );
-                    stockByLine.TryGetValue( (key.ProductId, key.VariantId), out int quantityInStock );
+                    int quantityInStock = ResolveQuantityInStock(
+                        key.ProductId,
+                        key.VariantId,
+                        useProductTotals,
+                        stockByLine,
+                        defaultVariantByProduct );
                     variantTitles.TryGetValue( (key.ProductId, key.VariantId), out string? variantTitle );
                     supplierNames.TryGetValue( key.SupplierId, out string? supplierName );
                     bool isVatPayer = supplierIsVatPayer.GetValueOrDefault( key.SupplierId );
-                    (decimal netUnitPrice, decimal vatRatePercent, decimal grossUnitPrice, bool hasPriceOverride) =
+                    (decimal netUnitPrice, decimal vatRatePercent, decimal grossUnitPrice, decimal marginPercent, decimal salePrice, bool hasPriceOverride) =
                         ResolvePricing(
                             key,
                             supplyUnitPrice,
                             supplyVatRatePercent,
+                            supplyMarginPercent,
+                            supplySalePrice,
                             isVatPayer,
                             priceOverrides );
+                    shopifyPrices.TryGetValue(
+                        BuildShopifyPriceKey( key.ProductId, key.VariantId ),
+                        out decimal shopifyPrice );
 
                     int quantityToPay = ComputeQuantityToPay(
                         key,
@@ -217,6 +257,9 @@ namespace backend.Services
                         GrossUnitPrice = grossUnitPrice,
                         SupplierIsVatPayer = isVatPayer,
                         HasPriceOverride = hasPriceOverride,
+                        MarginPercent = marginPercent,
+                        SalePrice = salePrice,
+                        ShopifyPrice = shopifyPrice,
                         ReceivedQuantity = receivedQuantity,
                         QuantityInStock = quantityInStock,
                         SoldQuantity = soldQuantity,
@@ -353,6 +396,27 @@ namespace backend.Services
             return sold;
         }
 
+        public async Task<Dictionary<string, (decimal GrossUnitPrice, decimal VatRatePercent)>> GetExpenseCatalogPricingAsync( int supplierId )
+        {
+            if (supplierId <= 0)
+            {
+                return new Dictionary<string, (decimal GrossUnitPrice, decimal VatRatePercent)>( StringComparer.OrdinalIgnoreCase );
+            }
+
+            SupplierInventoryResponse inventory = await GetInventoryAsync( supplierId );
+            Dictionary<string, (decimal GrossUnitPrice, decimal VatRatePercent)> result =
+                new( StringComparer.OrdinalIgnoreCase );
+            foreach (SupplierInventoryRow row in inventory.Rows)
+            {
+                string lineKey = string.IsNullOrWhiteSpace( row.ShopifyVariantId )
+                    ? row.ShopifyProductId
+                    : $"{row.ShopifyProductId}::{row.ShopifyVariantId}";
+                result[lineKey] = (row.GrossUnitPrice, row.VatRatePercent);
+            }
+
+            return result;
+        }
+
         public async Task<SupplierInventoryRow> UpdatePricingAsync( SupplierInventoryPricingUpdateRequest request )
         {
             if (request.SupplierId <= 0)
@@ -367,9 +431,9 @@ namespace backend.Services
             }
 
             string variantId = NormalizeVariantId( request.ShopifyVariantId );
-            if (request.NetUnitPrice < 0m)
+            if (request.NetUnitPrice < 0m || request.SalePrice < 0m || request.MarginPercent < 0m)
             {
-                throw new InvalidOperationException( "Кошт нета не можа быць адмоўным." );
+                throw new InvalidOperationException( "Цены не могуць быць адмоўнымі." );
             }
 
             Supplier? supplier = await _db.Suppliers
@@ -380,10 +444,10 @@ namespace backend.Services
                 throw new InvalidOperationException( "Пастаўшчык не знойдзены." );
             }
 
-            decimal vatRatePercent = supplier.isVATPayer
-                ? Math.Clamp( request.VatRatePercent, 0m, 100m )
-                : 0m;
+            decimal vatRatePercent = NormalizeCatalogVatRate( request.VatRatePercent );
             decimal netUnitPrice = Round2( request.NetUnitPrice );
+            decimal marginPercent = Round2( request.MarginPercent );
+            decimal salePrice = Round2( request.SalePrice );
             decimal grossUnitPrice = CalcGrossUnitPrice( netUnitPrice, vatRatePercent, supplier.isVATPayer );
 
             SupplierInventoryPriceOverride? existing = await _db.SupplierInventoryPriceOverrides
@@ -404,9 +468,34 @@ namespace backend.Services
 
             existing.NetUnitPrice = netUnitPrice;
             existing.VatRatePercent = vatRatePercent;
+            existing.MarginPercent = marginPercent;
+            existing.SalePrice = salePrice;
             existing.UpdatedAtUtc = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
+            string? syncWarning = null;
+            if (request.SyncWithShopify && salePrice > 0m)
+            {
+                if (ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
+                {
+                    try
+                    {
+                        await _shopifyInventory.SetVariantPriceByProductKeyAsync(
+                            session.Shop,
+                            session.AccessToken,
+                            productId,
+                            salePrice );
+                    }
+                    catch (Exception ex)
+                    {
+                        syncWarning = ex.Message;
+                    }
+                }
+                else
+                {
+                    syncWarning = "Няма Shopify-кантэксту для абнаўлення цаны.";
+                }
+            }
 
             IReadOnlyDictionary<(string ProductId, string VariantId), string> variantTitles =
                 await TryLoadVariantTitlesAsync();
@@ -418,7 +507,17 @@ namespace backend.Services
             productTypes.TryGetValue( productId, out string? productType );
             variantTitles.TryGetValue( (productId, variantId), out string? variantTitle );
 
-            return new SupplierInventoryRow
+            decimal shopifyPrice = 0m;
+            if (ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession shopifySession ))
+            {
+                Dictionary<string, decimal> prices = await _shopifyInventory.GetVariantPricesByProductKeysAsync(
+                    shopifySession.Shop,
+                    shopifySession.AccessToken,
+                    [(productId, variantId)] );
+                prices.TryGetValue( BuildShopifyPriceKey( productId, variantId ), out shopifyPrice );
+            }
+
+            SupplierInventoryRow row = new()
             {
                 SupplierId = request.SupplierId,
                 SupplierName = supplier.Name ?? string.Empty,
@@ -434,8 +533,20 @@ namespace backend.Services
                 VatRatePercent = vatRatePercent,
                 GrossUnitPrice = grossUnitPrice,
                 SupplierIsVatPayer = supplier.isVATPayer,
-                HasPriceOverride = true
+                HasPriceOverride = true,
+                MarginPercent = marginPercent,
+                SalePrice = salePrice,
+                ShopifyPrice = request.SyncWithShopify && salePrice > 0m && syncWarning is null
+                    ? salePrice
+                    : shopifyPrice
             };
+
+            if (!string.IsNullOrWhiteSpace( syncWarning ))
+            {
+                throw new InvalidOperationException( syncWarning );
+            }
+
+            return row;
         }
 
         private async Task<Dictionary<InventoryLineKey, PriceOverrideRow>> LoadPriceOverridesAsync( int? supplierId )
@@ -449,7 +560,9 @@ namespace backend.Services
                     ShopifyProductId = row.ShopifyProductId,
                     ShopifyVariantId = row.ShopifyVariantId,
                     NetUnitPrice = row.NetUnitPrice,
-                    VatRatePercent = row.VatRatePercent
+                    VatRatePercent = row.VatRatePercent,
+                    MarginPercent = row.MarginPercent,
+                    SalePrice = row.SalePrice
                 } )
                 .ToListAsync();
 
@@ -462,42 +575,73 @@ namespace backend.Services
                 InventoryLineKeyComparer.Instance );
         }
 
-        private static (decimal NetUnitPrice, decimal VatRatePercent, decimal GrossUnitPrice, bool HasPriceOverride)
+        private async Task<Dictionary<string, decimal>> TryLoadShopifyPricesAsync( HashSet<InventoryLineKey> keys )
+        {
+            if (!ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ) || keys.Count == 0)
+            {
+                return new Dictionary<string, decimal>( StringComparer.OrdinalIgnoreCase );
+            }
+
+            try
+            {
+                return await _shopifyInventory.GetVariantPricesByProductKeysAsync(
+                    session.Shop,
+                    session.AccessToken,
+                    keys.Select( key => (key.ProductId, key.VariantId) ) );
+            }
+            catch
+            {
+                return new Dictionary<string, decimal>( StringComparer.OrdinalIgnoreCase );
+            }
+        }
+
+        private static string BuildShopifyPriceKey( string productId, string variantId ) =>
+            string.IsNullOrWhiteSpace( variantId ) ? productId : $"{productId}::{variantId}";
+
+        private static decimal NormalizeCatalogVatRate( decimal value ) =>
+            value <= 5.5m ? 5m : 23m;
+
+        private static (decimal NetUnitPrice, decimal VatRatePercent, decimal GrossUnitPrice, decimal MarginPercent, decimal SalePrice, bool HasPriceOverride)
             ResolvePricing(
                 InventoryLineKey key,
                 decimal supplyUnitPrice,
                 decimal supplyVatRatePercent,
+                decimal supplyMarginPercent,
+                decimal supplySalePrice,
                 bool supplierIsVatPayer,
                 IReadOnlyDictionary<InventoryLineKey, PriceOverrideRow> priceOverrides )
         {
             decimal netUnitPrice;
-            decimal vatRatePercent = supplierIsVatPayer ? supplyVatRatePercent : 0m;
+            decimal vatRatePercent;
+            decimal marginPercent;
+            decimal salePrice;
             bool hasPriceOverride = false;
 
             if (priceOverrides.TryGetValue( key, out PriceOverrideRow? priceOverride ))
             {
                 netUnitPrice = priceOverride.NetUnitPrice;
-                vatRatePercent = supplierIsVatPayer ? priceOverride.VatRatePercent : 0m;
+                vatRatePercent = NormalizeCatalogVatRate( priceOverride.VatRatePercent );
+                marginPercent = priceOverride.MarginPercent;
+                salePrice = priceOverride.SalePrice;
                 hasPriceOverride = true;
-            }
-            else if (supplierIsVatPayer)
-            {
-                // Supply form stores gross purchase price when the supplier is a VAT payer.
-                netUnitPrice = CalcNetUnitPriceFromGross( supplyUnitPrice, vatRatePercent );
             }
             else
             {
-                netUnitPrice = supplyUnitPrice;
-                vatRatePercent = 0m;
-            }
-
-            if (!supplierIsVatPayer)
-            {
-                vatRatePercent = 0m;
+                vatRatePercent = NormalizeCatalogVatRate( supplyVatRatePercent > 0m ? supplyVatRatePercent : 23m );
+                marginPercent = supplyMarginPercent;
+                salePrice = supplySalePrice;
+                if (supplierIsVatPayer)
+                {
+                    netUnitPrice = CalcNetUnitPriceFromGross( supplyUnitPrice, vatRatePercent );
+                }
+                else
+                {
+                    netUnitPrice = supplyUnitPrice;
+                }
             }
 
             decimal grossUnitPrice = CalcGrossUnitPrice( netUnitPrice, vatRatePercent, supplierIsVatPayer );
-            return (netUnitPrice, vatRatePercent, grossUnitPrice, hasPriceOverride);
+            return (netUnitPrice, vatRatePercent, grossUnitPrice, marginPercent, salePrice, hasPriceOverride);
         }
 
         private static decimal ResolveLatestNonZeroSupplyPrice( IEnumerable<SupplyBatch> batches )
@@ -535,6 +679,44 @@ namespace backend.Services
                 .OrderByDescending( batch => batch.SupplyDate )
                 .ThenByDescending( batch => batch.SupplyId )
                 .Select( batch => batch.VatRatePercent )
+                .FirstOrDefault();
+        }
+
+        private static decimal ResolveLatestMarginPercent( IEnumerable<SupplyBatch> batches )
+        {
+            SupplyBatch? latestWithPrice = batches
+                .Where( batch => batch.SupplierPrice > 0m )
+                .OrderByDescending( batch => batch.SupplyDate )
+                .ThenByDescending( batch => batch.SupplyId )
+                .FirstOrDefault();
+            if (latestWithPrice is not null)
+            {
+                return latestWithPrice.MarginPercent;
+            }
+
+            return batches
+                .OrderByDescending( batch => batch.SupplyDate )
+                .ThenByDescending( batch => batch.SupplyId )
+                .Select( batch => batch.MarginPercent )
+                .FirstOrDefault();
+        }
+
+        private static decimal ResolveLatestSalePrice( IEnumerable<SupplyBatch> batches )
+        {
+            SupplyBatch? latestWithPrice = batches
+                .Where( batch => batch.SalePrice > 0m )
+                .OrderByDescending( batch => batch.SupplyDate )
+                .ThenByDescending( batch => batch.SupplyId )
+                .FirstOrDefault();
+            if (latestWithPrice is not null)
+            {
+                return latestWithPrice.SalePrice;
+            }
+
+            return batches
+                .OrderByDescending( batch => batch.SupplyDate )
+                .ThenByDescending( batch => batch.SupplyId )
+                .Select( batch => batch.SalePrice )
                 .FirstOrDefault();
         }
 
@@ -591,7 +773,9 @@ namespace backend.Services
                         LineKey = new InventoryLineKey( sp.Supply.SupplierId, productId, variantId ),
                         Quantity = sp.Quantity,
                         SupplierPrice = sp.SupplierPrice,
-                        VatRatePercent = sp.VatRatePercent
+                        VatRatePercent = sp.VatRatePercent,
+                        MarginPercent = sp.MarginPercent,
+                        SalePrice = sp.SalePrice
                     };
                 } )
                 .ToList();
@@ -599,11 +783,6 @@ namespace backend.Services
 
         private async Task<IReadOnlyDictionary<(string ProductId, string VariantId), string>> TryLoadVariantTitlesAsync()
         {
-            if (!_variantLookup.IsCatalogCacheWarm)
-            {
-                return new Dictionary<(string ProductId, string VariantId), string>( ProductVariantKeyComparer.Instance );
-            }
-
             try
             {
                 return await _variantLookup.GetVariantTitleByLineMapCachedAsync();
@@ -616,11 +795,6 @@ namespace backend.Services
 
         private async Task<IReadOnlyDictionary<string, Dictionary<string, string>>> TryLoadVariantIdByTitleAsync()
         {
-            if (!_variantLookup.IsCatalogCacheWarm)
-            {
-                return new Dictionary<string, Dictionary<string, string>>( StringComparer.OrdinalIgnoreCase );
-            }
-
             try
             {
                 return await _variantLookup.GetVariantIdByProductTitleMapCachedAsync();
@@ -633,11 +807,6 @@ namespace backend.Services
 
         private async Task<IReadOnlyDictionary<(string ProductId, string VariantId), int>> TryLoadStockByLineAsync()
         {
-            if (!_variantLookup.IsCatalogCacheWarm)
-            {
-                return new Dictionary<(string ProductId, string VariantId), int>( ProductVariantKeyComparer.Instance );
-            }
-
             try
             {
                 return await _variantLookup.GetStockByLineMapCachedAsync();
@@ -1222,6 +1391,40 @@ namespace backend.Services
                 .ToDictionary( g => g.Key, g => g.Sum( x => x.Quantity ), InventoryLineKeyComparer.Instance );
         }
 
+        private static int ResolveQuantityInStock(
+            string productId,
+            string variantId,
+            bool useProductTotals,
+            IReadOnlyDictionary<(string ProductId, string VariantId), int> stockByLine,
+            IReadOnlyDictionary<string, string> defaultVariantByProduct )
+        {
+            if (stockByLine.TryGetValue( (productId, variantId), out int quantity ))
+            {
+                return quantity;
+            }
+
+            if (string.IsNullOrWhiteSpace( variantId ) &&
+                defaultVariantByProduct.TryGetValue( productId, out string? defaultVariantId ) &&
+                !string.IsNullOrWhiteSpace( defaultVariantId ) &&
+                stockByLine.TryGetValue( (productId, defaultVariantId), out quantity ))
+            {
+                return quantity;
+            }
+
+            if (useProductTotals)
+            {
+                int total = stockByLine
+                    .Where( entry => string.Equals( entry.Key.ProductId, productId, StringComparison.OrdinalIgnoreCase ) )
+                    .Sum( entry => entry.Value );
+                if (total > 0)
+                {
+                    return total;
+                }
+            }
+
+            return stockByLine.TryGetValue( (productId, string.Empty), out quantity ) ? quantity : 0;
+        }
+
         private static string NormalizeProductId( string raw )
         {
             if (string.IsNullOrWhiteSpace( raw )) return string.Empty;
@@ -1263,6 +1466,8 @@ namespace backend.Services
             public int Quantity { get; set; }
             public decimal SupplierPrice { get; set; }
             public decimal VatRatePercent { get; set; }
+            public decimal MarginPercent { get; set; }
+            public decimal SalePrice { get; set; }
         }
 
         private sealed class PaidProductRow
@@ -1281,6 +1486,8 @@ namespace backend.Services
             public string ShopifyVariantId { get; set; } = string.Empty;
             public decimal NetUnitPrice { get; set; }
             public decimal VatRatePercent { get; set; }
+            public decimal MarginPercent { get; set; }
+            public decimal SalePrice { get; set; }
         }
     }
 }

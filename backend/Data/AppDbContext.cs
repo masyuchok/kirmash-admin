@@ -361,6 +361,10 @@ namespace backend.Data
                     .HasPrecision( 18, 2 );
                 entity.Property( x => x.VatRatePercent )
                     .HasPrecision( 5, 2 );
+                entity.Property( x => x.MarginPercent )
+                    .HasPrecision( 5, 2 );
+                entity.Property( x => x.SalePrice )
+                    .HasPrecision( 18, 2 );
                 entity.Property( x => x.UpdatedAtUtc )
                     .IsRequired();
                 entity.HasIndex( x => new { x.SupplierId, x.ShopifyProductId, x.ShopifyVariantId } )

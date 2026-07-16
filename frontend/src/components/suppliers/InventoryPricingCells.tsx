@@ -1,104 +1,380 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   calcGrossUnitPrice,
   formatMoneyInput,
+  normalizeCatalogVatRate,
   parseMoneyInput,
   parsePercentInput,
+  recalcMarginBySaleGross,
+  recalcSaleByMargin,
+  resolveDisplaySalePrice,
+  roundPercent,
 } from '@/lib/suppliers/inventoryPricing';
 import { formatInventoryProductTitle } from '@/lib/suppliers/inventoryTree';
 import type { SupplierInventoryRow } from '@/types/supplier-inventory';
 
-type Props = {
-  row: SupplierInventoryRow;
-  disabled?: boolean;
-  onSave: (row: SupplierInventoryRow, values: { netUnitPrice: number; vatRatePercent: number }) => Promise<void>;
+export type InventoryPricingSaveValues = {
+  netUnitPrice: number;
+  vatRatePercent: number;
+  marginPercent: number;
+  salePrice: number;
+  syncWithShopify: boolean;
 };
 
-export default function InventoryPricingCells({ row, disabled = false, onSave }: Props) {
+type EditorContextValue = {
+  row: SupplierInventoryRow;
+  disabled: boolean;
+  saving: boolean;
+  hasChanges: boolean;
+  save: () => Promise<void>;
+  netInput: string;
+  setNetInput: (value: string) => void;
+  vatRate: 5 | 23;
+  applyVatChange: (next: 5 | 23) => void;
+  grossUnitPrice: number;
+  marginInput: string;
+  applyMarginChange: (value: string) => void;
+  marginPreview: { saleNet: number } | null;
+  parsedSale: number | null;
+  netUnitPrice: number;
+  saleInput: string;
+  applySaleChange: (value: string) => void;
+  recalcFromNetOrVat: () => void;
+};
+
+const EditorContext = createContext<EditorContextValue | null>(null);
+
+function useEditorContext(): EditorContextValue {
+  const ctx = useContext(EditorContext);
+  if (!ctx) {
+    throw new Error('InventoryPricingEditorProvider is required');
+  }
+  return ctx;
+}
+
+type ProviderProps = {
+  row: SupplierInventoryRow;
+  disabled?: boolean;
+  onSave: (
+    row: SupplierInventoryRow,
+    values: InventoryPricingSaveValues
+  ) => Promise<void>;
+  children: ReactNode;
+};
+
+export function InventoryPricingEditorProvider({
+  row,
+  disabled = false,
+  onSave,
+  children,
+}: ProviderProps) {
   const [netInput, setNetInput] = useState(formatMoneyInput(row.supplierPrice));
-  const [vatInput, setVatInput] = useState(String(row.vatRatePercent));
+  const [vatRate, setVatRate] = useState<5 | 23>(
+    normalizeCatalogVatRate(row.vatRatePercent)
+  );
+  const [marginInput, setMarginInput] = useState(
+    String(Math.round(row.marginPercent))
+  );
+  const [saleInput, setSaleInput] = useState(
+    formatMoneyInput(resolveDisplaySalePrice(row))
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setNetInput(formatMoneyInput(row.supplierPrice));
-    setVatInput(String(row.vatRatePercent));
-  }, [row.supplierPrice, row.vatRatePercent]);
+    setVatRate(normalizeCatalogVatRate(row.vatRatePercent));
+    setMarginInput(String(Math.round(row.marginPercent)));
+    setSaleInput(formatMoneyInput(resolveDisplaySalePrice(row)));
+  }, [
+    row.supplierPrice,
+    row.vatRatePercent,
+    row.marginPercent,
+    row.salePrice,
+    row.shopifyPrice,
+  ]);
+
+  const baselineSalePrice = resolveDisplaySalePrice(row);
 
   const parsedNet = parseMoneyInput(netInput);
-  const parsedVat = parsePercentInput(vatInput) ?? 0;
+  const parsedMargin = parsePercentInput(marginInput);
+  const parsedSale = parseMoneyInput(saleInput);
+  const netUnitPrice = parsedNet ?? row.supplierPrice;
   const grossUnitPrice = calcGrossUnitPrice(
-    parsedNet ?? row.supplierPrice,
-    row.supplierIsVatPayer ? parsedVat : 0,
+    netUnitPrice,
+    vatRate,
     row.supplierIsVatPayer
   );
+  const marginPreview =
+    parsedSale !== null && netUnitPrice > 0
+      ? recalcMarginBySaleGross(netUnitPrice, parsedSale, vatRate)
+      : parsedMargin !== null && netUnitPrice > 0
+        ? recalcSaleByMargin(netUnitPrice, parsedMargin, vatRate)
+        : null;
 
-  const commit = async () => {
+  const hasChanges = useMemo(() => {
+    const net = parseMoneyInput(netInput);
+    const margin = parsePercentInput(marginInput);
+    const sale = parseMoneyInput(saleInput);
+    if (net === null || margin === null || sale === null) return true;
+    return (
+      !roundEqual(net, row.supplierPrice) ||
+      normalizeCatalogVatRate(vatRate) !==
+        normalizeCatalogVatRate(row.vatRatePercent) ||
+      !roundEqual(margin, row.marginPercent) ||
+      !roundEqual(sale, baselineSalePrice)
+    );
+  }, [
+    netInput,
+    vatRate,
+    marginInput,
+    saleInput,
+    row.supplierPrice,
+    row.vatRatePercent,
+    row.marginPercent,
+    baselineSalePrice,
+  ]);
+
+  const recalcFromNetOrVat = useCallback(() => {
+    const net = parseMoneyInput(netInput) ?? row.supplierPrice;
+    const margin = parsePercentInput(marginInput);
+    const sale = parseMoneyInput(saleInput);
+    if (net <= 0) return;
+    if (margin !== null) {
+      const calculated = recalcSaleByMargin(net, margin, vatRate);
+      setSaleInput(formatMoneyInput(calculated.saleGross));
+    } else if (sale !== null) {
+      const calculated = recalcMarginBySaleGross(net, sale, vatRate);
+      setMarginInput(String(calculated.marginPercent));
+    }
+  }, [marginInput, netInput, row.supplierPrice, saleInput, vatRate]);
+
+  const applyMarginChange = useCallback(
+    (value: string) => {
+      setMarginInput(value);
+      const net = parseMoneyInput(netInput) ?? row.supplierPrice;
+      const margin = parsePercentInput(value);
+      if (net > 0 && margin !== null) {
+        const calculated = recalcSaleByMargin(net, margin, vatRate);
+        setSaleInput(formatMoneyInput(calculated.saleGross));
+      }
+    },
+    [netInput, row.supplierPrice, vatRate]
+  );
+
+  const applySaleChange = useCallback(
+    (value: string) => {
+      setSaleInput(value);
+      const net = parseMoneyInput(netInput) ?? row.supplierPrice;
+      const sale = parseMoneyInput(value);
+      if (net > 0 && sale !== null) {
+        const calculated = recalcMarginBySaleGross(net, sale, vatRate);
+        setMarginInput(String(calculated.marginPercent));
+      }
+    },
+    [netInput, row.supplierPrice, vatRate]
+  );
+
+  const applyVatChange = useCallback(
+    (next: 5 | 23) => {
+      setVatRate(next);
+      const net = parseMoneyInput(netInput) ?? row.supplierPrice;
+      const margin = parsePercentInput(marginInput);
+      if (net > 0 && margin !== null) {
+        const calculated = recalcSaleByMargin(net, margin, next);
+        setSaleInput(formatMoneyInput(calculated.saleGross));
+      }
+    },
+    [marginInput, netInput, row.supplierPrice]
+  );
+
+  const save = useCallback(async () => {
     if (disabled || saving) return;
-    const netUnitPrice = parseMoneyInput(netInput);
-    if (netUnitPrice === null || netUnitPrice < 0) {
+    const net = parseMoneyInput(netInput);
+    if (net === null || net < 0) {
       setNetInput(formatMoneyInput(row.supplierPrice));
       return;
     }
-    const vatRatePercent = row.supplierIsVatPayer
-      ? Math.min(100, Math.max(0, parsePercentInput(vatInput) ?? 0))
-      : 0;
-    const unchanged =
-      roundEqual(netUnitPrice, row.supplierPrice) && roundEqual(vatRatePercent, row.vatRatePercent);
-    if (unchanged) return;
+    const margin = Math.max(
+      0,
+      parsePercentInput(marginInput) ?? row.marginPercent
+    );
+    const sale = parseMoneyInput(saleInput);
+    if (sale === null || sale < 0) {
+      setSaleInput(formatMoneyInput(baselineSalePrice));
+      return;
+    }
+
+    const syncWithShopify = sale > 0 && !roundEqual(sale, row.shopifyPrice);
 
     setSaving(true);
     try {
-      await onSave(row, { netUnitPrice, vatRatePercent });
+      await onSave(row, {
+        netUnitPrice: net,
+        vatRatePercent: vatRate,
+        marginPercent: roundPercent(margin),
+        salePrice: sale,
+        syncWithShopify,
+      });
     } finally {
       setSaving(false);
     }
+  }, [
+    disabled,
+    marginInput,
+    netInput,
+    onSave,
+    row,
+    saleInput,
+    saving,
+    vatRate,
+    baselineSalePrice,
+  ]);
+
+  const value: EditorContextValue = {
+    row,
+    disabled,
+    saving,
+    hasChanges,
+    save,
+    netInput,
+    setNetInput,
+    vatRate,
+    applyVatChange,
+    grossUnitPrice,
+    marginInput,
+    applyMarginChange,
+    marginPreview,
+    parsedSale,
+    netUnitPrice,
+    saleInput,
+    applySaleChange,
+    recalcFromNetOrVat,
   };
 
-  const inputClass =
-    'w-full min-w-[5.5rem] rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-sm tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60';
+  return (
+    <EditorContext.Provider value={value}>{children}</EditorContext.Provider>
+  );
+}
+
+const inputClass =
+  'w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-sm tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60';
+
+export default function InventoryPricingCells() {
+  const {
+    row,
+    disabled,
+    saving,
+    netInput,
+    setNetInput,
+    vatRate,
+    applyVatChange,
+    grossUnitPrice,
+    marginInput,
+    applyMarginChange,
+    marginPreview,
+    parsedSale,
+    netUnitPrice,
+    saleInput,
+    applySaleChange,
+    recalcFromNetOrVat,
+  } = useEditorContext();
 
   return (
     <>
-      <td className="px-4 py-3 text-right">
+      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
         <input
           type="text"
           inputMode="decimal"
           value={netInput}
           disabled={disabled || saving}
           onChange={(e) => setNetInput(e.currentTarget.value)}
-          onBlur={() => void commit()}
-          className={inputClass}
+          onBlur={recalcFromNetOrVat}
+          className={`${inputClass} min-w-[5.5rem]`}
           aria-label={`Кошт нета: ${formatInventoryProductTitle(row)}`}
         />
         {row.hasPriceOverride && (
-          <div className="mt-1 text-[10px] uppercase tracking-wide text-primary">зменена</div>
-        )}
-      </td>
-      <td className="px-4 py-3 text-right">
-        {row.supplierIsVatPayer ? (
-          <div className="inline-flex items-center justify-end gap-1">
-            <input
-              type="text"
-              inputMode="decimal"
-              value={vatInput}
-              disabled={disabled || saving}
-              onChange={(e) => setVatInput(e.currentTarget.value)}
-              onBlur={() => void commit()}
-              className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-sm tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
-              aria-label={`ПДВ %: ${formatInventoryProductTitle(row)}`}
-            />
-            <span className="text-xs text-gray-500">%</span>
+          <div className="mt-1 text-[10px] uppercase tracking-wide text-primary">
+            зменена
           </div>
-        ) : (
-          <span className="text-sm text-gray-400">—</span>
         )}
       </td>
-      <td className="px-4 py-3 text-right text-sm font-medium tabular-nums text-gray-700">
+      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+        <select
+          value={vatRate}
+          disabled={disabled || saving}
+          onChange={(e) =>
+            applyVatChange(
+              normalizeCatalogVatRate(Number(e.currentTarget.value))
+            )
+          }
+          className="min-w-[4.5rem] rounded-md border border-gray-200 bg-white px-1.5 py-1 text-right text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
+          aria-label={`ПДВ %: ${formatInventoryProductTitle(row)}`}
+        >
+          <option value={5}>5%</option>
+          <option value={23}>23%</option>
+        </select>
+      </td>
+      <td className="whitespace-nowrap px-3 py-3 text-right align-top text-sm font-medium tabular-nums text-gray-700">
         {formatMoneyInput(grossUnitPrice)}
       </td>
+      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+        <div className="relative inline-flex min-w-[4.5rem] items-center">
+          <input
+            type="text"
+            inputMode="decimal"
+            value={marginInput}
+            disabled={disabled || saving}
+            onChange={(e) => applyMarginChange(e.currentTarget.value)}
+            className={`${inputClass} pr-5`}
+            aria-label={`Маржа: ${formatInventoryProductTitle(row)}`}
+          />
+          <span className="pointer-events-none absolute right-2 text-xs text-gray-500">
+            %
+          </span>
+        </div>
+        {marginPreview && parsedSale !== null && netUnitPrice > 0 && (
+          <div className="mt-1 text-[10px] tabular-nums text-gray-500">
+            нет {formatMoneyInput(marginPreview.saleNet - netUnitPrice)}
+          </div>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+        <input
+          type="text"
+          inputMode="decimal"
+          value={saleInput}
+          disabled={disabled || saving}
+          onChange={(e) => applySaleChange(e.currentTarget.value)}
+          className={`${inputClass} min-w-[5.5rem]`}
+          aria-label={`Цана продажу: ${formatInventoryProductTitle(row)}`}
+        />
+      </td>
     </>
+  );
+}
+
+export function InventoryPricingSaveButton() {
+  const { saving, hasChanges, save, disabled } = useEditorContext();
+
+  return (
+    <button
+      type="button"
+      disabled={disabled || saving || !hasChanges}
+      onClick={() => void save()}
+      className="inline-flex items-center justify-center rounded-lg border border-primary/30 bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {saving ? '…' : 'Захаваць'}
+    </button>
   );
 }
 

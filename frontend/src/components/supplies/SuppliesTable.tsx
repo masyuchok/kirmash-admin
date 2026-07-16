@@ -47,7 +47,9 @@ function parseYearMonth(date: string): { year: number; month: number } | null {
   return { year: parsed.getFullYear(), month: parsed.getMonth() + 1 };
 }
 
-function groupSuppliesByYearMonth(supplies: SupplyListItem[]): YearMonthGroup[] {
+function groupSuppliesByYearMonth(
+  supplies: SupplyListItem[]
+): YearMonthGroup[] {
   const byYear = new Map<number, Map<number, SupplyListItem[]>>();
 
   for (const row of supplies) {
@@ -73,13 +75,17 @@ function groupSuppliesByYearMonth(supplies: SupplyListItem[]): YearMonthGroup[] 
     }));
 }
 
-function sortRows(rows: SupplyListItem[], direction: 'asc' | 'desc'): SupplyListItem[] {
+function sortRows(
+  rows: SupplyListItem[],
+  direction: 'asc' | 'desc'
+): SupplyListItem[] {
   return [...rows].sort((a, b) => {
     const aTime = new Date(a.date).getTime();
     const bTime = new Date(b.date).getTime();
     const aValid = Number.isFinite(aTime);
     const bValid = Number.isFinite(bTime);
-    if (!aValid && !bValid) return a.supplierName.localeCompare(b.supplierName, 'be');
+    if (!aValid && !bValid)
+      return a.supplierName.localeCompare(b.supplierName, 'be');
     if (!aValid) return 1;
     if (!bValid) return -1;
     const byDate = direction === 'asc' ? aTime - bTime : bTime - aTime;
@@ -211,7 +217,9 @@ export default function SuppliesTable({
     return (
       <div className="px-6 py-16 text-center">
         <p className="text-sm font-medium text-gray-900">
-          {filterActive ? 'Няма паставак па выбраным фільтры' : 'Паставак пакуль няма'}
+          {filterActive
+            ? 'Няма паставак па выбраным фільтры'
+            : 'Паставак пакуль няма'}
         </p>
         <p className="mt-1 text-sm text-gray-500">
           {filterActive
@@ -265,9 +273,15 @@ export default function SuppliesTable({
                 aria-expanded={!yearClosed}
               >
                 {yearClosed ? (
-                  <FiChevronRight className="size-4 shrink-0 text-gray-600" aria-hidden />
+                  <FiChevronRight
+                    className="size-4 shrink-0 text-gray-600"
+                    aria-hidden
+                  />
                 ) : (
-                  <FiChevronDown className="size-4 shrink-0 text-gray-600" aria-hidden />
+                  <FiChevronDown
+                    className="size-4 shrink-0 text-gray-600"
+                    aria-hidden
+                  />
                 )}
                 <span className="rounded-md bg-gray-800 px-2.5 py-0.5 text-sm font-bold tracking-wide text-white">
                   {year}
@@ -297,11 +311,19 @@ export default function SuppliesTable({
                           aria-expanded={!monthClosed}
                         >
                           {monthClosed ? (
-                            <FiChevronRight className="size-3.5 shrink-0 text-primary/70" aria-hidden />
+                            <FiChevronRight
+                              className="size-3.5 shrink-0 text-primary/70"
+                              aria-hidden
+                            />
                           ) : (
-                            <FiChevronDown className="size-3.5 shrink-0 text-primary/70" aria-hidden />
+                            <FiChevronDown
+                              className="size-3.5 shrink-0 text-primary/70"
+                              aria-hidden
+                            />
                           )}
-                          <span className="text-sm font-semibold capitalize text-primary">{label}</span>
+                          <span className="text-sm font-semibold capitalize text-primary">
+                            {label}
+                          </span>
                           <span className="ml-auto text-xs font-medium tabular-nums text-primary/80">
                             {sortedRows.length} · {totalQty} шт.
                           </span>
@@ -314,8 +336,12 @@ export default function SuppliesTable({
                                 <tr className="border-b border-gray-200 bg-white text-xs font-semibold uppercase tracking-wide text-gray-500">
                                   <th className="px-4 py-2.5">Пастаўшчык</th>
                                   <th className="px-4 py-2.5">Дзень</th>
-                                  <th className="px-4 py-2.5 text-right tabular-nums">Тавары</th>
-                                  {onRequestDelete && <th className="w-14 px-2 py-2.5" />}
+                                  <th className="px-4 py-2.5 text-right tabular-nums">
+                                    Тавары
+                                  </th>
+                                  {onRequestDelete && (
+                                    <th className="w-14 px-2 py-2.5" />
+                                  )}
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-gray-100">
@@ -372,7 +398,10 @@ export default function SuppliesTable({
           <div
             ref={supplierMenuRef}
             className="fixed z-[70] w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
-            style={{ top: `${menuPosition.top}px`, left: `${menuPosition.left}px` }}
+            style={{
+              top: `${menuPosition.top}px`,
+              left: `${menuPosition.left}px`,
+            }}
           >
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
               Фільтр пастаўшчыкоў

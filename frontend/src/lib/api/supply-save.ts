@@ -1,4 +1,8 @@
-import { apiCredentials, getApiBaseUrl, readErrorMessage } from '@/lib/api/common';
+import {
+  apiCredentials,
+  getApiBaseUrl,
+  readErrorMessage,
+} from '@/lib/api/common';
 
 export type SupplyProductSavePayload = {
   shopifyProductId: string;
@@ -53,15 +57,21 @@ export async function saveSupply(payload: SaveSupplyPayload): Promise<{
   };
   const updates = Array.isArray(data.inventoryUpdates)
     ? data.inventoryUpdates.map((u) => ({
-        shopifyProductId: typeof u.shopifyProductId === 'string' ? u.shopifyProductId : '',
-        previousAvailable: typeof u.previousAvailable === 'number' ? u.previousAvailable : 0,
-        addedQuantity: typeof u.addedQuantity === 'number' ? u.addedQuantity : 0,
+        shopifyProductId:
+          typeof u.shopifyProductId === 'string' ? u.shopifyProductId : '',
+        previousAvailable:
+          typeof u.previousAvailable === 'number' ? u.previousAvailable : 0,
+        addedQuantity:
+          typeof u.addedQuantity === 'number' ? u.addedQuantity : 0,
         newAvailable: typeof u.newAvailable === 'number' ? u.newAvailable : 0,
       }))
     : [];
   return {
     id: typeof data.id === 'number' ? data.id : -1,
-    warning: typeof data.warning === 'string' && data.warning.trim() ? data.warning : null,
+    warning:
+      typeof data.warning === 'string' && data.warning.trim()
+        ? data.warning
+        : null,
     inventoryUpdates: updates,
   };
 }
