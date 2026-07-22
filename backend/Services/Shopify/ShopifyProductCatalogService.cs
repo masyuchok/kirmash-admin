@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using backend.Models;
@@ -124,6 +125,10 @@ public class ShopifyProductCatalogService
     private static ShopifyCatalogProduct? ParseProductNode( JsonElement node )
     {
         string productName = node.GetProperty( "title" ).GetString() ?? "—";
+        string handle = node.TryGetProperty( "handle", out JsonElement handleEl ) &&
+                        handleEl.ValueKind == JsonValueKind.String
+            ? (handleEl.GetString() ?? string.Empty).Trim()
+            : string.Empty;
         string productType = node.TryGetProperty( "productType", out JsonElement productTypeEl ) &&
                              productTypeEl.ValueKind == JsonValueKind.String
             ? (productTypeEl.GetString() ?? string.Empty)
@@ -131,6 +136,8 @@ public class ShopifyProductCatalogService
         List<ProductVariantItem> variants = new();
         string? mainImageUrl = null;
         int quantityInStock = 0;
+        decimal salePrice = 0m;
+        bool hasSalePrice = false;
 
         if (node.TryGetProperty( "totalInventory", out JsonElement totalInventoryEl ) &&
             totalInventoryEl.ValueKind == JsonValueKind.Number &&
@@ -155,6 +162,7 @@ public class ShopifyProductCatalogService
             string? defaultVariantId = null;
             string? defaultVariantBarcode = null;
             int defaultVariantQuantity = 0;
+            decimal? defaultVariantPrice = null;
 
             foreach (JsonElement edgeEl in variantEdgesEl.EnumerateArray())
             {
@@ -181,6 +189,7 @@ public class ShopifyProductCatalogService
                                       variantQtyEl.TryGetInt32( out int parsedVariantQty )
                     ? parsedVariantQty
                     : 0;
+                decimal? variantPrice = TryParseVariantPrice( variantNode );
 
                 if ((string.IsNullOrWhiteSpace( variantName ) || variantName == "Default Title") &&
                     variantNode.TryGetProperty( "selectedOptions", out JsonElement selectedOptionsEl ) &&
@@ -218,7 +227,14 @@ public class ShopifyProductCatalogService
                     }
 
                     defaultVariantQuantity = variantQuantity;
+                    defaultVariantPrice ??= variantPrice;
                     continue;
+                }
+
+                if (variantPrice is decimal priced && (!hasSalePrice || priced < salePrice))
+                {
+                    salePrice = priced;
+                    hasSalePrice = true;
                 }
 
                 variants.Add( new ProductVariantItem
@@ -232,6 +248,12 @@ public class ShopifyProductCatalogService
 
             if (variants.Count == 0 && !string.IsNullOrWhiteSpace( defaultVariantId ))
             {
+                if (defaultVariantPrice is decimal priced)
+                {
+                    salePrice = priced;
+                    hasSalePrice = true;
+                }
+
                 variants.Add( new ProductVariantItem
                 {
                     VariantId = defaultVariantId,
@@ -239,6 +261,11 @@ public class ShopifyProductCatalogService
                     Barcode = defaultVariantBarcode ?? string.Empty,
                     QuantityInStock = defaultVariantQuantity
                 } );
+            }
+            else if (!hasSalePrice && defaultVariantPrice is decimal fallbackPrice)
+            {
+                salePrice = fallbackPrice;
+                hasSalePrice = true;
             }
         }
 
@@ -272,13 +299,39 @@ public class ShopifyProductCatalogService
         {
             ProductId = productId,
             Title = productName,
+            Handle = handle,
             ProductType = productType,
             Author = author,
             Isbn = isbn,
             TotalInventory = quantityInStock,
+            SalePrice = salePrice,
             ImageUrl = string.IsNullOrWhiteSpace( mainImageUrl ) ? null : mainImageUrl,
             Variants = variants
         };
+    }
+
+    private static decimal? TryParseVariantPrice( JsonElement variantNode )
+    {
+        if (!variantNode.TryGetProperty( "price", out JsonElement priceEl ))
+        {
+            return null;
+        }
+
+        if (priceEl.ValueKind == JsonValueKind.Number && priceEl.TryGetDecimal( out decimal numeric ))
+        {
+            return numeric;
+        }
+
+        if (priceEl.ValueKind == JsonValueKind.String)
+        {
+            string? raw = priceEl.GetString();
+            if (decimal.TryParse( raw, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal parsed ))
+            {
+                return parsed;
+            }
+        }
+
+        return null;
     }
 
     private static string ParseIsbn( JsonElement node, IReadOnlyList<ProductVariantItem> variants )

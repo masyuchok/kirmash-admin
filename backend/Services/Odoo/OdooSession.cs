@@ -13,10 +13,14 @@ public static class OdooSessionReader
     {
         session = null!;
         System.Security.Claims.ClaimsPrincipal? user = httpContextAccessor.HttpContext?.User;
-        if (user is null || user.Identity?.IsAuthenticated != true)
-        {
-            return false;
-        }
+        return user is not null && TryGetFromPrincipal( user, out session );
+    }
+
+    public static bool TryGetFromPrincipal(
+        System.Security.Claims.ClaimsPrincipal user,
+        out OdooSession session )
+    {
+        session = null!;
 
         string? org = user.FindFirst( "org" )?.Value;
         if (!string.Equals( org, "bukinistka", StringComparison.OrdinalIgnoreCase ))

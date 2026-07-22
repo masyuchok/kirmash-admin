@@ -2,10 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FiClock, FiExternalLink, FiSearch, FiX } from 'react-icons/fi';
+import { FiClock, FiExternalLink, FiSearch, FiSend, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import ProductHistoryModal from '@/components/products/ProductHistoryModal';
+import ProposeToBukinistkaModal, {
+  type ProposeToBukinistkaDraft,
+} from '@/components/products/ProposeToBukinistkaModal';
+import { createKirmaBukinistkaOffer } from '@/lib/api/bukinistka-offers';
 import {
   fetchProductHistory,
   fetchProductsWithSuppliers,
@@ -35,6 +39,22 @@ type ProductHistoryTarget = {
 
 const isDefaultVariantTitle = (name: string) =>
   name.trim().toLowerCase() === 'default title';
+
+function defaultGrossUnitCost(row: ProductTableRow): number {
+  const prices = row.supplierPrices ?? [];
+  if (row.supplierId != null && row.supplierId > 0) {
+    const byId = prices.find((p) => p.supplierId === row.supplierId);
+    if (byId) return byId.supplierPrice;
+  }
+  const name = row.supplierName.trim();
+  if (name && name !== '—') {
+    const byName = prices.find(
+      (p) => p.supplierName.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (byName) return byName.supplierPrice;
+  }
+  return prices[0]?.supplierPrice ?? 0;
+}
 
 export default function ProductsClient() {
   const pageSize = 50;
@@ -74,6 +94,12 @@ export default function ProductsClient() {
   const [historySubtitle, setHistorySubtitle] = useState<string | undefined>(
     undefined
   );
+  const [proposeOpen, setProposeOpen] = useState(false);
+  const [proposeDraft, setProposeDraft] =
+    useState<ProposeToBukinistkaDraft | null>(null);
+  const [proposeRow, setProposeRow] = useState<ProductTableRow | null>(null);
+  const [proposeSubmitting, setProposeSubmitting] = useState(false);
+  const [proposeError, setProposeError] = useState<string | null>(null);
   const supplierTriggerRef = useRef<HTMLButtonElement | null>(null);
   const typeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const supplierMenuRef = useRef<HTMLDivElement | null>(null);
@@ -556,6 +582,63 @@ export default function ProductsClient() {
     }
   };
 
+  const closePropose = () => {
+    if (proposeSubmitting) return;
+    setProposeOpen(false);
+    setProposeDraft(null);
+    setProposeRow(null);
+    setProposeError(null);
+  };
+
+  const openPropose = (row: ProductTableRow) => {
+    if (row.quantityInStock <= 0) return;
+    const productLabel = row.isVariantChild
+      ? `${row.productName} · ${row.variantName}`
+      : row.productName;
+    setProposeRow(row);
+    setProposeDraft({
+      productLabel,
+      quantity: row.quantityInStock,
+      grossUnitCost: defaultGrossUnitCost(row),
+    });
+    setProposeError(null);
+    setProposeOpen(true);
+  };
+
+  const submitPropose = async (quantity: number, grossUnitCost: number) => {
+    if (!proposeRow) return;
+    setProposeSubmitting(true);
+    setProposeError(null);
+    try {
+      await createKirmaBukinistkaOffer({
+        shopifyProductId: proposeRow.shopifyProductId,
+        shopifyVariantId: proposeRow.shopifyVariantId || undefined,
+        productName: proposeRow.isVariantChild
+          ? `${proposeRow.productName} · ${proposeRow.variantName}`
+          : proposeRow.productName,
+        productAuthor: proposeRow.productAuthor,
+        mainImageUrl: proposeRow.mainImageUrl,
+        productAdminUrl: proposeRow.productAdminUrl,
+        supplierName:
+          proposeRow.supplierName.trim() && proposeRow.supplierName !== '—'
+            ? proposeRow.supplierName.trim()
+            : null,
+        quantity,
+        grossUnitCost,
+      });
+      setProposeOpen(false);
+      setProposeDraft(null);
+      setProposeRow(null);
+      setSuccess('Прапанова дасланая ў Букіністыку.');
+    } catch (err: unknown) {
+      setProposeError(
+        err instanceof Error ? err.message : 'Не ўдалося даслаць прапанову.'
+      );
+    } finally {
+      setProposeSubmitting(false);
+    }
+  };
+
   if (loading) {
     return <LoadingSpinner label="Загрузка прадуктаў..." />;
   }
@@ -868,18 +951,24 @@ export default function ProductsClient() {
                         <div className="inline-flex flex-wrap items-center justify-end gap-2">
                           <button
                             type="button"
+                            onClick={() => openPropose(row)}
+                            disabled={row.quantityInStock <= 0}
+                            className="inline-flex size-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:bg-white disabled:hover:text-gray-700"
+                            aria-label="Прапанаваць у Букіністыку"
+                            title="Прапанаваць у Букіністыку"
+                          >
+                            <FiSend className="size-3.5" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => {
                               void openHistory(row);
                             }}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                            className="inline-flex size-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
                             aria-label={`Гісторыя: ${row.isVariantChild ? row.variantName : row.productName}`}
                             title="Гісторыя прадукту"
                           >
-                            <FiClock
-                              className="size-3.5 shrink-0"
-                              aria-hidden
-                            />
-                            Гісторыя
+                            <FiClock className="size-3.5" aria-hidden />
                           </button>
                           {row.rowSource === 'supply' && row.supplierId ? (
                             <button
@@ -1014,6 +1103,16 @@ export default function ProductsClient() {
         history={historyData}
         subtitle={historySubtitle}
         onClose={closeHistory}
+      />
+      <ProposeToBukinistkaModal
+        open={proposeOpen}
+        draft={proposeDraft}
+        submitting={proposeSubmitting}
+        error={proposeError}
+        onClose={closePropose}
+        onSubmit={(quantity, grossUnitCost) => {
+          void submitPropose(quantity, grossUnitCost);
+        }}
       />
     </div>
   );

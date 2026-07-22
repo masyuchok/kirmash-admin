@@ -135,6 +135,7 @@ public static class ShopifyGraphqlQueries
                 id
                 legacyResourceId
                 title
+                handle
                 productType
                 vendor
                 tags
@@ -163,6 +164,7 @@ public static class ShopifyGraphqlQueries
                       id
                       title
                       barcode
+                      price
                       inventoryQuantity
                       selectedOptions {
                         name

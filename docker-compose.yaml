@@ -15,12 +15,17 @@ services:
       - Jwt__Secret=${JWT_SECRET}
       - Shopify__ApiKey=${SHOPIFY_API_KEY}
       - Shopify__ApiSecret=${SHOPIFY_API_SECRET}
+      - Shopify__Shop=${SHOPIFY_SHOP:-}
+      - Shopify__AccessToken=${SHOPIFY_ACCESS_TOKEN:-}
       - BaseUrl=${API_URL}
       - ClientUrl=${APP_URL}
       - Auth__CookieName=${AUTH_COOKIE_NAME}
       - Auth__BukinistkaCookieName=${BUKINISTKA_COOKIE_NAME}
       - Odoo__BaseUrl=${ODOO_BASE_URL}
       - Odoo__Database=${ODOO_DATABASE}
+      - Odoo__SyncLogin=${ODOO_SYNC_LOGIN:-}
+      - Odoo__SyncPassword=${ODOO_SYNC_PASSWORD:-}
+      - Odoo__PosSyncIntervalMinutes=${ODOO_POS_SYNC_INTERVAL_MINUTES:-10}
     depends_on:
       db:
         condition: service_healthy

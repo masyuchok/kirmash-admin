@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using backend.Data;
@@ -11,9 +12,11 @@ using backend.Data;
 namespace backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260720181321_DropShopifyShopCredentials")]
+    partial class DropShopifyShopCredentials
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -318,10 +321,6 @@ namespace backend.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
-                    b.Property<decimal?>("AcceptedListPrice")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
                     b.Property<decimal>("GrossUnitCost")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
@@ -329,12 +328,6 @@ namespace backend.Migrations
                     b.Property<string>("MainImageUrl")
                         .HasMaxLength(2048)
                         .HasColumnType("character varying(2048)");
-
-                    b.Property<int?>("OdooProductId")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("OdooQuantityBeforeAccept")
-                        .HasColumnType("integer");
 
                     b.Property<string>("ProductAdminUrl")
                         .IsRequired()
@@ -364,11 +357,6 @@ namespace backend.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
                     b.Property<string>("StorefrontUrl")
                         .IsRequired()
                         .HasMaxLength(2048)
@@ -383,110 +371,6 @@ namespace backend.Migrations
                     b.HasIndex("CreatedAtUtc");
 
                     b.ToTable("KirmaBukinistkaOffers");
-                });
-
-            modelBuilder.Entity("backend.Models.KirmaBukinistkaOdooOwnStockBuffer", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("OdooProductId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("OwnQtyRemaining")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OdooProductId")
-                        .IsUnique();
-
-                    b.ToTable("KirmaBukinistkaOdooOwnStockBuffers");
-                });
-
-            modelBuilder.Entity("backend.Models.KirmaBukinistkaPosSale", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsOwnStock")
-                        .HasColumnType("boolean");
-
-                    b.Property<int?>("OfferId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("OdooPosOrderId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("OdooPosOrderLineId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("OdooPosOrderName")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
-                    b.Property<int>("OdooProductId")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ProductName")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
-
-                    b.Property<int>("Quantity")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ShopifyProductId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("ShopifyVariantId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTime>("SoldAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("OdooProductId");
-
-                    b.HasIndex("SoldAtUtc");
-
-                    b.ToTable("KirmaBukinistkaPosSales");
-                });
-
-            modelBuilder.Entity("backend.Models.KirmaBukinistkaPosSyncState", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
-
-                    b.Property<int?>("LastProcessedOrderId")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime?>("LastSyncedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("KirmaBukinistkaPosSyncStates");
                 });
 
             modelBuilder.Entity("backend.Models.Product", b =>

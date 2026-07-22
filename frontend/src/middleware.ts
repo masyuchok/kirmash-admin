@@ -31,6 +31,15 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // Static files from /public (logos, icons) must stay reachable without auth.
+  if (
+    /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|css|js|map|txt)$/i.test(
+      pathname
+    )
+  ) {
+    return NextResponse.next();
+  }
+
   const kirmaCookie = getKirmaAuthCookieName();
   const bukinistkaCookie = getBukinistkaAuthCookieName();
   const kirmaToken = req.cookies.get(kirmaCookie)?.value;

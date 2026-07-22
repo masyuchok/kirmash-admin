@@ -41,12 +41,11 @@ export default function BukinistkaHomeClient() {
         </p>
       )}
       <p className="mt-3 text-sm leading-6 text-gray-600">
-        Гэта асобная панэль кіравання для Bukinistka. Тут з&apos;явяцца
-        інструменты для працы з агульным каталогам і захапамі праз Odoo API.
+        Гэта асобная панэль кіравання для Bukinistka. У раздзеле «Прадукты»
+        можна глядзець каталог і колькасць у наяўнасці з Odoo.
       </p>
       <p className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        Раздзел у распрацоўцы. Доступ да панэлі Kirma.sh для гэтага ўліковага
-        запісу закрыты.
+        Раздзел у распрацоўцы.
       </p>
     </div>
   );

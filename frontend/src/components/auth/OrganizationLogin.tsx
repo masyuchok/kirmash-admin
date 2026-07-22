@@ -2,14 +2,12 @@
 
 import { loginBukinistka, getShopifyLoginUrl } from '@/lib/api/auth';
 import { organizations, type OrganizationId } from '@/lib/auth/organizations';
+import Image from 'next/image';
 import { useSearchParams } from 'next/navigation';
 import { useState } from 'react';
-import {
-  FiArrowLeft,
-  FiBookOpen,
-  FiChevronRight,
-  FiShoppingBag,
-} from 'react-icons/fi';
+import { FiArrowLeft, FiChevronRight } from 'react-icons/fi';
+import bukinistkaLogo from '../../../public/bukinistka-logo.png';
+import kirmaLogo from '../../../public/kirma-logo.png';
 
 function OrganizationCard({
   id,
@@ -23,6 +21,7 @@ function OrganizationCard({
   onSelect: (id: OrganizationId) => void;
 }) {
   const isKirma = id === 'kirma';
+  const logo = isKirma ? kirmaLogo : bukinistkaLogo;
 
   return (
     <button
@@ -30,16 +29,14 @@ function OrganizationCard({
       onClick={() => onSelect(id)}
       className="group flex w-full items-center gap-4 rounded-xl border border-gray-200 bg-white p-4 text-left transition hover:border-primary/40 hover:bg-primary/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
     >
-      <div
-        className={`flex size-14 shrink-0 items-center justify-center rounded-lg ${
-          isKirma ? 'bg-primary/10 text-primary' : 'bg-amber-50 text-amber-700'
-        }`}
-      >
-        {isKirma ? (
-          <FiShoppingBag className="size-7" aria-hidden />
-        ) : (
-          <FiBookOpen className="size-7" aria-hidden />
-        )}
+      <div className="flex h-14 w-[7.5rem] shrink-0 items-center justify-center rounded-lg bg-gray-50 px-2">
+        <Image
+          src={logo}
+          alt={name}
+          width={120}
+          height={40}
+          className="h-10 w-auto max-w-full object-contain object-center"
+        />
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-base font-semibold text-gray-900">{name}</p>
@@ -82,6 +79,16 @@ function BukinistkaLoginForm({
 
   return (
     <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+      <div className="flex justify-center">
+        <Image
+          src={bukinistkaLogo}
+          alt="Bukinistka"
+          width={200}
+          height={26}
+          className="h-8 w-auto max-w-full object-contain"
+          priority
+        />
+      </div>
       <button
         type="button"
         onClick={onBack}

@@ -173,6 +173,8 @@ public sealed class OdooJsonRpcClient
 
     public string ConfiguredDatabase => RequireDatabase();
 
+    public string ConfiguredBaseUrl => RequireBaseUrl();
+
     private string RequireBaseUrl()
     {
         string? baseUrl = _config["Odoo:BaseUrl"]?.Trim( ).TrimEnd( '/' );
