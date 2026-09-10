@@ -88,6 +88,12 @@ public sealed class OdooJsonRpcClient
             JsonElement root = response.RootElement;
             if (TryGetRpcError( root, out string? errorMessage ))
             {
+                if (OdooBukinistkaSessionResolver.IsSessionExpiredMessage( errorMessage ))
+                {
+                    throw new UnauthorizedAccessException(
+                        OdooBukinistkaSessionResolver.UserFriendlySessionExpiredMessage );
+                }
+
                 throw new InvalidOperationException( errorMessage );
             }
 
@@ -205,18 +211,53 @@ public sealed class OdooJsonRpcClient
             return false;
         }
 
-        if (error.TryGetProperty( "data", out JsonElement data )
-            && data.TryGetProperty( "message", out JsonElement dataMessage )
-            && dataMessage.ValueKind == JsonValueKind.String)
+        string? name = null;
+        string? dataMessage = null;
+        if (error.TryGetProperty( "data", out JsonElement data ))
         {
-            message = dataMessage.GetString( ) ?? "Памылка Odoo.";
-            return true;
+            if (data.TryGetProperty( "name", out JsonElement nameEl )
+                && nameEl.ValueKind == JsonValueKind.String)
+            {
+                name = nameEl.GetString();
+            }
+
+            if (data.TryGetProperty( "message", out JsonElement dataMessageEl )
+                && dataMessageEl.ValueKind == JsonValueKind.String)
+            {
+                dataMessage = dataMessageEl.GetString();
+            }
         }
 
+        string? topMessage = null;
         if (error.TryGetProperty( "message", out JsonElement errorMessage )
             && errorMessage.ValueKind == JsonValueKind.String)
         {
-            message = errorMessage.GetString( ) ?? "Памылка Odoo.";
+            topMessage = errorMessage.GetString();
+        }
+
+        // Include exception class name so SessionExpiredException is detectable even when
+        // the human-readable message is empty or localized.
+        if (!string.IsNullOrWhiteSpace( name ) && !string.IsNullOrWhiteSpace( dataMessage ))
+        {
+            message = $"{name}: {dataMessage}";
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace( name ))
+        {
+            message = name!;
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace( dataMessage ))
+        {
+            message = dataMessage!;
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace( topMessage ))
+        {
+            message = topMessage!;
             return true;
         }
 

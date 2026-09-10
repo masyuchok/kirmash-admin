@@ -290,6 +290,9 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
             const detailItemsRaw = d.items ?? d.Items;
             return {
               id: readInt(d.id ?? d.Id),
+              shopifyOrderId: String(
+                d.shopifyOrderId ?? d.ShopifyOrderId ?? ''
+              ),
               orderNumber: String(d.orderNumber ?? d.OrderNumber ?? ''),
               orderDateUtc: String(d.orderDateUtc ?? d.OrderDateUtc ?? ''),
               vatRatePercent: readNumber(d.vatRatePercent ?? d.VatRatePercent),
@@ -310,6 +313,9 @@ function mapSummaryRows(rowsRaw: unknown): VatReportDetails['rows'] {
                     const i = it as Record<string, unknown>;
                     return {
                       id: readInt(i.id ?? i.Id),
+                      shopifyProductId: String(
+                        i.shopifyProductId ?? i.ShopifyProductId ?? ''
+                      ),
                       shopifyVariantId: String(
                         i.shopifyVariantId ?? i.ShopifyVariantId ?? ''
                       ),
@@ -587,6 +593,117 @@ export async function uploadVatReportExpenseInvoice(
   }
 }
 
+export type VatReportExpenseInvoiceExtractProduct = {
+  title: string;
+  barcode: string;
+  quantity: number;
+  unitGrossPrice: number | null;
+  vatRatePercent: number | null;
+  shopifyProductId: string;
+  shopifyVariantId: string;
+  catalogProductName: string;
+};
+
+export type VatReportExpenseInvoiceExtract = {
+  invoiceNumber: string;
+  expenseDateUtc: string;
+  grossAmount: number | null;
+  vatAmount: number | null;
+  netAmount: number | null;
+  vendorName: string;
+  suggestedSupplierId: number | null;
+  suggestedSupplierName: string;
+  comment: string;
+  suggestedExpenseTypeName: string;
+  products: VatReportExpenseInvoiceExtractProduct[];
+  warning: string;
+};
+
+export async function extractVatReportExpenseInvoice(
+  file: File,
+  options?: { supplierId?: number }
+): Promise<VatReportExpenseInvoiceExtract> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (options?.supplierId && options.supplierId > 0) {
+    formData.append('supplierId', String(options.supplierId));
+  }
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/expenses/extract-invoice`,
+    {
+      method: 'POST',
+      credentials: apiCredentials,
+      body: formData,
+    }
+  );
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося распазнаць фактуру');
+    throw new Error(msg);
+  }
+  const data = (await res.json()) as Record<string, unknown>;
+  const grossRaw = data.grossAmount ?? data.GrossAmount;
+  const vatRaw = data.vatAmount ?? data.VatAmount;
+  const netRaw = data.netAmount ?? data.NetAmount;
+  const supplierIdRaw = data.suggestedSupplierId ?? data.SuggestedSupplierId;
+  const productsRaw = data.products ?? data.Products;
+  const products: VatReportExpenseInvoiceExtractProduct[] = Array.isArray(
+    productsRaw
+  )
+    ? productsRaw.map((row) => {
+        const r = row as Record<string, unknown>;
+        const unitRaw = r.unitGrossPrice ?? r.UnitGrossPrice;
+        const vatRateRaw = r.vatRatePercent ?? r.VatRatePercent;
+        return {
+          title: String(r.title ?? r.Title ?? '').trim(),
+          barcode: String(r.barcode ?? r.Barcode ?? '')
+            .replace(/\D/g, '')
+            .trim(),
+          quantity: Math.max(
+            1,
+            Math.trunc(readNumber(r.quantity ?? r.Quantity))
+          ),
+          unitGrossPrice:
+            unitRaw == null || unitRaw === '' ? null : readNumber(unitRaw),
+          vatRatePercent:
+            vatRateRaw == null || vatRateRaw === ''
+              ? null
+              : readNumber(vatRateRaw),
+          shopifyProductId: String(
+            r.shopifyProductId ?? r.ShopifyProductId ?? ''
+          ).trim(),
+          shopifyVariantId: String(
+            r.shopifyVariantId ?? r.ShopifyVariantId ?? ''
+          ).trim(),
+          catalogProductName: String(
+            r.catalogProductName ?? r.CatalogProductName ?? ''
+          ).trim(),
+        };
+      })
+    : [];
+  return {
+    invoiceNumber: String(data.invoiceNumber ?? data.InvoiceNumber ?? ''),
+    expenseDateUtc: String(data.expenseDateUtc ?? data.ExpenseDateUtc ?? ''),
+    grossAmount:
+      grossRaw == null || grossRaw === '' ? null : readNumber(grossRaw),
+    vatAmount: vatRaw == null || vatRaw === '' ? null : readNumber(vatRaw),
+    netAmount: netRaw == null || netRaw === '' ? null : readNumber(netRaw),
+    vendorName: String(data.vendorName ?? data.VendorName ?? ''),
+    suggestedSupplierId:
+      supplierIdRaw == null || supplierIdRaw === ''
+        ? null
+        : readInt(supplierIdRaw),
+    suggestedSupplierName: String(
+      data.suggestedSupplierName ?? data.SuggestedSupplierName ?? ''
+    ),
+    comment: String(data.comment ?? data.Comment ?? ''),
+    suggestedExpenseTypeName: String(
+      data.suggestedExpenseTypeName ?? data.SuggestedExpenseTypeName ?? ''
+    ),
+    products: products.filter((p) => p.title.length > 0),
+    warning: String(data.warning ?? data.Warning ?? ''),
+  };
+}
+
 export async function downloadVatReportExpenseInvoice(
   expenseId: number
 ): Promise<{ blob: Blob; fileName: string }> {
@@ -654,6 +771,36 @@ export async function updateVatReportRow(payload: {
   }
 }
 
+export async function replaceManualVatReportRowItems(payload: {
+  rowId: number;
+  items: Array<{
+    shopifyProductId: string;
+    shopifyVariantId?: string;
+    variantTitle?: string;
+    productTitle?: string;
+    productType?: string;
+    quantity: number;
+    unitPrice: number;
+  }>;
+}): Promise<void> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/Reports/rows/${payload.rowId}/items`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: apiCredentials,
+      body: JSON.stringify({ items: payload.items }),
+    }
+  );
+  if (!res.ok) {
+    const msg = await readErrorMessage(
+      res,
+      'Не ўдалося абнавіць кнігі ў заказе'
+    );
+    throw new Error(msg);
+  }
+}
+
 export async function updateVatReportRowItemVat(payload: {
   itemId: number;
   vatRatePercent: number;
@@ -679,10 +826,23 @@ export async function updateVatReportRowItemVat(payload: {
 }
 
 export async function fetchVatReportSourceOrders(
-  reportId: number
+  reportId: number,
+  period?: { year: number; month: number }
 ): Promise<VatReportSourceOrderOption[]> {
+  const params = new URLSearchParams();
+  if (
+    period &&
+    Number.isFinite(period.year) &&
+    Number.isFinite(period.month) &&
+    period.month >= 1 &&
+    period.month <= 12
+  ) {
+    params.set('year', String(period.year));
+    params.set('month', String(period.month));
+  }
+  const query = params.toString();
   const res = await fetch(
-    `${getApiBaseUrl()}/Reports/${reportId}/source-orders`,
+    `${getApiBaseUrl()}/Reports/${reportId}/source-orders${query ? `?${query}` : ''}`,
     {
       method: 'GET',
       credentials: apiCredentials,
@@ -757,6 +917,15 @@ export async function createVatReportRow(
     vatAmount: number;
     netAmount: number;
     shopifyOrderId?: string;
+    items?: Array<{
+      shopifyProductId: string;
+      shopifyVariantId?: string;
+      variantTitle?: string;
+      productTitle?: string;
+      productType?: string;
+      quantity: number;
+      unitPrice: number;
+    }>;
   }
 ): Promise<void> {
   const res = await fetch(`${getApiBaseUrl()}/Reports/${reportId}/rows`, {
@@ -771,6 +940,7 @@ export async function createVatReportRow(
       vatAmount: payload.vatAmount,
       netAmount: payload.netAmount,
       shopifyOrderId: payload.shopifyOrderId ?? null,
+      items: payload.items ?? null,
     }),
   });
   if (!res.ok) {

@@ -69,18 +69,28 @@ public class ProductService
                         }
                     )
                     .Select( supplierGroup =>
-                        supplierGroup
+                    {
+                        // Prefer the latest non-zero prices so a draft/empty line
+                        // on the newest supply does not wipe the last set cost.
+                        List<SupplyProduct> ordered = supplierGroup
                             .OrderByDescending( sp => sp.Supply.Date )
                             .ThenByDescending( sp => sp.Supply.Id )
-                            .Select( sp => new ProductSupplierPriceItem
-                            {
-                                SupplierId = sp.Supply.SupplierId,
-                                SupplierName = sp.Supply.Supplier.Name,
-                                SupplierPrice = sp.SupplierPrice,
-                                SalePrice = sp.SalePrice
-                            } )
-                            .First()
-                    )
+                            .ToList();
+                        SupplyProduct priceSource =
+                            ordered.FirstOrDefault( sp => sp.SupplierPrice > 0 )
+                            ?? ordered[0];
+                        SupplyProduct saleSource =
+                            ordered.FirstOrDefault( sp => sp.SalePrice > 0 )
+                            ?? priceSource;
+
+                        return new ProductSupplierPriceItem
+                        {
+                            SupplierId = priceSource.Supply.SupplierId,
+                            SupplierName = priceSource.Supply.Supplier.Name,
+                            SupplierPrice = priceSource.SupplierPrice,
+                            SalePrice = saleSource.SalePrice
+                        };
+                    } )
                     .OrderBy( x => x.SupplierName, StringComparer.OrdinalIgnoreCase )
                     .ToList(),
                 StringComparer.OrdinalIgnoreCase
@@ -166,7 +176,8 @@ public class ProductService
                 UnsyncedSuppliers = unsyncedSuppliers ?? [],
                 Variants = product.Variants,
                 SupplierPrices = supplierPrices ?? [],
-                OverpaidLines = []
+                OverpaidLines = [],
+                ShopifySalePrice = product.SalePrice
             } );
         }
 
@@ -408,13 +419,63 @@ public class ProductService
             .OrderByDescending( x => x.DateUtc, StringComparer.Ordinal )
             .ToList();
 
+        List<KirmaBukinistkaOffer> acceptedBukinistkaOffers = await _db.KirmaBukinistkaOffers
+            .AsNoTracking()
+            .Where( x =>
+                x.Direction == KirmaBukinistkaOfferDirections.BukinistkaToKirma
+                && x.Status == KirmaBukinistkaOfferStatuses.Accepted
+                && productIdCandidates.Contains( x.ShopifyProductId ) )
+            .ToListAsync();
+
+        List<ProductHistoryBukinistkaOfferEvent> bukinistkaOffers = acceptedBukinistkaOffers
+            .Where( x => ProductLedgerService.MatchesVariantFilter(
+                VariantLegacyDefaults.ResolveVariantId(
+                    normalizedProductId,
+                    x.ShopifyVariantId,
+                    defaultVariantByProduct,
+                    variantIdByTitle,
+                    legacySaleVariantByProduct ),
+                ResolveVariantTitle(
+                    VariantLegacyDefaults.ResolveVariantId(
+                        normalizedProductId,
+                        x.ShopifyVariantId,
+                        defaultVariantByProduct,
+                        variantIdByTitle,
+                        legacySaleVariantByProduct ),
+                    variantTitles ),
+                normalizedVariantFilter,
+                filterVariantTitle ) )
+            .Select( x =>
+            {
+                string variantId = VariantLegacyDefaults.ResolveVariantId(
+                    normalizedProductId,
+                    x.ShopifyVariantId,
+                    defaultVariantByProduct,
+                    variantIdByTitle,
+                    legacySaleVariantByProduct );
+                return new ProductHistoryBukinistkaOfferEvent
+                {
+                    DateUtc = (x.AcceptedAtUtc ?? x.CreatedAtUtc).ToString( "O" ),
+                    OfferId = x.Id,
+                    ShopifyVariantId = variantId,
+                    VariantTitle = ResolveVariantTitle( variantId, variantTitles ),
+                    Quantity = x.Quantity,
+                    GrossUnitCost = Math.Round( x.GrossUnitCost, 2, MidpointRounding.AwayFromZero ),
+                    IsAssignment = x.IsAssignment,
+                };
+            } )
+            .OrderByDescending( x => x.DateUtc, StringComparer.Ordinal )
+            .ThenByDescending( x => x.OfferId )
+            .ToList();
+
         return new ProductHistoryResponse
         {
             ShopifyProductId = normalizedProductId,
             ProductName = productName,
             Supplies = supplies,
             Sales = sales,
-            Payments = payments
+            Payments = payments,
+            BukinistkaOffers = bukinistkaOffers
         };
     }
 

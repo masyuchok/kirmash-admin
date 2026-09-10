@@ -9,7 +9,10 @@ import ProductHistoryModal from '@/components/products/ProductHistoryModal';
 import ProposeToBukinistkaModal, {
   type ProposeToBukinistkaDraft,
 } from '@/components/products/ProposeToBukinistkaModal';
-import { createKirmaBukinistkaOffer } from '@/lib/api/bukinistka-offers';
+import {
+  createKirmaBukinistkaOffer,
+  fetchKirmaProposeEligibility,
+} from '@/lib/api/bukinistka-offers';
 import {
   fetchProductHistory,
   fetchProductsWithSuppliers,
@@ -590,7 +593,7 @@ export default function ProductsClient() {
     setProposeError(null);
   };
 
-  const openPropose = (row: ProductTableRow) => {
+  const openPropose = async (row: ProductTableRow) => {
     if (row.quantityInStock <= 0) return;
     const productLabel = row.isVariantChild
       ? `${row.productName} · ${row.variantName}`
@@ -603,9 +606,28 @@ export default function ProductsClient() {
     });
     setProposeError(null);
     setProposeOpen(true);
+    try {
+      const eligibility = await fetchKirmaProposeEligibility(
+        row.shopifyProductId,
+        row.shopifyVariantId || undefined
+      );
+      if (!eligibility.canPropose) {
+        // Soft warning only — still allow sending another offer.
+        setProposeError(
+          eligibility.blockReason ||
+            'Папярэдняя прапанова яшчэ актыўная; можна даслаць яшчэ адну.'
+        );
+      }
+    } catch {
+      // Eligibility check is advisory; do not block propose.
+    }
   };
 
-  const submitPropose = async (quantity: number, grossUnitCost: number) => {
+  const submitPropose = async (
+    quantity: number,
+    grossUnitCost: number,
+    syncOnSale: boolean
+  ) => {
     if (!proposeRow) return;
     setProposeSubmitting(true);
     setProposeError(null);
@@ -625,6 +647,7 @@ export default function ProductsClient() {
             : null,
         quantity,
         grossUnitCost,
+        syncOnSale,
       });
       setProposeOpen(false);
       setProposeDraft(null);
@@ -951,7 +974,9 @@ export default function ProductsClient() {
                         <div className="inline-flex flex-wrap items-center justify-end gap-2">
                           <button
                             type="button"
-                            onClick={() => openPropose(row)}
+                            onClick={() => {
+                              void openPropose(row);
+                            }}
                             disabled={row.quantityInStock <= 0}
                             className="inline-flex size-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:bg-white disabled:hover:text-gray-700"
                             aria-label="Прапанаваць у Букіністыку"
@@ -1110,8 +1135,8 @@ export default function ProductsClient() {
         submitting={proposeSubmitting}
         error={proposeError}
         onClose={closePropose}
-        onSubmit={(quantity, grossUnitCost) => {
-          void submitPropose(quantity, grossUnitCost);
+        onSubmit={(quantity, grossUnitCost, syncOnSale) => {
+          void submitPropose(quantity, grossUnitCost, syncOnSale);
         }}
       />
     </div>

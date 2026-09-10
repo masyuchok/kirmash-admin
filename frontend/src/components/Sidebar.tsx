@@ -2,8 +2,10 @@
 
 import KirmaLogo from '@/components/brand/KirmaLogo';
 import { logoutKirma } from '@/lib/api/auth';
+import { fetchKirmaReceivedPendingOffersCount } from '@/lib/api/bukinistka-offers';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import {
   FiBarChart2,
   FiBookOpen,
@@ -25,7 +27,12 @@ const nav = [
   { href: '/sales', label: 'Продажы', icon: FiTrendingUp },
   { href: '/documents', label: 'Дакументы', icon: FiFileText },
   { href: '/finances', label: 'Фінансы', icon: FiDollarSign },
-  { href: '/bukinistyka', label: 'Букіністка', icon: FiBookOpen },
+  {
+    href: '/bukinistyka',
+    label: 'Букіністка',
+    icon: FiBookOpen,
+    badgeKey: 'pendingOffers' as const,
+  },
   { href: '/settings', label: 'Налады', icon: FiSettings },
 ] as const;
 
@@ -35,8 +42,50 @@ function navItemActive(href: string, pathname: string | null): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function PendingBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  const label = count > 99 ? '99+' : String(count);
+  return (
+    <span
+      className="ml-auto inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
+      aria-label={`Неразобраных прапаноў: ${count}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 const Sidebar = () => {
   const pathname = usePathname();
+  const [pendingOffersCount, setPendingOffersCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = () => {
+      fetchKirmaReceivedPendingOffersCount()
+        .then((count) => {
+          if (!cancelled) setPendingOffersCount(count);
+        })
+        .catch(() => {
+          if (!cancelled) setPendingOffersCount(0);
+        });
+    };
+
+    load();
+    const timer = window.setInterval(load, 60_000);
+    const onFocus = () => load();
+    const onOffersChanged = () => load();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('bukinistka-offers-changed', onOffersChanged);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('bukinistka-offers-changed', onOffersChanged);
+    };
+  }, [pathname]);
 
   const handleLogout = () => {
     void logoutKirma();
@@ -52,8 +101,13 @@ const Sidebar = () => {
       </div>
       <nav className="flex-1 overflow-y-auto p-3">
         <ul className="space-y-1">
-          {nav.map(({ href, label, icon: Icon }) => {
+          {nav.map((item) => {
+            const { href, label, icon: Icon } = item;
             const active = navItemActive(href, pathname);
+            const badge =
+              'badgeKey' in item && item.badgeKey === 'pendingOffers'
+                ? pendingOffersCount
+                : 0;
             return (
               <li key={href}>
                 <Link
@@ -66,7 +120,8 @@ const Sidebar = () => {
                   aria-current={active ? 'page' : undefined}
                 >
                   <Icon className="size-5 shrink-0 opacity-80" aria-hidden />
-                  {label}
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                  <PendingBadge count={badge} />
                 </Link>
               </li>
             );

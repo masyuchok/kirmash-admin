@@ -29,7 +29,7 @@ export default function BukinistkaLogo({
   if (linkToHome) {
     return (
       <Link
-        href="/bukinistka"
+        href="/bukinistka/products"
         className="block rounded-lg outline-none transition hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-amber-300/50"
       >
         {inner}

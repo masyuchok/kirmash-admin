@@ -11,10 +11,14 @@ namespace backend.Controllers
     public class ReportsController : Controller
     {
         private readonly VatReportService _service;
+        private readonly InvoiceExpenseExtractionService _invoiceExtraction;
 
-        public ReportsController( VatReportService service )
+        public ReportsController(
+            VatReportService service,
+            InvoiceExpenseExtractionService invoiceExtraction )
         {
             _service = service;
+            _invoiceExtraction = invoiceExtraction;
         }
 
         [HttpGet]
@@ -169,11 +173,17 @@ namespace backend.Controllers
         }
 
         [HttpGet( "{id:int}/source-orders" )]
-        public async Task<ActionResult<List<VatReportSourceOrderOption>>> GetSourceOrders( int id )
+        public async Task<ActionResult<List<VatReportSourceOrderOption>>> GetSourceOrders(
+            int id,
+            [FromQuery] int? year = null,
+            [FromQuery] int? month = null )
         {
             try
             {
-                List<VatReportSourceOrderOption> options = await _service.GetSourceOrderOptionsAsync( id );
+                List<VatReportSourceOrderOption> options = await _service.GetSourceOrderOptionsAsync(
+                    id,
+                    year,
+                    month );
                 return Ok( options );
             }
             catch (InvalidOperationException ex)
@@ -182,7 +192,7 @@ namespace backend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode( 500, new { error = "Памылка атрымання замоў за месяц", details = ex.Message } );
+                return StatusCode( 500, new { error = "Памылка атрымання спісу замоў", details = ex.Message } );
             }
         }
 
@@ -283,6 +293,26 @@ namespace backend.Controllers
             }
         }
 
+        [HttpPut( "rows/{rowId:int}/items" )]
+        public async Task<IActionResult> ReplaceManualRowItems(
+            int rowId,
+            [FromBody] VatReportManualRowItemsReplaceRequest request )
+        {
+            try
+            {
+                await _service.ReplaceManualRowItemsAsync( rowId, request );
+                return Ok();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка рэдагавання кніг у заказе", details = ex.Message } );
+            }
+        }
+
         [HttpPost( "{id:int}/rows" )]
         public async Task<IActionResult> AddRow( int id, [FromBody] VatReportRowCreateRequest request )
         {
@@ -334,6 +364,44 @@ namespace backend.Controllers
             catch (Exception ex)
             {
                 return StatusCode( 500, new { error = "Памылка дадання расходу", details = ex.Message } );
+            }
+        }
+
+        [HttpPost( "expenses/extract-invoice" )]
+        [RequestSizeLimit( 10 * 1024 * 1024 )]
+        public async Task<ActionResult<VatReportExpenseInvoiceExtractResult>> ExtractExpenseInvoice(
+            [FromForm] VatReportInvoiceUploadRequest request,
+            CancellationToken cancellationToken )
+        {
+            try
+            {
+                IFormFile? file = request.File;
+                if (file is null || file.Length == 0)
+                {
+                    return BadRequest( new { error = "Файл не абраны." } );
+                }
+
+                string contentType = string.IsNullOrWhiteSpace( file.ContentType )
+                    ? "application/octet-stream"
+                    : file.ContentType;
+                await using MemoryStream ms = new();
+                await file.CopyToAsync( ms, cancellationToken );
+                VatReportExpenseInvoiceExtractResult result =
+                    await _invoiceExtraction.ExtractAsync(
+                        ms.ToArray(),
+                        file.FileName,
+                        contentType,
+                        request.SupplierId,
+                        cancellationToken );
+                return Ok( result );
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest( new { error = ex.Message } );
+            }
+            catch (Exception ex)
+            {
+                return StatusCode( 500, new { error = "Памылка распазнавання фактуры", details = ex.Message } );
             }
         }
 

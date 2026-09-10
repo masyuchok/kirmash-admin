@@ -433,6 +433,7 @@ public class VatReportQueryService
                     .Select( i => new ReportRowItemData
                     {
                         Id = i.Id,
+                        ShopifyProductId = i.ShopifyProductId,
                         ShopifyVariantId = i.ShopifyVariantId,
                         VariantTitle = i.VariantTitle,
                         ProductTitle = i.ProductTitle,
@@ -706,6 +707,7 @@ public class VatReportQueryService
         new()
         {
             Id = row.Id,
+            ShopifyOrderId = row.ShopifyOrderId,
             OrderNumber = row.OrderNumber,
             OrderDateUtc = row.OrderDateUtc,
             VatRatePercent = row.VatRatePercent,
@@ -719,6 +721,7 @@ public class VatReportQueryService
                 .Select( i => new VatReportDetailsPolandItem
                 {
                     Id = i.Id,
+                    ShopifyProductId = i.ShopifyProductId,
                     ShopifyVariantId = i.ShopifyVariantId,
                     VariantTitle = i.VariantTitle,
                     ProductTitle = i.ProductTitle,
@@ -783,6 +786,7 @@ public class VatReportQueryService
     private sealed class ReportRowItemData
     {
         public int Id { get; set; }
+        public string ShopifyProductId { get; set; } = string.Empty;
         public string ShopifyVariantId { get; set; } = string.Empty;
         public string VariantTitle { get; set; } = string.Empty;
         public string ProductTitle { get; set; } = string.Empty;

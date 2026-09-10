@@ -163,6 +163,132 @@ public sealed class OdooPosSalesReader
         return result;
     }
 
+    /// <summary>
+    /// POS return lines (negative qty) since <paramref name="sinceUtc"/>.
+    /// </summary>
+    public async Task<List<PosOrderLine>> FetchReturnLinesSinceAsync(
+        DateTime sinceUtc,
+        int? minOrderIdExclusive,
+        CancellationToken cancellationToken = default )
+    {
+        if (!IsConfigured)
+        {
+            throw new InvalidOperationException( "Odoo sync credentials are not configured." );
+        }
+
+        string login = _config["Odoo:SyncLogin"]!.Trim();
+        string password = _config["Odoo:SyncPassword"]!;
+        OdooSession session = await _auth.AuthenticateAsync( login, password );
+
+        DateTime since = sinceUtc.AddHours( -1 );
+        string sinceStr = since.ToString( "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture );
+
+        List<object> domain = new()
+        {
+            new object[] { "state", "in", new[] { "paid", "done", "invoiced" } },
+            new object[] { "date_order", ">=", sinceStr },
+        };
+        if (minOrderIdExclusive is int minId && minId > 0)
+        {
+            domain.Add( new object[] { "id", ">=", Math.Max( 1, minId - 50 ) } );
+        }
+
+        JsonElement orders = await _client.CallKwAsync(
+            session,
+            "pos.order",
+            "search_read",
+            [domain.ToArray()],
+            new Dictionary<string, object?>
+            {
+                ["fields"] = new[] { "id", "name", "date_order", "state" },
+                ["limit"] = 500,
+                ["order"] = "id asc",
+            },
+            cancellationToken );
+
+        List<PosOrderLine> result = new();
+        if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
+        {
+            return result;
+        }
+
+        List<(int OrderId, string? Name, DateTime SoldAt)> orderMeta = new();
+        foreach (JsonElement order in orders.EnumerateArray())
+        {
+            int orderId = ReadInt( order, "id" );
+            if (orderId <= 0)
+            {
+                continue;
+            }
+
+            orderMeta.Add( (
+                orderId,
+                ReadString( order, "name" ),
+                ReadDateTimeUtc( order, "date_order" ) ) );
+        }
+
+        if (orderMeta.Count == 0)
+        {
+            return result;
+        }
+
+        int[] orderIds = orderMeta.Select( x => x.OrderId ).ToArray();
+        Dictionary<int, (string? Name, DateTime SoldAt)> byOrder =
+            orderMeta.ToDictionary( x => x.OrderId, x => (x.Name, x.SoldAt) );
+
+        JsonElement lines = await _client.CallKwAsync(
+            session,
+            "pos.order.line",
+            "search_read",
+            [
+                new object[]
+                {
+                    new object[] { "order_id", "in", orderIds },
+                    new object[] { "qty", "<", 0 },
+                }
+            ],
+            new Dictionary<string, object?>
+            {
+                ["fields"] = new[] { "id", "order_id", "product_id", "qty" },
+                ["limit"] = 5000,
+                ["order"] = "id asc",
+            },
+            cancellationToken );
+
+        if (lines.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (JsonElement line in lines.EnumerateArray())
+        {
+            int lineId = ReadInt( line, "id" );
+            int orderId = ReadMany2OneId( line, "order_id" );
+            int productId = ReadMany2OneId( line, "product_id" );
+            decimal qty = ReadDecimal( line, "qty" );
+            if (lineId <= 0 || orderId <= 0 || productId <= 0 || qty >= 0)
+            {
+                continue;
+            }
+
+            if (!byOrder.TryGetValue( orderId, out var meta ))
+            {
+                continue;
+            }
+
+            // Store absolute quantity; callers treat these as returns.
+            result.Add( new PosOrderLine(
+                orderId,
+                meta.Name,
+                lineId,
+                productId,
+                Math.Abs( qty ),
+                meta.SoldAt ) );
+        }
+
+        return result;
+    }
+
     private static int ReadInt( JsonElement row, string property )
     {
         if (!row.TryGetProperty( property, out JsonElement value ))

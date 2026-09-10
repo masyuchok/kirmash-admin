@@ -9,5 +9,7 @@ namespace backend.Models
         public decimal VatAmount { get; set; }
         public decimal NetAmount { get; set; }
         public string? ShopifyOrderId { get; set; }
+        /// <summary>Optional product lines for custom (non-Shopify) Poland orders.</summary>
+        public List<VatReportForeignRowItemCreateRequest>? Items { get; set; }
     }
 }

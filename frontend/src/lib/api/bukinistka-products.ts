@@ -15,6 +15,8 @@ export type BukinistkaProduct = {
   uomName: string | null;
   supplierName: string | null;
   odooUrl: string;
+  canProposeToKirma: boolean;
+  proposeBlockReason: string | null;
 };
 
 function readNumber(...values: unknown[]): number {
@@ -57,13 +59,62 @@ function mapProduct(row: Record<string, unknown>): BukinistkaProduct {
         : typeof row.odoo_url === 'string'
           ? row.odoo_url
           : '',
+    canProposeToKirma: Boolean(
+      row.canProposeToKirma ?? row.CanProposeToKirma ?? true
+    ),
+    proposeBlockReason:
+      typeof row.proposeBlockReason === 'string'
+        ? row.proposeBlockReason
+        : typeof row.ProposeBlockReason === 'string'
+          ? row.ProposeBlockReason
+          : null,
   };
 }
 
-export async function fetchBukinistkaProducts(): Promise<BukinistkaProduct[]> {
-  const res = await fetch(`${getApiBaseUrl()}/bukinistka/products`, {
-    credentials: apiCredentials,
-  });
+export type BukinistkaProductListResult = {
+  products: BukinistkaProduct[];
+  totalCount: number;
+  isTruncated: boolean;
+};
+
+function mapListResponse(
+  data: Record<string, unknown>
+): BukinistkaProductListResult {
+  const list = (data.products ?? data.Products ?? []) as unknown[];
+  const products = list
+    .filter(
+      (item): item is Record<string, unknown> =>
+        !!item && typeof item === 'object'
+    )
+    .map(mapProduct)
+    .filter((p) => p.id > 0);
+
+  const totalCount = readNumber(data.totalCount, data.total_count);
+  const isTruncated = Boolean(data.isTruncated ?? data.is_truncated);
+
+  return {
+    products,
+    totalCount: totalCount > 0 ? totalCount : products.length,
+    isTruncated,
+  };
+}
+
+export async function fetchBukinistkaProducts(options?: {
+  search?: string;
+}): Promise<BukinistkaProductListResult> {
+  const params = new URLSearchParams();
+  const search = options?.search?.trim();
+  if (search) {
+    params.set('search', search);
+  }
+
+  const query = params.toString();
+  const res = await fetch(
+    `${getApiBaseUrl()}/bukinistka/products${query ? `?${query}` : ''}`,
+    {
+      credentials: apiCredentials,
+    }
+  );
 
   if (!res.ok) {
     throw new Error(
@@ -71,16 +122,6 @@ export async function fetchBukinistkaProducts(): Promise<BukinistkaProduct[]> {
     );
   }
 
-  const data = (await res.json()) as {
-    products?: unknown;
-    Products?: unknown;
-  };
-  const list = (data.products ?? data.Products ?? []) as unknown[];
-  return list
-    .filter(
-      (item): item is Record<string, unknown> =>
-        !!item && typeof item === 'object'
-    )
-    .map(mapProduct)
-    .filter((p) => p.id > 0);
+  const data = (await res.json()) as Record<string, unknown>;
+  return mapListResponse(data);
 }

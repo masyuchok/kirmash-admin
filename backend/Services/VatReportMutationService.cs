@@ -7,12 +7,11 @@ namespace backend.Services;
 
 public class VatReportMutationService
 {
-    /// <summary>Temporarily skip Shopify inventory changes for cash sales (read_locations scope pending).</summary>
-    private const bool SyncCashSaleInventoryWithShopify = false;
-
     private readonly AppDbContext _db;
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly IConfiguration _config;
     private readonly ShopifyInventoryService _shopifyInventory;
+    private readonly BukinistkaShopifyOdooDeliverySyncService _odooDeliverySync;
     private readonly VatReportLockService _locks;
     private readonly VatReportFinanceSyncService _financeSync;
     private readonly VatReportGenerationService _generation;
@@ -20,14 +19,18 @@ public class VatReportMutationService
     public VatReportMutationService(
         AppDbContext db,
         IHttpContextAccessor httpContextAccessor,
+        IConfiguration config,
         ShopifyInventoryService shopifyInventory,
+        BukinistkaShopifyOdooDeliverySyncService odooDeliverySync,
         VatReportLockService locks,
         VatReportFinanceSyncService financeSync,
         VatReportGenerationService generation )
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
+        _config = config;
         _shopifyInventory = shopifyInventory;
+        _odooDeliverySync = odooDeliverySync;
         _locks = locks;
         _financeSync = financeSync;
         _generation = generation;
@@ -383,22 +386,58 @@ public class VatReportMutationService
 
             if (!string.IsNullOrWhiteSpace( request.ShopifyOrderId ))
             {
+                DateTime orderDateUtc = DateTime.SpecifyKind( request.OrderDateUtc, DateTimeKind.Utc );
+                int orderYear = orderDateUtc.Year;
+                int orderMonth = orderDateUtc.Month;
+
+                // Prefer the order's own month (may differ from the report period when
+                // adding a historical Shopify order into another month's VAT report).
                 VatReportRow? sourceRow = await _generation.TryResolveRowFromShopifyAsync(
-                    report.PeriodYear,
-                    report.PeriodMonth,
+                    orderYear,
+                    orderMonth,
                     report.Type,
                     request.ShopifyOrderId.Trim(),
                     request.OrderNumber.Trim(),
                     request.VatRatePercent );
+
+                if ((sourceRow is null || sourceRow.Items.Count == 0)
+                    && (orderYear != report.PeriodYear || orderMonth != report.PeriodMonth))
+                {
+                    sourceRow = await _generation.TryResolveRowFromShopifyAsync(
+                        report.PeriodYear,
+                        report.PeriodMonth,
+                        report.Type,
+                        request.ShopifyOrderId.Trim(),
+                        request.OrderNumber.Trim(),
+                        request.VatRatePercent );
+                }
+
                 if (sourceRow is null || sourceRow.Items.Count == 0)
                 {
                     throw new InvalidOperationException(
-                        "Не ўдалося знайсці пазіцыі замовы ў Shopify для гэтага перыяду." );
+                        "Не ўдалося знайсці пазіцыі замовы ў Shopify для даты гэтай замовы." );
                 }
 
                 sourceRow.VatReportId = report.Id;
                 _db.VatReportRows.Add( sourceRow );
                 await _db.SaveChangesAsync();
+
+                // Shopify stock already moved by the real order; ensure SyncOnSale Wydanie exists.
+                try
+                {
+                    await EnsureOdooWydanieForReportRowItemsAsync(
+                        sourceRow.ShopifyOrderId,
+                        sourceRow.OrderNumber,
+                        sourceRow.OrderDateUtc,
+                        sourceRow.Items );
+                }
+                catch
+                {
+                    _db.VatReportRows.Remove( sourceRow );
+                    await _db.SaveChangesAsync();
+                    throw;
+                }
+
                 await RecalculateReportTotalsAsync( report.Id );
                 return;
             }
@@ -418,16 +457,229 @@ public class VatReportMutationService
                 Items = new List<VatReportRowItem>()
             };
 
+            List<VatReportForeignRowItemCreateRequest> customItems =
+                (request.Items ?? [])
+                .Where( item => !string.IsNullOrWhiteSpace( item.ShopifyProductId ) && item.Quantity > 0 )
+                .ToList();
+
+            if (customItems.Count > 0)
+            {
+                foreach (VatReportForeignRowItemCreateRequest item in customItems)
+                {
+                    if (item.UnitPrice < 0m)
+                    {
+                        throw new InvalidOperationException( "Цана тавара не можа быць адмоўнай." );
+                    }
+                }
+
+                string manualOrderId = $"manual-{Guid.NewGuid():N}";
+                decimal goodsGross = 0m;
+                foreach (VatReportForeignRowItemCreateRequest item in customItems)
+                {
+                    string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId.Trim() );
+                    string variantId = string.IsNullOrWhiteSpace( item.ShopifyVariantId )
+                        ? string.Empty
+                        : ShopifyIds.NormalizeVariantId( item.ShopifyVariantId.Trim() );
+                    string variantTitle = string.IsNullOrWhiteSpace( item.VariantTitle )
+                        ? VatReportHelpers.ExtractVariantTitleFromProductLineTitle( item.ProductTitle )
+                        : item.VariantTitle.Trim();
+                    decimal lineGross = VatReportHelpers.Round2( item.UnitPrice * item.Quantity );
+                    goodsGross += lineGross;
+                    row.Items.Add( new VatReportRowItem
+                    {
+                        ShopifyProductId = productId,
+                        ShopifyVariantId = variantId,
+                        VariantTitle = variantTitle,
+                        ProductTitle = string.IsNullOrWhiteSpace( item.ProductTitle )
+                            ? productId
+                            : item.ProductTitle.Trim(),
+                        ProductType = (item.ProductType ?? string.Empty).Trim(),
+                        Quantity = item.Quantity,
+                        UnitPrice = VatReportHelpers.Round2( item.UnitPrice ),
+                        GrossAmount = lineGross,
+                        AssignedVatRatePercent = row.VatRatePercent,
+                        AssignmentReason = "manual-poland-order"
+                    } );
+                }
+
+                if (goodsGross <= 0m)
+                {
+                    throw new InvalidOperationException( "Сума замовы павінна быць больш за 0." );
+                }
+
+                // Prefer line totals when products are selected.
+                row.ShopifyOrderId = manualOrderId;
+                row.GrossAmount = goodsGross;
+                decimal rate = row.VatRatePercent / 100m;
+                row.VatAmount = VatReportHelpers.Round2( goodsGross - (goodsGross / (1m + rate)) );
+                row.NetAmount = VatReportHelpers.Round2( goodsGross - row.VatAmount );
+
+                _db.VatReportRows.Add( row );
+                await _db.SaveChangesAsync();
+
+                List<(string ProductId, string VariantId, int Quantity)> saleLines = row.Items
+                    .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+                    .ToList();
+
+                try
+                {
+                    await ApplyManualSaleStockEffectsAsync(
+                        manualOrderId,
+                        row.OrderNumber,
+                        row.OrderDateUtc,
+                        saleLines );
+                }
+                catch
+                {
+                    _db.VatReportRows.Remove( row );
+                    await _db.SaveChangesAsync();
+                    throw;
+                }
+
+                await RecalculateReportTotalsAsync( report.Id );
+                return;
+            }
+
             _db.VatReportRows.Add( row );
             await _db.SaveChangesAsync();
 
             await RecalculateReportTotalsAsync( report.Id );
         }
 
+    /// <summary>
+    /// Adds a Poland VAT row from custom line items without Shopify/Odoo stock side effects
+    /// (used when stock was already moved, e.g. Bukinistka POS consignments).
+    /// </summary>
+    public async Task<VatReportRow> AddPolandManualRowWithoutStockEffectsAsync(
+        int reportId,
+        string orderNumber,
+        DateTime orderDateUtc,
+        decimal vatRatePercent,
+        IReadOnlyList<VatReportForeignRowItemCreateRequest> items,
+        string shopifyOrderIdPrefix = "manual-",
+        string assignmentReason = "manual-poland-order" )
+    {
+        await _locks.EnsurePeriodUnlockedByReportIdAsync( reportId );
+
+        if (string.IsNullOrWhiteSpace( orderNumber ))
+        {
+            throw new InvalidOperationException( "Нумар фактуры абавязковы." );
+        }
+
+        if (orderDateUtc == default)
+        {
+            throw new InvalidOperationException( "Дата фактуры абавязковая." );
+        }
+
+        if (vatRatePercent != 5m && vatRatePercent != 23m)
+        {
+            throw new InvalidOperationException( "Стаўка VAT павінна быць 5 або 23." );
+        }
+
+        VatReport? report = await _db.VatReports.FirstOrDefaultAsync( r => r.Id == reportId );
+        if (report is null)
+        {
+            throw new InvalidOperationException( "Справаздача не знойдзена." );
+        }
+
+        if (!string.Equals( report.Type, VatReportType.Poland, StringComparison.OrdinalIgnoreCase ))
+        {
+            throw new InvalidOperationException( "Фактура Букіністкі дадаецца толькі ў польскую справаздачу." );
+        }
+
+        List<VatReportForeignRowItemCreateRequest> customItems = items
+            .Where( item => !string.IsNullOrWhiteSpace( item.ShopifyProductId ) && item.Quantity > 0 )
+            .ToList();
+        if (customItems.Count == 0)
+        {
+            throw new InvalidOperationException( "Дадайце хаця б адзін тавар." );
+        }
+
+        foreach (VatReportForeignRowItemCreateRequest item in customItems)
+        {
+            if (item.UnitPrice < 0m)
+            {
+                throw new InvalidOperationException( "Цана тавара не можа быць адмоўнай." );
+            }
+        }
+
+        string prefix = string.IsNullOrWhiteSpace( shopifyOrderIdPrefix )
+            ? "manual-"
+            : shopifyOrderIdPrefix.Trim();
+        if (!prefix.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase ))
+        {
+            prefix = "manual-" + prefix;
+        }
+
+        string manualOrderId = $"{prefix}{Guid.NewGuid():N}";
+        decimal ratePercent = VatReportHelpers.Round2( vatRatePercent );
+        VatReportRow row = new()
+        {
+            VatReportId = report.Id,
+            ShopifyOrderId = manualOrderId,
+            OrderNumber = orderNumber.Trim(),
+            OrderDateUtc = DateTime.SpecifyKind( orderDateUtc, DateTimeKind.Utc ),
+            VatRatePercent = ratePercent,
+            GrossAmount = 0m,
+            VatAmount = 0m,
+            NetAmount = 0m,
+            ShippingGrossAmount = 0m,
+            ShippingNetAmount = 0m,
+            Items = new List<VatReportRowItem>()
+        };
+
+        decimal goodsGross = 0m;
+        foreach (VatReportForeignRowItemCreateRequest item in customItems)
+        {
+            string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId.Trim() );
+            string variantId = string.IsNullOrWhiteSpace( item.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( item.ShopifyVariantId.Trim() );
+            string variantTitle = string.IsNullOrWhiteSpace( item.VariantTitle )
+                ? VatReportHelpers.ExtractVariantTitleFromProductLineTitle( item.ProductTitle )
+                : item.VariantTitle.Trim();
+            decimal lineGross = VatReportHelpers.Round2( item.UnitPrice * item.Quantity );
+            goodsGross += lineGross;
+            row.Items.Add( new VatReportRowItem
+            {
+                ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                VariantTitle = variantTitle,
+                ProductTitle = string.IsNullOrWhiteSpace( item.ProductTitle )
+                    ? productId
+                    : item.ProductTitle.Trim(),
+                ProductType = (item.ProductType ?? string.Empty).Trim(),
+                Quantity = item.Quantity,
+                UnitPrice = VatReportHelpers.Round2( item.UnitPrice ),
+                GrossAmount = lineGross,
+                AssignedVatRatePercent = ratePercent,
+                AssignmentReason = string.IsNullOrWhiteSpace( assignmentReason )
+                    ? "manual-poland-order"
+                    : assignmentReason.Trim()
+            } );
+        }
+
+        if (goodsGross <= 0m)
+        {
+            throw new InvalidOperationException( "Сума фактуры павінна быць больш за 0." );
+        }
+
+        decimal rate = ratePercent / 100m;
+        row.GrossAmount = goodsGross;
+        row.VatAmount = VatReportHelpers.Round2( goodsGross - (goodsGross / (1m + rate)) );
+        row.NetAmount = VatReportHelpers.Round2( goodsGross - row.VatAmount );
+
+        _db.VatReportRows.Add( row );
+        await _db.SaveChangesAsync();
+        await RecalculateReportTotalsAsync( report.Id );
+        return row;
+    }
+
     public async Task DeleteRowAsync( int rowId )
         {
             await _locks.EnsurePeriodUnlockedByRowIdAsync( rowId );
             VatReportRow? row = await _db.VatReportRows
+                .Include( r => r.Items )
                 .Include( r => r.VatReport )
                 .FirstOrDefaultAsync( r => r.Id == rowId );
             if (row is null)
@@ -436,11 +688,520 @@ public class VatReportMutationService
             }
 
             int reportId = row.VatReportId;
-            _db.VatReportRows.Remove( row );
+            string shopifyOrderId = (row.ShopifyOrderId ?? string.Empty).Trim();
+            bool isManualReportSale = shopifyOrderId.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase );
+
+            if (isManualReportSale)
+            {
+                List<VatReportRow> siblingRows = await _db.VatReportRows
+                    .Include( r => r.Items )
+                    .Where( r =>
+                        r.VatReportId == reportId
+                        && r.ShopifyOrderId == shopifyOrderId )
+                    .ToListAsync();
+
+                bool isBukinistkaPosInvoice =
+                    shopifyOrderId.StartsWith( "manual-bukpos-", StringComparison.OrdinalIgnoreCase ) ||
+                    siblingRows
+                        .SelectMany( r => r.Items )
+                        .Any( i => string.Equals(
+                            i.AssignmentReason,
+                            "bukinistka-pos-invoice",
+                            StringComparison.OrdinalIgnoreCase ) );
+
+                if (isBukinistkaPosInvoice)
+                {
+                    HashSet<int> rowIds = siblingRows.Select( r => r.Id ).ToHashSet();
+                    List<KirmaBukinistkaPosSale> linkedSales = await _db.KirmaBukinistkaPosSales
+                        .Where( s => s.VatReportRowId.HasValue && rowIds.Contains( s.VatReportRowId.Value ) )
+                        .ToListAsync();
+                    foreach (KirmaBukinistkaPosSale sale in linkedSales)
+                    {
+                        sale.IsInvoiced = false;
+                        sale.InvoicedAtUtc = null;
+                        sale.VatReportRowId = null;
+                    }
+                }
+                else
+                {
+                    await _odooDeliverySync.CancelForManualSaleOrderAsync( shopifyOrderId );
+
+                    ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+                    Dictionary<string, int> restoreByProduct = new( StringComparer.OrdinalIgnoreCase );
+                    foreach (VatReportRow sibling in siblingRows)
+                    {
+                        foreach (VatReportRowItem item in sibling.Items)
+                        {
+                            string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId ).Trim();
+                            if (string.IsNullOrWhiteSpace( productId ) || item.Quantity <= 0)
+                            {
+                                continue;
+                            }
+
+                            restoreByProduct[productId] =
+                                restoreByProduct.GetValueOrDefault( productId ) + item.Quantity;
+                        }
+                    }
+
+                    foreach ((string productId, int qty) in restoreByProduct)
+                    {
+                        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+                            shopifySession.Shop,
+                            shopifySession.AccessToken,
+                            productId,
+                            qty );
+                    }
+                }
+
+                _db.VatReportRows.RemoveRange( siblingRows );
+            }
+            else
+            {
+                _db.VatReportRows.Remove( row );
+            }
+
             await _db.SaveChangesAsync();
 
             await RecalculateReportTotalsAsync( reportId );
         }
+
+    public async Task ReplaceManualRowItemsAsync(
+        int rowId,
+        VatReportManualRowItemsReplaceRequest request )
+    {
+        await _locks.EnsurePeriodUnlockedByRowIdAsync( rowId );
+
+        VatReportRow? row = await _db.VatReportRows
+            .Include( r => r.Items )
+            .Include( r => r.VatReport )
+            .FirstOrDefaultAsync( r => r.Id == rowId );
+        if (row is null)
+        {
+            throw new InvalidOperationException( "Радок справаздачы не знойдзены." );
+        }
+
+        if (!IsManualReportRow( row ))
+        {
+            throw new InvalidOperationException(
+                "Рэдагаваць кнігі можна толькі ў ручных заказах." );
+        }
+
+        List<VatReportForeignRowItemCreateRequest> items =
+            (request.Items ?? [])
+            .Where( item => !string.IsNullOrWhiteSpace( item.ShopifyProductId ) && item.Quantity > 0 )
+            .ToList();
+
+        foreach (VatReportForeignRowItemCreateRequest item in items)
+        {
+            if (item.UnitPrice < 0m)
+            {
+                throw new InvalidOperationException( "Цана тавара не можа быць адмоўнай." );
+            }
+        }
+
+        string reportType = (row.VatReport.Type ?? string.Empty).Trim();
+        if (string.Equals( reportType, VatReportType.Foreign, StringComparison.OrdinalIgnoreCase ))
+        {
+            await ReplaceManualForeignOrderItemsAsync( row, items );
+            return;
+        }
+
+        await ReplaceManualPolandRowItemsAsync( row, items );
+    }
+
+    private static bool IsManualReportRow( VatReportRow row )
+    {
+        string id = (row.ShopifyOrderId ?? string.Empty).Trim();
+        return id.Length == 0
+            || id.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase );
+    }
+
+    private async Task ReplaceManualPolandRowItemsAsync(
+        VatReportRow row,
+        List<VatReportForeignRowItemCreateRequest> items )
+    {
+        int reportId = row.VatReportId;
+        string existingOrderId = (row.ShopifyOrderId ?? string.Empty).Trim();
+        bool hadManualSaleId = existingOrderId.StartsWith(
+            "manual-",
+            StringComparison.OrdinalIgnoreCase );
+
+        List<(string ProductId, string VariantId, int Quantity)> oldSaleLines = row.Items
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+
+        if (row.Items.Count > 0)
+        {
+            _db.VatReportRowItems.RemoveRange( row.Items );
+            row.Items.Clear();
+        }
+
+        string orderId = existingOrderId;
+        if (items.Count > 0 && !hadManualSaleId)
+        {
+            orderId = $"manual-{Guid.NewGuid():N}";
+            row.ShopifyOrderId = orderId;
+        }
+
+        decimal goodsGross = 0m;
+        foreach (VatReportForeignRowItemCreateRequest item in items)
+        {
+            string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId.Trim() );
+            string variantId = string.IsNullOrWhiteSpace( item.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( item.ShopifyVariantId.Trim() );
+            string variantTitle = string.IsNullOrWhiteSpace( item.VariantTitle )
+                ? VatReportHelpers.ExtractVariantTitleFromProductLineTitle( item.ProductTitle )
+                : item.VariantTitle.Trim();
+            decimal lineGross = VatReportHelpers.Round2( item.UnitPrice * item.Quantity );
+            goodsGross += lineGross;
+            row.Items.Add( new VatReportRowItem
+            {
+                ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                VariantTitle = variantTitle,
+                ProductTitle = string.IsNullOrWhiteSpace( item.ProductTitle )
+                    ? productId
+                    : item.ProductTitle.Trim(),
+                ProductType = (item.ProductType ?? string.Empty).Trim(),
+                Quantity = item.Quantity,
+                UnitPrice = VatReportHelpers.Round2( item.UnitPrice ),
+                GrossAmount = lineGross,
+                AssignedVatRatePercent = row.VatRatePercent,
+                AssignmentReason = "manual-poland-order"
+            } );
+        }
+
+        if (items.Count > 0)
+        {
+            row.GrossAmount = goodsGross;
+            decimal rate = row.VatRatePercent / 100m;
+            row.VatAmount = VatReportHelpers.Round2( goodsGross - (goodsGross / (1m + rate)) );
+            row.NetAmount = VatReportHelpers.Round2( goodsGross - row.VatAmount );
+        }
+        else
+        {
+            // Keep user-entered amounts when clearing books (amount-only manual).
+            row.ShopifyOrderId = string.Empty;
+        }
+
+        await _db.SaveChangesAsync();
+
+        List<(string ProductId, string VariantId, int Quantity)> newSaleLines = row.Items
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+
+        string syncOrderId = hadManualSaleId ? existingOrderId : orderId;
+        if (hadManualSaleId || newSaleLines.Count > 0)
+        {
+            await ReplaceManualSaleStockEffectsAsync(
+                syncOrderId,
+                row.OrderNumber,
+                row.OrderDateUtc,
+                oldSaleLines,
+                newSaleLines );
+        }
+
+        await RecalculateReportTotalsAsync( reportId );
+    }
+
+    private async Task ReplaceManualForeignOrderItemsAsync(
+        VatReportRow anchorRow,
+        List<VatReportForeignRowItemCreateRequest> items )
+    {
+        if (items.Count == 0)
+        {
+            throw new InvalidOperationException( "Дадайце хаця б адзін тавар." );
+        }
+
+        int reportId = anchorRow.VatReportId;
+        string shopifyOrderId = (anchorRow.ShopifyOrderId ?? string.Empty).Trim();
+        if (!shopifyOrderId.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase ))
+        {
+            shopifyOrderId = $"manual-{Guid.NewGuid():N}";
+        }
+
+        List<VatReportRow> siblingRows = await _db.VatReportRows
+            .Include( r => r.Items )
+            .Where( r =>
+                r.VatReportId == reportId
+                && r.ShopifyOrderId == anchorRow.ShopifyOrderId )
+            .ToListAsync();
+
+        if (siblingRows.Count == 0)
+        {
+            siblingRows = [anchorRow];
+        }
+
+        decimal shippingGross = siblingRows.Sum( r => r.ShippingGrossAmount );
+        DateTime orderDateUtc = anchorRow.OrderDateUtc;
+        (
+            string orderNumber,
+            string deliveryName,
+            string deliveryAddress,
+            string countryCode
+        ) = VatReportHelpers.ParseOrderNumberAndContact( anchorRow.OrderNumber );
+
+        if (string.IsNullOrWhiteSpace( orderNumber ))
+        {
+            orderNumber = (anchorRow.OrderNumber ?? string.Empty).Trim();
+        }
+
+        List<(string ProductId, string VariantId, int Quantity)> oldSaleLines = siblingRows
+            .SelectMany( r => r.Items )
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+
+        _db.VatReportRows.RemoveRange( siblingRows );
+        await _db.SaveChangesAsync();
+
+        string encodedOrderNumber = VatReportHelpers.EncodeOrderNumberWithContact(
+            orderNumber,
+            deliveryName,
+            deliveryAddress,
+            countryCode );
+        bool isEuDestination = IsEuCountryCode( countryCode );
+        Dictionary<string, decimal> supplyVatRates = await GetSupplyVatRatesAsync();
+
+        Dictionary<decimal, decimal> grossByRate = new();
+        Dictionary<decimal, List<VatReportRowItem>> itemsByRate = new();
+
+        foreach (VatReportForeignRowItemCreateRequest item in items)
+        {
+            decimal lineGross = VatReportHelpers.Round2( item.UnitPrice * item.Quantity );
+            if (lineGross <= 0m) continue;
+
+            string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId.Trim() );
+            string variantId = string.IsNullOrWhiteSpace( item.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( item.ShopifyVariantId.Trim() );
+            string variantTitle = string.IsNullOrWhiteSpace( item.VariantTitle )
+                ? VatReportHelpers.ExtractVariantTitleFromProductLineTitle( item.ProductTitle )
+                : item.VariantTitle.Trim();
+            (decimal classifiedRate, string classifiedReason) =
+                ResolveVatRateForReportItem( productId, supplyVatRates );
+            decimal assignedRate = !isEuDestination ? 0m : classifiedRate;
+            string reason = !isEuDestination ? "non-eu-destination" : classifiedReason;
+
+            if (!grossByRate.ContainsKey( assignedRate )) grossByRate[assignedRate] = 0m;
+            if (!itemsByRate.ContainsKey( assignedRate ))
+                itemsByRate[assignedRate] = new List<VatReportRowItem>();
+            grossByRate[assignedRate] += lineGross;
+            itemsByRate[assignedRate].Add( new VatReportRowItem
+            {
+                ShopifyProductId = productId,
+                ShopifyVariantId = variantId,
+                VariantTitle = variantTitle,
+                ProductTitle = string.IsNullOrWhiteSpace( item.ProductTitle )
+                    ? productId
+                    : item.ProductTitle.Trim(),
+                ProductType = (item.ProductType ?? string.Empty).Trim(),
+                Quantity = item.Quantity,
+                UnitPrice = VatReportHelpers.Round2( item.UnitPrice ),
+                GrossAmount = lineGross,
+                AssignedVatRatePercent = assignedRate,
+                AssignmentReason = reason
+            } );
+        }
+
+        decimal totalGross = grossByRate.Values.Sum();
+        if (totalGross <= 0m)
+        {
+            throw new InvalidOperationException( "Сума замовы павінна быць больш за 0." );
+        }
+
+        List<VatReportRow> createdRows = new();
+        foreach ((decimal rate, decimal goodsGross) in grossByRate.OrderBy( x => x.Key ))
+        {
+            decimal shippingForRate = totalGross > 0m
+                ? VatReportHelpers.Round2( shippingGross * (goodsGross / totalGross) )
+                : 0m;
+            createdRows.Add( BuildManualForeignRow(
+                reportId,
+                shopifyOrderId,
+                encodedOrderNumber,
+                orderDateUtc,
+                rate,
+                goodsGross,
+                shippingForRate,
+                itemsByRate[rate]
+            ) );
+        }
+
+        if (grossByRate.Count > 1 && shippingGross > 0m)
+        {
+            decimal assigned = createdRows.Sum( r => r.ShippingGrossAmount );
+            decimal diff = VatReportHelpers.Round2( shippingGross - assigned );
+            if (diff != 0m)
+            {
+                VatReportRow target = createdRows[^1];
+                target.ShippingGrossAmount = VatReportHelpers.Round2( target.ShippingGrossAmount + diff );
+                RecalculateForeignRowAmounts( target );
+            }
+        }
+
+        _db.VatReportRows.AddRange( createdRows );
+        await _db.SaveChangesAsync();
+
+        List<(string ProductId, string VariantId, int Quantity)> newSaleLines = createdRows
+            .SelectMany( r => r.Items )
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+
+        try
+        {
+            await ReplaceManualSaleStockEffectsAsync(
+                shopifyOrderId,
+                orderNumber,
+                orderDateUtc,
+                oldSaleLines,
+                newSaleLines );
+        }
+        catch
+        {
+            _db.VatReportRows.RemoveRange( createdRows );
+            await _db.SaveChangesAsync();
+            throw;
+        }
+
+        await RecalculateReportTotalsAsync( reportId );
+    }
+
+    private async Task RestoreManualSaleStockAsync(
+        string shopifyOrderId,
+        IReadOnlyList<VatReportRow> rows )
+    {
+        if (string.IsNullOrWhiteSpace( shopifyOrderId )
+            || !shopifyOrderId.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase ))
+        {
+            return;
+        }
+
+        await _odooDeliverySync.CancelForManualSaleOrderAsync( shopifyOrderId );
+
+        ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+        Dictionary<string, int> restoreByProduct = new( StringComparer.OrdinalIgnoreCase );
+        foreach (VatReportRow sibling in rows)
+        {
+            foreach (VatReportRowItem item in sibling.Items)
+            {
+                string productId = ShopifyIds.NormalizeProductId( item.ShopifyProductId ).Trim();
+                if (string.IsNullOrWhiteSpace( productId ) || item.Quantity <= 0)
+                {
+                    continue;
+                }
+
+                restoreByProduct[productId] =
+                    restoreByProduct.GetValueOrDefault( productId ) + item.Quantity;
+            }
+        }
+
+        if (restoreByProduct.Count > 0)
+        {
+            await _shopifyInventory.ApplyInventoryDeltasByProductKeyAsync(
+                shopifySession.Shop,
+                shopifySession.AccessToken,
+                restoreByProduct );
+        }
+    }
+
+    /// <summary>
+    /// Replaces stock effects for a manual order using net Shopify deltas (not restore-all + apply-all)
+    /// so edits with many unchanged lines do not time out the gateway.
+    /// </summary>
+    private async Task ReplaceManualSaleStockEffectsAsync(
+        string syncOrderId,
+        string note,
+        DateTime soldAtUtc,
+        IReadOnlyList<(string ProductId, string VariantId, int Quantity)> oldLines,
+        IReadOnlyList<(string ProductId, string VariantId, int Quantity)> newLines )
+    {
+        string orderId = (syncOrderId ?? string.Empty).Trim();
+        bool isManualOrder = orderId.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase );
+
+        if (isManualOrder && oldLines.Count > 0)
+        {
+            await _odooDeliverySync.CancelForManualSaleOrderAsync( orderId );
+        }
+
+        Dictionary<string, int> netByProduct = new( StringComparer.OrdinalIgnoreCase );
+        foreach ((string productId, _, int quantity) in oldLines)
+        {
+            string normalized = ShopifyIds.NormalizeProductId( productId ).Trim();
+            if (string.IsNullOrWhiteSpace( normalized ) || quantity <= 0)
+            {
+                continue;
+            }
+
+            // Restore previously sold units.
+            netByProduct[normalized] = netByProduct.GetValueOrDefault( normalized ) + quantity;
+        }
+
+        foreach ((string productId, _, int quantity) in newLines)
+        {
+            string normalized = ShopifyIds.NormalizeProductId( productId ).Trim();
+            if (string.IsNullOrWhiteSpace( normalized ) || quantity <= 0)
+            {
+                continue;
+            }
+
+            // Deduct newly sold units.
+            netByProduct[normalized] = netByProduct.GetValueOrDefault( normalized ) - quantity;
+        }
+
+        Dictionary<string, int> nonZero = netByProduct
+            .Where( entry => entry.Value != 0 )
+            .ToDictionary( entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase );
+
+        if (nonZero.Count > 0)
+        {
+            ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+            await _shopifyInventory.ApplyInventoryDeltasByProductKeyAsync(
+                shopifySession.Shop,
+                shopifySession.AccessToken,
+                nonZero );
+        }
+
+        if (newLines.Count > 0 && !string.IsNullOrWhiteSpace( orderId ))
+        {
+            try
+            {
+                await _odooDeliverySync.CreateForManualSaleOrderAsync(
+                    orderId,
+                    note,
+                    soldAtUtc,
+                    newLines );
+            }
+            catch
+            {
+                if (nonZero.Count > 0)
+                {
+                    try
+                    {
+                        ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+                        Dictionary<string, int> undo = nonZero.ToDictionary(
+                            entry => entry.Key,
+                            entry => -entry.Value,
+                            StringComparer.OrdinalIgnoreCase );
+                        await _shopifyInventory.ApplyInventoryDeltasByProductKeyAsync(
+                            shopifySession.Shop,
+                            shopifySession.AccessToken,
+                            undo );
+                    }
+                    catch
+                    {
+                        // Best-effort undo.
+                    }
+                }
+
+                throw;
+            }
+        }
+    }
 
     public async Task<int> AddExpenseAsync( int reportId, VatReportExpenseCreateRequest request )
         {
@@ -687,20 +1448,6 @@ public class VatReportMutationService
         decimal unitPrice = VatReportHelpers.Round2( request.UnitPrice );
         decimal gross = VatReportHelpers.Round2( unitPrice * request.Quantity );
 
-        if (SyncCashSaleInventoryWithShopify)
-        {
-            ShopifySession session = ShopifySessionReader.Require(
-                _httpContextAccessor,
-                "Няма Shopify-кантэксту для абнаўлення склада."
-            );
-            await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
-                session.Shop,
-                session.AccessToken,
-                productId,
-                -request.Quantity
-            );
-        }
-
         VatReportCashSale sale = new()
         {
             VatReportId = reportId,
@@ -714,6 +1461,57 @@ public class VatReportMutationService
         };
         _db.VatReportCashSales.Add( sale );
         await _db.SaveChangesAsync();
+
+        ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+        bool shopifyApplied = false;
+        try
+        {
+            await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+                shopifySession.Shop,
+                shopifySession.AccessToken,
+                productId,
+                -request.Quantity );
+            shopifyApplied = true;
+
+            await _odooDeliverySync.CreateForCashSaleAsync(
+                sale.Id,
+                productId,
+                variantId,
+                request.Quantity,
+                sale.CreatedAtUtc );
+        }
+        catch
+        {
+            try
+            {
+                await _odooDeliverySync.CancelForCashSaleAsync( sale.Id );
+            }
+            catch
+            {
+                // Best-effort; original error is rethrown below.
+            }
+
+            if (shopifyApplied)
+            {
+                try
+                {
+                    await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+                        shopifySession.Shop,
+                        shopifySession.AccessToken,
+                        productId,
+                        request.Quantity );
+                }
+                catch
+                {
+                    // Best-effort restore; original error is rethrown below.
+                }
+            }
+
+            _db.VatReportCashSales.Remove( sale );
+            await _db.SaveChangesAsync();
+            throw;
+        }
+
         await _financeSync.SyncPeriodForReportIdAsync( reportId );
         return sale.Id;
     }
@@ -729,23 +1527,36 @@ public class VatReportMutationService
 
         int reportId = sale.VatReportId;
 
-        if (SyncCashSaleInventoryWithShopify)
-        {
-            ShopifySession session = ShopifySessionReader.Require(
-                _httpContextAccessor,
-                "Няма Shopify-кантэксту для абнаўлення склада."
-            );
-            await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
-                session.Shop,
-                session.AccessToken,
-                sale.ShopifyProductId,
-                sale.Quantity
-            );
-        }
+        await _odooDeliverySync.CancelForCashSaleAsync( cashSaleId );
+
+        ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+        await _shopifyInventory.ApplyInventoryDeltaByProductKeyAsync(
+            shopifySession.Shop,
+            shopifySession.AccessToken,
+            sale.ShopifyProductId,
+            sale.Quantity );
 
         _db.VatReportCashSales.Remove( sale );
         await _db.SaveChangesAsync();
         await _financeSync.SyncPeriodForReportIdAsync( reportId );
+    }
+
+    private ShopifySession ResolveShopifySessionForCashSale()
+    {
+        if (ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
+        {
+            return session;
+        }
+
+        string shop = (_config["Shopify:Shop"] ?? string.Empty).Trim();
+        string accessToken = (_config["Shopify:AccessToken"] ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace( shop ) && !string.IsNullOrWhiteSpace( accessToken ))
+        {
+            return new ShopifySession( shop, accessToken );
+        }
+
+        throw new InvalidOperationException(
+            "Няма Shopify-кантэксту для абнаўлення склада (сесія або Shopify:Shop/AccessToken)." );
     }
 
     public async Task<string> AddForeignRowAsync( int reportId, VatReportForeignRowCreateRequest request )
@@ -892,8 +1703,131 @@ public class VatReportMutationService
 
         _db.VatReportRows.AddRange( createdRows );
         await _db.SaveChangesAsync();
+
+        List<(string ProductId, string VariantId, int Quantity)> saleLines = createdRows
+            .SelectMany( r => r.Items )
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+
+        try
+        {
+            await ApplyManualSaleStockEffectsAsync(
+                shopifyOrderId,
+                orderNumber,
+                orderDateUtc,
+                saleLines );
+        }
+        catch
+        {
+            _db.VatReportRows.RemoveRange( createdRows );
+            await _db.SaveChangesAsync();
+            throw;
+        }
+
         await RecalculateReportTotalsAsync( foreignReport.Id );
         return shopifyOrderId;
+    }
+
+    /// <summary>
+    /// Decrease Shopify stock for each line and create SyncOnSale Odoo Wydanie.
+    /// Rolls back Shopify + Wydanie on failure.
+    /// </summary>
+    private async Task ApplyManualSaleStockEffectsAsync(
+        string syncOrderId,
+        string note,
+        DateTime soldAtUtc,
+        IReadOnlyList<(string ProductId, string VariantId, int Quantity)> saleLines )
+    {
+        if (saleLines.Count == 0)
+        {
+            return;
+        }
+
+        ShopifySession shopifySession = ResolveShopifySessionForCashSale();
+        Dictionary<string, int> deductByProduct = new( StringComparer.OrdinalIgnoreCase );
+        foreach ((string productId, _, int quantity) in saleLines)
+        {
+            string normalized = ShopifyIds.NormalizeProductId( productId ).Trim();
+            if (string.IsNullOrWhiteSpace( normalized ) || quantity <= 0)
+            {
+                continue;
+            }
+
+            deductByProduct[normalized] =
+                deductByProduct.GetValueOrDefault( normalized ) - quantity;
+        }
+
+        try
+        {
+            if (deductByProduct.Count > 0)
+            {
+                await _shopifyInventory.ApplyInventoryDeltasByProductKeyAsync(
+                    shopifySession.Shop,
+                    shopifySession.AccessToken,
+                    deductByProduct );
+            }
+
+            await _odooDeliverySync.CreateForManualSaleOrderAsync(
+                syncOrderId,
+                note,
+                soldAtUtc,
+                saleLines );
+        }
+        catch
+        {
+            try
+            {
+                await _odooDeliverySync.CancelForManualSaleOrderAsync( syncOrderId );
+            }
+            catch
+            {
+                // Best-effort.
+            }
+
+            if (deductByProduct.Count > 0)
+            {
+                try
+                {
+                    Dictionary<string, int> undo = deductByProduct.ToDictionary(
+                        entry => entry.Key,
+                        entry => -entry.Value,
+                        StringComparer.OrdinalIgnoreCase );
+                    await _shopifyInventory.ApplyInventoryDeltasByProductKeyAsync(
+                        shopifySession.Shop,
+                        shopifySession.AccessToken,
+                        undo );
+                }
+                catch
+                {
+                    // Best-effort restore.
+                }
+            }
+
+            throw;
+        }
+    }
+
+    private async Task EnsureOdooWydanieForReportRowItemsAsync(
+        string syncOrderId,
+        string note,
+        DateTime soldAtUtc,
+        IEnumerable<VatReportRowItem> items )
+    {
+        List<(string ProductId, string VariantId, int Quantity)> lines = items
+            .Where( i => i.Quantity > 0 && !string.IsNullOrWhiteSpace( i.ShopifyProductId ) )
+            .Select( i => (i.ShopifyProductId, i.ShopifyVariantId, i.Quantity) )
+            .ToList();
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        await _odooDeliverySync.CreateForManualSaleOrderAsync(
+            syncOrderId,
+            string.IsNullOrWhiteSpace( note ) ? syncOrderId : note,
+            soldAtUtc,
+            lines );
     }
 
     private async Task RecalculateReportTotalsAsync( int reportId )

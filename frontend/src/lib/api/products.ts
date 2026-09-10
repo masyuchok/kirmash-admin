@@ -125,6 +125,7 @@ export async function fetchProductsWithSuppliers(
       shopifyQuantityInStock: readInt(
         r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock
       ),
+      shopifySalePrice: readNumber(r.shopifySalePrice ?? r.ShopifySalePrice),
       hasSupplyQuantityOverride: Boolean(
         r.hasSupplyQuantityOverride ?? r.HasSupplyQuantityOverride ?? false
       ),
@@ -182,6 +183,7 @@ export async function fetchProductHistory(
   const suppliesRaw = data.supplies ?? data.Supplies;
   const salesRaw = data.sales ?? data.Sales;
   const paymentsRaw = data.payments ?? data.Payments;
+  const bukinistkaOffersRaw = data.bukinistkaOffers ?? data.BukinistkaOffers;
 
   const supplies = Array.isArray(suppliesRaw)
     ? suppliesRaw.map((item) => {
@@ -236,6 +238,23 @@ export async function fetchProductHistory(
       })
     : [];
 
+  const bukinistkaOffers = Array.isArray(bukinistkaOffersRaw)
+    ? bukinistkaOffersRaw.map((item) => {
+        const o = item as Record<string, unknown>;
+        return {
+          dateUtc: readString(o.dateUtc ?? o.DateUtc),
+          offerId: readInt(o.offerId ?? o.OfferId),
+          shopifyVariantId: readString(
+            o.shopifyVariantId ?? o.ShopifyVariantId
+          ),
+          variantTitle: readString(o.variantTitle ?? o.VariantTitle),
+          quantity: readInt(o.quantity ?? o.Quantity),
+          grossUnitCost: readNumber(o.grossUnitCost ?? o.GrossUnitCost),
+          isAssignment: Boolean(o.isAssignment ?? o.IsAssignment ?? false),
+        };
+      })
+    : [];
+
   return {
     shopifyProductId: readString(
       data.shopifyProductId ?? data.ShopifyProductId
@@ -244,6 +263,7 @@ export async function fetchProductHistory(
     supplies,
     sales,
     payments,
+    bukinistkaOffers,
   };
 }
 

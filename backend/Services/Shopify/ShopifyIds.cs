@@ -23,6 +23,23 @@ public static class ShopifyIds
             : $"gid://shopify/Product/{trimmed}";
     }
 
+    public static string? ToTaxonomyCategoryGid( string? id )
+    {
+        if (string.IsNullOrWhiteSpace( id ))
+        {
+            return null;
+        }
+
+        string trimmed = id.Trim();
+        const string prefix = "gid://shopify/TaxonomyCategory/";
+        if (trimmed.StartsWith( prefix, StringComparison.OrdinalIgnoreCase ))
+        {
+            return trimmed;
+        }
+
+        return $"{prefix}{trimmed}";
+    }
+
     public static string NormalizeVariantId( string id ) => NormalizeGid( id, "gid://shopify/ProductVariant/" );
 
     public static long? TryParseNumericProductId( string raw )

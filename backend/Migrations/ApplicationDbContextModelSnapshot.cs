@@ -369,6 +369,9 @@ namespace backend.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<bool>("SyncOnSale")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("StorefrontUrl")
                         .IsRequired()
                         .HasMaxLength(2048)
@@ -422,6 +425,12 @@ namespace backend.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<bool>("IsOwnStock")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsReturn")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsReversed")
                         .HasColumnType("boolean");
 
                     b.Property<int?>("OfferId")
@@ -487,6 +496,88 @@ namespace backend.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("KirmaBukinistkaPosSyncStates");
+                });
+
+            modelBuilder.Entity("backend.Models.KirmaBukinistkaShopifyDeliverySync", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("CancelledAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsCancelled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("OfferId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("OdooPickingId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OdooPickingName")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("OdooProductId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ShopifyOrderId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ShopifyOrderNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ShopifyProductId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ShopifyVariantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("SoldAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SoldAtUtc");
+
+                    b.HasIndex("ShopifyOrderId", "ShopifyProductId", "ShopifyVariantId", "OfferId")
+                        .IsUnique();
+
+                    b.ToTable("KirmaBukinistkaShopifyDeliverySyncs");
+                });
+
+            modelBuilder.Entity("backend.Models.KirmaBukinistkaShopifyDeliverySyncState", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime?>("LastSyncedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("KirmaBukinistkaShopifyDeliverySyncStates");
                 });
 
             modelBuilder.Entity("backend.Models.Product", b =>

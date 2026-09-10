@@ -333,6 +333,7 @@ internal static class VatReportHelpers
     /// <summary>
     /// Pin variants are often "style / color". Invoice text may use a different grammatical
     /// form than Shopify (e.g. Радкова vs Радковай) while still referring to the same variant.
+    /// Book covers often use short labels (мяккая / цвёрдая) vs longer Shopify titles.
     /// </summary>
     public static bool VariantTitlesEquivalentForPaymentMatch( string? leftRaw, string? rightRaw )
     {
@@ -348,17 +349,65 @@ internal static class VatReportHelpers
             return true;
         }
 
+        string? leftCover = CanonicalBookCoverKey( left );
+        string? rightCover = CanonicalBookCoverKey( right );
+        if (leftCover is not null && rightCover is not null)
+        {
+            return string.Equals( leftCover, rightCover, StringComparison.Ordinal );
+        }
+
+        string leftLoose = NormalizeLooseVariantLabel( left );
+        string rightLoose = NormalizeLooseVariantLabel( right );
+        if (string.Equals( leftLoose, rightLoose, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        // Short payment labels like "мяккая" vs catalog "Мяккая вокладка".
+        if (leftLoose.Length >= 4 && rightLoose.Length >= 4 &&
+            (rightLoose.Contains( leftLoose, StringComparison.OrdinalIgnoreCase ) ||
+             leftLoose.Contains( rightLoose, StringComparison.OrdinalIgnoreCase )))
+        {
+            return true;
+        }
+
         if (!TryParsePinStyleColorVariant( left, out string leftStyle, out string leftColor ) ||
             !TryParsePinStyleColorVariant( right, out string rightStyle, out string rightColor ))
         {
-            return string.Equals(
-                NormalizeLooseVariantLabel( left ),
-                NormalizeLooseVariantLabel( right ),
-                StringComparison.OrdinalIgnoreCase );
+            return false;
         }
 
         return string.Equals( leftColor, rightColor, StringComparison.OrdinalIgnoreCase ) &&
                PinVariantStyleKeysEquivalent( leftStyle, rightStyle );
+    }
+
+    /// <summary>
+    /// Soft/hard cover labels used on book variants (Belarusian/Russian/English).
+    /// </summary>
+    private static string? CanonicalBookCoverKey( string raw )
+    {
+        string s = (raw ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace( s ))
+        {
+            return null;
+        }
+
+        if (s.Contains( "мякк", StringComparison.Ordinal ) ||
+            s.Contains( "soft", StringComparison.Ordinal ) ||
+            s.Contains( "paper", StringComparison.Ordinal ))
+        {
+            return "soft";
+        }
+
+        if (s.Contains( "цвёрд", StringComparison.Ordinal ) ||
+            s.Contains( "тверд", StringComparison.Ordinal ) ||
+            s.Contains( "hard", StringComparison.Ordinal ) ||
+            s.Contains( "board", StringComparison.Ordinal ))
+        {
+            return "hard";
+        }
+
+        return null;
     }
 
     private static string NormalizeLooseVariantLabel( string raw )

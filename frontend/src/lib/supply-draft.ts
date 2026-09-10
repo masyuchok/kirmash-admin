@@ -168,7 +168,12 @@ export function displayDraftLabel(
 export function createDraftLinesForProduct(
   product: ProductWithSuppliers,
   quantities: Record<string, string>,
-  defaultVatRatePercent: number
+  defaultVatRatePercent: number,
+  defaults?: {
+    supplierPrice?: number;
+    salePrice?: number;
+    marginPercent?: number;
+  }
 ): SupplyProductDraft[] {
   const variants = (product.variants ?? []).filter(
     (v) =>
@@ -176,16 +181,35 @@ export function createDraftLinesForProduct(
       v.variantName !== 'Default Title'
   );
 
+  const supplierPrice =
+    defaults?.supplierPrice != null &&
+    Number.isFinite(defaults.supplierPrice) &&
+    defaults.supplierPrice > 0
+      ? formatDraftMoney(defaults.supplierPrice)
+      : '';
+  const salePrice =
+    defaults?.salePrice != null &&
+    Number.isFinite(defaults.salePrice) &&
+    defaults.salePrice > 0
+      ? formatDraftMoney(defaults.salePrice)
+      : '';
+  const marginPercent =
+    defaults?.marginPercent != null &&
+    Number.isFinite(defaults.marginPercent) &&
+    defaults.marginPercent > 0
+      ? formatDraftMargin(defaults.marginPercent)
+      : '';
+
   const base = {
     productId: product.shopifyProductId,
     productName: product.productName,
     productType: product.productType,
     syncWithShopify: true,
     isReturnFinalized: false,
-    supplierPrice: '',
+    supplierPrice,
     vatRatePercent: String(defaultVatRatePercent),
-    marginPercent: '',
-    salePrice: '',
+    marginPercent,
+    salePrice,
   };
 
   if (variants.length > 1) {

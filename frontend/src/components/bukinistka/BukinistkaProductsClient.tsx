@@ -1,14 +1,25 @@
 'use client';
 
+import ProposeToBukinistkaModal, {
+  type ProposeToBukinistkaDraft,
+} from '@/components/products/ProposeToBukinistkaModal';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import { usePortalMenu } from '@/hooks/usePortalMenu';
+import { createBukinistkaOfferToKirma } from '@/lib/api/bukinistka-offers';
 import {
   fetchBukinistkaProducts,
   type BukinistkaProduct,
 } from '@/lib/api/bukinistka-products';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FiChevronDown, FiChevronUp, FiSearch, FiX } from 'react-icons/fi';
+import {
+  FiChevronDown,
+  FiChevronUp,
+  FiSearch,
+  FiSend,
+  FiTag,
+  FiX,
+} from 'react-icons/fi';
 
 type SortKey = 'standardPrice' | 'listPrice' | 'quantityInStock';
 type SortDir = 'asc' | 'desc';
@@ -82,13 +93,26 @@ function SortableHeader({
 }
 
 export default function BukinistkaProductsClient() {
+  const [initialRows, setInitialRows] = useState<BukinistkaProduct[]>([]);
   const [rows, setRows] = useState<BukinistkaProduct[]>([]);
+  const [catalogTotalCount, setCatalogTotalCount] = useState(0);
+  const [catalogTruncated, setCatalogTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('quantityInStock');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
+  const [proposeRow, setProposeRow] = useState<BukinistkaProduct | null>(null);
+  const [proposeDraft, setProposeDraft] =
+    useState<ProposeToBukinistkaDraft | null>(null);
+  const [proposeMode, setProposeMode] = useState<'propose' | 'assign'>(
+    'propose'
+  );
+  const [proposeSubmitting, setProposeSubmitting] = useState(false);
+  const [proposeError, setProposeError] = useState<string | null>(null);
+  const [proposeOk, setProposeOk] = useState<string | null>(null);
   const supplierMenu = usePortalMenu({
     menuWidth: 280,
     estimatedMenuHeight: 320,
@@ -99,8 +123,13 @@ export default function BukinistkaProductsClient() {
     setLoading(true);
     setError(null);
     fetchBukinistkaProducts()
-      .then((products) => {
-        if (!cancelled) setRows(products);
+      .then((result) => {
+        if (!cancelled) {
+          setInitialRows(result.products);
+          setRows(result.products);
+          setCatalogTotalCount(result.totalCount);
+          setCatalogTruncated(result.isTruncated);
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -112,6 +141,34 @@ export default function BukinistkaProductsClient() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const search = searchQuery.trim();
+    if (search.length < 2) {
+      setRows(initialRows);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      fetchBukinistkaProducts({ search })
+        .then((result) => {
+          if (!cancelled) setRows(result.products);
+        })
+        .catch((err: Error) => {
+          if (!cancelled) setError(err.message);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchLoading(false);
+        });
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, initialRows]);
 
   const supplierOptions = useMemo(() => {
     const set = new Set<string>();
@@ -127,6 +184,7 @@ export default function BukinistkaProductsClient() {
 
   const visibleRows = useMemo(() => {
     const search = searchQuery.trim().toLowerCase();
+    const serverSearch = search.length >= 2;
     let list = rows;
 
     if (selectedSuppliers.length > 0) {
@@ -135,7 +193,7 @@ export default function BukinistkaProductsClient() {
       );
     }
 
-    if (search) {
+    if (search && !serverSearch) {
       list = list.filter((row) => {
         const haystack = [
           row.name,
@@ -180,6 +238,74 @@ export default function BukinistkaProductsClient() {
     window.open(row.odooUrl, '_blank', 'noopener,noreferrer');
   };
 
+  const openPropose = (row: BukinistkaProduct) => {
+    setProposeError(null);
+    setProposeOk(null);
+    setProposeMode('propose');
+    setProposeRow(row);
+    setProposeDraft({
+      productLabel: row.name,
+      quantity: Math.max(1, Math.floor(row.quantityInStock) || 1),
+      grossUnitCost: Number.isFinite(row.standardPrice) ? row.standardPrice : 0,
+      syncOnSale: true,
+    });
+  };
+
+  const openAssign = (row: BukinistkaProduct) => {
+    setProposeError(null);
+    setProposeOk(null);
+    setProposeMode('assign');
+    setProposeRow(row);
+    setProposeDraft({
+      productLabel: row.name,
+      quantity: Math.max(1, Math.floor(row.quantityInStock) || 1),
+      grossUnitCost: Number.isFinite(row.standardPrice) ? row.standardPrice : 0,
+      syncOnSale: false,
+    });
+  };
+
+  const handleProposeSubmit = async (
+    quantity: number,
+    grossUnitCost: number,
+    syncOnSale: boolean
+  ) => {
+    if (!proposeRow) return;
+    const isAssignment = proposeMode === 'assign';
+    setProposeSubmitting(true);
+    setProposeError(null);
+    try {
+      await createBukinistkaOfferToKirma({
+        odooProductId: proposeRow.id,
+        quantity,
+        grossUnitCost,
+        syncOnSale,
+        isAssignment,
+      });
+      setProposeOk(
+        isAssignment
+          ? `Назначэнне «${proposeRow.name}» дасланае Кірмашу.`
+          : `Прапанова «${proposeRow.name}» дасланая Кірмашу.`
+      );
+      setProposeRow(null);
+      setProposeDraft(null);
+      const result = await fetchBukinistkaProducts();
+      setInitialRows(result.products);
+      setRows(result.products);
+      setCatalogTotalCount(result.totalCount);
+      setCatalogTruncated(result.isTruncated);
+    } catch (err) {
+      setProposeError(
+        err instanceof Error
+          ? err.message
+          : isAssignment
+            ? 'Не ўдалося даслаць назначэнне.'
+            : 'Не ўдалося даслаць прапанову.'
+      );
+    } finally {
+      setProposeSubmitting(false);
+    }
+  };
+
   const supplierFilterActive = selectedSuppliers.length > 0;
 
   return (
@@ -187,16 +313,21 @@ export default function BukinistkaProductsClient() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Прадукты</h1>
         <p className="mt-1 text-sm text-gray-600">
-          Каталог Odoo Bukinistka з колькасцю ў наяўнасці. Клік па радку
-          адкрывае картку ў Odoo.
+          Каталог Odoo Bukinistka. Клік па радку адкрывае картку ў Odoo.
+          «Кірмашу» — прапанова на продаж; «Назначыць» — консігнацыя на ўлік
+          Кірмаша (пасля прыёму — як прапанова ад Кірмаша).
         </p>
       </div>
 
+      {proposeOk ? (
+        <p className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          {proposeOk}
+        </p>
+      ) : null}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <label className="relative block w-full max-w-md">
-          <span className="sr-only">
-            Пошук па назве, штрыхкодзе і пастаўшчыку
-          </span>
+          <span className="sr-only">Пошук па назве, штрыхкодзе і выдаўцу</span>
           <FiSearch
             className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-gray-400"
             aria-hidden
@@ -205,7 +336,7 @@ export default function BukinistkaProductsClient() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Пошук па назве, штрыхкодзе, пастаўшчыку..."
+            placeholder="Пошук па назве, штрыхкодзе, выдаўцу..."
             className="h-10 w-full rounded-xl border border-gray-200 bg-white py-2 pl-10 pr-10 text-sm text-gray-900 shadow-sm outline-none transition placeholder:text-gray-400 focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
           />
           {searchQuery && (
@@ -239,15 +370,33 @@ export default function BukinistkaProductsClient() {
               {visibleRows.length}
             </span>
             {searchQuery.trim() || supplierFilterActive
-              ? ` (з ${rows.length})`
-              : null}
+              ? searchQuery.trim().length >= 2
+                ? searchLoading
+                  ? ' (пошук…)'
+                  : ` (з ${rows.length})`
+                : ` (з ${rows.length})`
+              : catalogTruncated
+                ? ` (з ${catalogTotalCount.toLocaleString('be-BY')}, паказана ${rows.length})`
+                : null}
+            {searchLoading ? (
+              <span className="ml-2 inline-flex items-center gap-1 text-amber-800">
+                <span className="size-3 animate-spin rounded-full border-2 border-amber-200 border-t-amber-700" />
+                Пошук у Odoo…
+              </span>
+            ) : null}
+            {!searchQuery.trim() && catalogTruncated ? (
+              <p className="mt-1 text-xs text-amber-800">
+                У каталогу больш за {rows.length} прадуктаў. Увядзіце назву або
+                штрыхкод у пошук, каб знайсці іншыя.
+              </p>
+            ) : null}
             {supplierFilterActive ? (
               <button
                 type="button"
                 onClick={() => setSelectedSuppliers([])}
                 className="ml-3 text-amber-800 underline-offset-2 hover:underline"
               >
-                Скінуць фільтр пастаўшчыка
+                Скінуць фільтр выдаўца
               </button>
             ) : null}
           </div>
@@ -269,9 +418,9 @@ export default function BukinistkaProductsClient() {
                       }`}
                       aria-expanded={supplierMenu.open}
                       aria-haspopup="listbox"
-                      aria-label="Фільтр па пастаўшчыку"
+                      aria-label="Фільтр па выдаўцу"
                     >
-                      <span>Пастаўшчык</span>
+                      <span>Выдавец</span>
                       <span aria-hidden>{supplierMenu.open ? '▴' : '▾'}</span>
                     </button>
                   </th>
@@ -296,13 +445,14 @@ export default function BukinistkaProductsClient() {
                     sortDir={sortDir}
                     onSort={handleSort}
                   />
+                  <th className="px-4 py-3 text-right">Дзеянні</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {visibleRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="px-4 py-12 text-center text-gray-500"
                     >
                       {rows.length === 0
@@ -311,41 +461,95 @@ export default function BukinistkaProductsClient() {
                     </td>
                   </tr>
                 ) : (
-                  visibleRows.map((row) => (
-                    <tr
-                      key={row.id}
-                      className="cursor-pointer hover:bg-amber-50/40"
-                      onClick={() => openInOdoo(row)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          openInOdoo(row);
-                        }
-                      }}
-                      tabIndex={0}
-                      role="link"
-                      aria-label={`Адкрыць «${row.name}» у Odoo`}
-                    >
-                      <td className="px-4 py-3 font-medium text-gray-900">
-                        {row.name}
-                      </td>
-                      <td className="px-4 py-3 text-gray-600">
-                        {row.barcode || '—'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-600">
-                        {row.supplierName || '—'}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-gray-900">
-                        {formatPrice(row.standardPrice)}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-gray-900">
-                        {formatPrice(row.listPrice)}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-gray-900">
-                        {formatQty(row.quantityInStock)}
-                      </td>
-                    </tr>
-                  ))
+                  visibleRows.map((row) => {
+                    const canPropose = row.quantityInStock > 0;
+                    const warnReason =
+                      !row.canProposeToKirma && row.proposeBlockReason
+                        ? row.proposeBlockReason
+                        : null;
+                    return (
+                      <tr key={row.id} className="hover:bg-amber-50/40">
+                        <td
+                          className="cursor-pointer px-4 py-3 font-medium text-gray-900"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {row.name}
+                        </td>
+                        <td
+                          className="cursor-pointer px-4 py-3 text-gray-600"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {row.barcode || '—'}
+                        </td>
+                        <td
+                          className="cursor-pointer px-4 py-3 text-gray-600"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {row.supplierName || '—'}
+                        </td>
+                        <td
+                          className="cursor-pointer px-4 py-3 text-right tabular-nums text-gray-900"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {formatPrice(row.standardPrice)}
+                        </td>
+                        <td
+                          className="cursor-pointer px-4 py-3 text-right tabular-nums text-gray-900"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {formatPrice(row.listPrice)}
+                        </td>
+                        <td
+                          className="cursor-pointer px-4 py-3 text-right tabular-nums text-gray-900"
+                          onClick={() => openInOdoo(row)}
+                        >
+                          {formatQty(row.quantityInStock)}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              disabled={!canPropose}
+                              title={
+                                !canPropose
+                                  ? 'Няма ў наяўнасці'
+                                  : warnReason
+                                    ? `${warnReason} Можна даслаць яшчэ.`
+                                    : 'Прапанаваць Кірмашу'
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openPropose(row);
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <FiSend className="size-3.5" aria-hidden />
+                              Кірмашу
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!canPropose}
+                              title={
+                                !canPropose
+                                  ? 'Няма ў наяўнасці'
+                                  : warnReason
+                                    ? `${warnReason} Можна назначыць яшчэ.`
+                                    : 'Назначыць Кірмашу (консігнацыя)'
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openAssign(row);
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-xs font-medium text-sky-900 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <FiTag className="size-3.5" aria-hidden />
+                              Назначыць
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -365,11 +569,11 @@ export default function BukinistkaProductsClient() {
               width: `${supplierMenu.menuWidth}px`,
             }}
             role="listbox"
-            aria-label="Фільтр пастаўшчыкоў"
+            aria-label="Фільтр выдаўцоў"
           >
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                Пастаўшчыкі
+                Выдаўцы
               </p>
               {supplierFilterActive ? (
                 <button
@@ -383,7 +587,7 @@ export default function BukinistkaProductsClient() {
             </div>
             <div className="max-h-64 space-y-2 overflow-auto pr-1">
               {supplierOptions.length === 0 ? (
-                <p className="text-xs text-gray-500">Няма пастаўшчыкоў</p>
+                <p className="text-xs text-gray-500">Няма выдаўцоў</p>
               ) : (
                 supplierOptions.map((supplier) => (
                   <label
@@ -406,6 +610,29 @@ export default function BukinistkaProductsClient() {
           </div>,
           document.body
         )}
+
+      <ProposeToBukinistkaModal
+        open={Boolean(proposeDraft)}
+        draft={proposeDraft}
+        submitting={proposeSubmitting}
+        error={proposeError}
+        title={
+          proposeMode === 'assign' ? 'Назначыць Кірмашу' : 'Прапанаваць Кірмашу'
+        }
+        submitLabel={
+          proposeMode === 'assign' ? 'Даслаць назначэнне' : 'Даслаць прапанову'
+        }
+        showSyncOnSale={proposeMode === 'propose'}
+        onClose={() => {
+          if (proposeSubmitting) return;
+          setProposeRow(null);
+          setProposeDraft(null);
+          setProposeError(null);
+        }}
+        onSubmit={(quantity, grossUnitCost, syncOnSale) => {
+          void handleProposeSubmit(quantity, grossUnitCost, syncOnSale);
+        }}
+      />
     </div>
   );
 }

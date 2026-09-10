@@ -94,10 +94,8 @@ namespace backend.Services
             Dictionary<string, string> productTypes = await TryLoadProductTypesAsync( productIds );
             IReadOnlyDictionary<(string ProductId, string VariantId), string> variantTitles =
                 await TryLoadVariantTitlesAsync();
-            IReadOnlyDictionary<(string ProductId, string VariantId), int> stockByLine =
-                await TryLoadStockByLineAsync();
             Dictionary<InventoryLineKey, int> soldBySupplierLine =
-                await BuildSoldBySupplierLineFastAsync( fifoSupplyBatches );
+                await BuildSoldBySupplierLineFastAsync( fifoSupplyBatches, variantIdByTitle );
             Dictionary<InventoryLineKey, int> paidBySupplierLine =
                 await LoadPaidBySupplierLineAsync(
                     supplierId,
@@ -111,6 +109,17 @@ namespace backend.Services
                     variantIdByTitle,
                     legacySaleVariantByProduct )
                 : paidBySupplierLine;
+            RedistributeUnresolvedPaidQuantities(
+                paidBySupplierLine,
+                soldBySupplierLine,
+                variantIdByTitle );
+            if (!ReferenceEquals( paidBySupplierLine, allPaidBySupplierLine ))
+            {
+                RedistributeUnresolvedPaidQuantities(
+                    allPaidBySupplierLine,
+                    soldBySupplierLine,
+                    variantIdByTitle );
+            }
             Dictionary<InventoryLineKey, decimal> latestSupplierPrice = supplyBatches
                 .GroupBy( x => x.LineKey )
                 .ToDictionary( g => g.Key, g => ResolveLatestNonZeroSupplyPrice( g ) );
@@ -170,8 +179,10 @@ namespace backend.Services
                     latestVatRatePercent.TryGetValue( key, out decimal supplyVatRatePercent );
                     latestMarginPercent.TryGetValue( key, out decimal supplyMarginPercent );
                     latestSalePrice.TryGetValue( key, out decimal supplySalePrice );
+                    // Only fold variants when the catalog explicitly has a single named variant.
+                    // <= 1 treated catalog misses (0) as single-variant and summed soft+hard sold onto each row.
                     bool useProductTotals =
-                        VariantLegacyDefaults.GetNamedVariantCount( key.ProductId, variantIdByTitle ) <= 1;
+                        VariantLegacyDefaults.GetNamedVariantCount( key.ProductId, variantIdByTitle ) == 1;
                     if (useProductTotals && supplyUnitPrice <= 0m)
                     {
                         supplyUnitPrice = ResolveLatestNonZeroSupplyPrice(
@@ -210,12 +221,13 @@ namespace backend.Services
                         ? SumQuantityForSupplierProduct( paidBySupplierLine, key )
                         : paidBySupplierLine.GetValueOrDefault( key );
                     receivedBySupplierLine.TryGetValue( key, out int receivedQuantity );
-                    int quantityInStock = ResolveQuantityInStock(
-                        key.ProductId,
-                        key.VariantId,
-                        useProductTotals,
-                        stockByLine,
-                        defaultVariantByProduct );
+                    // Sold cannot exceed what this supplier line received (guards FIFO double-count).
+                    if (!useProductTotals && soldQuantity > receivedQuantity && receivedQuantity >= 0)
+                    {
+                        soldQuantity = receivedQuantity;
+                    }
+                    // Supplier-line remaining stock (not Shopify global qty).
+                    int quantityInStock = Math.Max( 0, receivedQuantity - soldQuantity );
                     variantTitles.TryGetValue( (key.ProductId, key.VariantId), out string? variantTitle );
                     supplierNames.TryGetValue( key.SupplierId, out string? supplierName );
                     bool isVatPayer = supplierIsVatPayer.GetValueOrDefault( key.SupplierId );
@@ -322,7 +334,7 @@ namespace backend.Services
 
             Dictionary<int, Dictionary<string, int>> result = new();
             Dictionary<InventoryLineKey, int> soldBySupplierLine =
-                await BuildSoldBySupplierLineFastAsync( supplyBatches );
+                await BuildSoldBySupplierLineFastAsync( supplyBatches, variantIdByTitle );
             foreach (IGrouping<int, SupplyBatch> supplierGroup in supplyBatches.GroupBy( batch => batch.LineKey.SupplierId ))
             {
                 Dictionary<InventoryLineKey, int> supplierSold = soldBySupplierLine
@@ -577,22 +589,40 @@ namespace backend.Services
 
         private async Task<Dictionary<string, decimal>> TryLoadShopifyPricesAsync( HashSet<InventoryLineKey> keys )
         {
-            if (!ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ) || keys.Count == 0)
+            Dictionary<string, decimal> prices = new( StringComparer.OrdinalIgnoreCase );
+            if (keys.Count == 0)
             {
-                return new Dictionary<string, decimal>( StringComparer.OrdinalIgnoreCase );
+                return prices;
             }
 
             try
             {
-                return await _shopifyInventory.GetVariantPricesByProductKeysAsync(
-                    session.Shop,
-                    session.AccessToken,
-                    keys.Select( key => (key.ProductId, key.VariantId) ) );
+                // Prefer GraphQL catalog cache — per-product REST was causing 504 under rate limits.
+                IReadOnlyDictionary<(string ProductId, string VariantId), decimal> catalogPrices =
+                    await _variantLookup.GetPriceByLineMapCachedAsync();
+                foreach (InventoryLineKey key in keys)
+                {
+                    if (catalogPrices.TryGetValue( (key.ProductId, key.VariantId), out decimal priced )
+                        && priced > 0m)
+                    {
+                        prices[BuildShopifyPriceKey( key.ProductId, key.VariantId )] = priced;
+                        continue;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace( key.VariantId )
+                        && catalogPrices.TryGetValue( (key.ProductId, string.Empty), out decimal productPrice )
+                        && productPrice > 0m)
+                    {
+                        prices[BuildShopifyPriceKey( key.ProductId, key.VariantId )] = productPrice;
+                    }
+                }
             }
             catch
             {
-                return new Dictionary<string, decimal>( StringComparer.OrdinalIgnoreCase );
+                // Optional Shopify prices; inventory still works without them.
             }
+
+            return prices;
         }
 
         private static string BuildShopifyPriceKey( string productId, string variantId ) =>
@@ -805,18 +835,6 @@ namespace backend.Services
             }
         }
 
-        private async Task<IReadOnlyDictionary<(string ProductId, string VariantId), int>> TryLoadStockByLineAsync()
-        {
-            try
-            {
-                return await _variantLookup.GetStockByLineMapCachedAsync();
-            }
-            catch
-            {
-                return new Dictionary<(string ProductId, string VariantId), int>( ProductVariantKeyComparer.Instance );
-            }
-        }
-
         private async Task<Dictionary<string, string>> BuildProductNamesAsync( HashSet<string> productIds )
         {
             Dictionary<string, string> names = new( StringComparer.OrdinalIgnoreCase );
@@ -964,7 +982,8 @@ namespace backend.Services
         }
 
         private async Task<Dictionary<InventoryLineKey, int>> BuildSoldBySupplierLineFastAsync(
-            List<SupplyBatch> supplyBatches )
+            List<SupplyBatch> supplyBatches,
+            IReadOnlyDictionary<string, Dictionary<string, string>>? variantIdByTitle = null )
         {
             ProductSoldAllocation soldAllocation = await _ledger.GetSoldByLineAsync();
             Dictionary<(string ProductId, string VariantId), int> soldByLine = new(
@@ -976,13 +995,15 @@ namespace backend.Services
             return AllocateSoldBySupplierFifo(
                 soldByLine,
                 legacyUnnamedSoldByProduct,
-                supplyBatches );
+                supplyBatches,
+                variantIdByTitle );
         }
 
         private async Task<Dictionary<InventoryLineKey, int>> BuildSoldBySupplierLineFromHistoryAsync(
             List<SupplyBatch> supplyBatches,
             Dictionary<string, string> productNames,
-            HashSet<string>? limitToProductIds = null )
+            HashSet<string>? limitToProductIds = null,
+            IReadOnlyDictionary<string, Dictionary<string, string>>? variantIdByTitle = null )
         {
             Dictionary<InventoryLineKey, int> soldBySupplierLine = new( InventoryLineKeyComparer.Instance );
             HashSet<string> processedProductIds = new( StringComparer.OrdinalIgnoreCase );
@@ -1052,7 +1073,8 @@ namespace backend.Services
                 foreach (KeyValuePair<InventoryLineKey, int> allocated in AllocateSoldBySupplierFifo(
                              soldByLine,
                              legacyUnnamedSoldByProduct,
-                             productBatches ))
+                             productBatches,
+                             variantIdByTitle ))
                 {
                     soldBySupplierLine[allocated.Key] =
                         soldBySupplierLine.GetValueOrDefault( allocated.Key ) + allocated.Value;
@@ -1104,7 +1126,7 @@ namespace backend.Services
         }
 
         /// <summary>
-        /// Payments to other suppliers for the same product that exceed their FIFO sold qty
+        /// Payments to other suppliers for the same product/variant that exceed their FIFO sold qty
         /// can settle this supplier's unpaid balance (e.g. invoice recorded under wrong supplier).
         /// </summary>
         private static int ComputeCrossSupplierPaymentCredit(
@@ -1123,13 +1145,17 @@ namespace backend.Services
                     continue;
                 }
 
+                if (!string.Equals(
+                        entry.Key.ProductId,
+                        key.ProductId,
+                        StringComparison.OrdinalIgnoreCase ))
+                {
+                    continue;
+                }
+
                 if (useProductTotals)
                 {
-                    if (!string.Equals(
-                            entry.Key.ProductId,
-                            key.ProductId,
-                            StringComparison.OrdinalIgnoreCase ) ||
-                        !processedOtherSuppliers.Add( entry.Key.SupplierId ))
+                    if (!processedOtherSuppliers.Add( entry.Key.SupplierId ))
                     {
                         continue;
                     }
@@ -1140,7 +1166,12 @@ namespace backend.Services
                     continue;
                 }
 
-                if (!InventoryLineKeyComparer.Instance.Equals( entry.Key, key ))
+                // Multi-variant: match same product + variant across suppliers (not full line key —
+                // SupplierId differs, so InventoryLineKey equality would never hit).
+                if (!string.Equals(
+                        entry.Key.VariantId,
+                        key.VariantId,
+                        StringComparison.OrdinalIgnoreCase ))
                 {
                     continue;
                 }
@@ -1216,18 +1247,25 @@ namespace backend.Services
         private static Dictionary<InventoryLineKey, int> AllocateSoldBySupplierFifo(
             Dictionary<(string ProductId, string VariantId), int> soldByLine,
             Dictionary<string, int> legacyUnnamedSoldByProduct,
-            List<SupplyBatch> supplyBatches )
+            List<SupplyBatch> supplyBatches,
+            IReadOnlyDictionary<string, Dictionary<string, string>>? variantIdByTitle = null )
         {
             supplyBatches = NormalizeSupplyBatchesForFifo( supplyBatches );
+            Dictionary<InventoryLineKey, int> capacityByLine = supplyBatches
+                .GroupBy( batch => batch.LineKey, InventoryLineKeyComparer.Instance )
+                .ToDictionary( g => g.Key, g => g.Sum( b => Math.Max( 0, b.Quantity ) ), InventoryLineKeyComparer.Instance );
             Dictionary<InventoryLineKey, int> soldBySupplierLine = new( InventoryLineKeyComparer.Instance );
             Dictionary<(string ProductId, string VariantId), int> remainingSoldByLine =
-                new( soldByLine, ProductVariantKeyComparer.Instance );
+                NormalizeSoldByLineKeys( soldByLine );
 
             IEnumerable<(string ProductId, string VariantId)> lineIds = supplyBatches
-                .Select( x => (x.ShopifyProductId, x.ShopifyVariantId) )
+                .Select( x => (
+                    ShopifyIds.NormalizeProductId( x.ShopifyProductId ),
+                    ShopifyIds.NormalizeVariantId( x.ShopifyVariantId ) ) )
                 .Concat( remainingSoldByLine.Keys )
                 .Distinct( ProductVariantKeyComparer.Instance );
 
+            // 1) Named variants: FIFO only onto matching variant batches (across suppliers by date).
             foreach ((string productId, string variantId) in lineIds)
             {
                 if (string.IsNullOrWhiteSpace( variantId ))
@@ -1247,44 +1285,39 @@ namespace backend.Services
                 remainingSoldByLine[lineKey] = remainingSold;
             }
 
+            // 2) Do NOT spill leftover named-variant sales onto other variants of the same product
+            // (that made Kamunikat soft absorb hard sales / excess soft and show false unpaid).
+            // For single-variant products only, fold leftovers into legacy unnamed for step 3.
             foreach ((string ProductId, string VariantId) lineKey in remainingSoldByLine.Keys.ToList())
             {
                 int remainingSold = remainingSoldByLine[lineKey];
-                if (remainingSold <= 0)
-                {
-                    continue;
-                }
-
-                remainingSold = AllocateToMatchingBatches(
-                    supplyBatches
-                        .Where( batch => string.Equals(
-                            batch.ShopifyProductId,
-                            lineKey.ProductId,
-                            StringComparison.OrdinalIgnoreCase ) )
-                        .OrderBy( batch => batch.SupplyDate )
-                        .ThenBy( batch => batch.SupplyId ),
-                    remainingSold,
-                    soldBySupplierLine );
-                remainingSoldByLine[lineKey] = remainingSold;
-            }
-
-            foreach ((string ProductId, string VariantId) lineKey in remainingSoldByLine.Keys.ToList())
-            {
-                int remainingSold = remainingSoldByLine[lineKey];
-                if (remainingSold <= 0)
-                {
-                    continue;
-                }
-
-                legacyUnnamedSoldByProduct[lineKey.ProductId] =
-                    legacyUnnamedSoldByProduct.GetValueOrDefault( lineKey.ProductId ) + remainingSold;
                 remainingSoldByLine[lineKey] = 0;
+                if (remainingSold <= 0 || string.IsNullOrWhiteSpace( lineKey.VariantId ))
+                {
+                    continue;
+                }
+
+                if (IsSingleVariantProduct( lineKey.ProductId, supplyBatches, variantIdByTitle ))
+                {
+                    legacyUnnamedSoldByProduct[lineKey.ProductId] =
+                        legacyUnnamedSoldByProduct.GetValueOrDefault( lineKey.ProductId ) + remainingSold;
+                }
             }
 
+            // 3) Legacy unnamed sales (no variant): only allocate when the product is not multi-variant.
             foreach (string productId in legacyUnnamedSoldByProduct.Keys.ToList())
             {
                 int remainingSold = legacyUnnamedSoldByProduct.GetValueOrDefault( productId );
-                if (remainingSold <= 0) continue;
+                if (remainingSold <= 0)
+                {
+                    continue;
+                }
+
+                if (!IsSingleVariantProduct( productId, supplyBatches, variantIdByTitle ))
+                {
+                    // Leave unallocated rather than dumping onto earliest soft/hard supplier line.
+                    continue;
+                }
 
                 remainingSold = AllocateToMatchingBatches(
                     supplyBatches
@@ -1299,7 +1332,142 @@ namespace backend.Services
                 legacyUnnamedSoldByProduct[productId] = remainingSold;
             }
 
+            EnforceSoldNotExceedingCapacity( soldBySupplierLine, capacityByLine, supplyBatches );
             return soldBySupplierLine;
+        }
+
+        /// <summary>
+        /// Merge GID/numeric duplicate sold keys so FIFO cannot allocate the same units twice.
+        /// </summary>
+        private static Dictionary<(string ProductId, string VariantId), int> NormalizeSoldByLineKeys(
+            Dictionary<(string ProductId, string VariantId), int> soldByLine )
+        {
+            Dictionary<(string ProductId, string VariantId), int> normalized = new( ProductVariantKeyComparer.Instance );
+            foreach (KeyValuePair<(string ProductId, string VariantId), int> entry in soldByLine)
+            {
+                if (entry.Value <= 0)
+                {
+                    continue;
+                }
+
+                (string ProductId, string VariantId) key = (
+                    ShopifyIds.NormalizeProductId( entry.Key.ProductId ),
+                    ShopifyIds.NormalizeVariantId( entry.Key.VariantId ) );
+                normalized[key] = normalized.GetValueOrDefault( key ) + entry.Value;
+            }
+
+            return normalized;
+        }
+
+        /// <summary>
+        /// Hard guard: sold on a supplier line cannot exceed received capacity. Excess is
+        /// re-FIFO'd onto other suppliers of the same product+variant that still have room.
+        /// </summary>
+        private static void EnforceSoldNotExceedingCapacity(
+            Dictionary<InventoryLineKey, int> soldBySupplierLine,
+            Dictionary<InventoryLineKey, int> capacityByLine,
+            List<SupplyBatch> supplyBatches )
+        {
+            Dictionary<(string ProductId, string VariantId), int> excessByVariant =
+                new( ProductVariantKeyComparer.Instance );
+
+            foreach (InventoryLineKey key in soldBySupplierLine.Keys.ToList())
+            {
+                int sold = soldBySupplierLine.GetValueOrDefault( key );
+                int capacity = capacityByLine.GetValueOrDefault( key );
+                if (sold <= capacity)
+                {
+                    continue;
+                }
+
+                int excess = sold - capacity;
+                soldBySupplierLine[key] = capacity;
+                (string ProductId, string VariantId) variantKey = (key.ProductId, key.VariantId);
+                excessByVariant[variantKey] = excessByVariant.GetValueOrDefault( variantKey ) + excess;
+            }
+
+            foreach (KeyValuePair<(string ProductId, string VariantId), int> excessEntry in excessByVariant)
+            {
+                int remaining = excessEntry.Value;
+                if (remaining <= 0 || string.IsNullOrWhiteSpace( excessEntry.Key.VariantId ))
+                {
+                    continue;
+                }
+
+                foreach (InventoryLineKey targetKey in capacityByLine.Keys
+                             .Where( key =>
+                                 string.Equals(
+                                     key.ProductId,
+                                     excessEntry.Key.ProductId,
+                                     StringComparison.OrdinalIgnoreCase ) &&
+                                 string.Equals(
+                                     key.VariantId,
+                                     excessEntry.Key.VariantId,
+                                     StringComparison.OrdinalIgnoreCase ) )
+                             .OrderBy( key =>
+                             {
+                                 SupplyBatch? first = supplyBatches.FirstOrDefault( b =>
+                                     InventoryLineKeyComparer.Instance.Equals( b.LineKey, key ) );
+                                 return first?.SupplyDate ?? DateOnly.MaxValue;
+                             } )
+                             .ThenBy( key => key.SupplierId ))
+                {
+                    if (remaining <= 0)
+                    {
+                        break;
+                    }
+
+                    int capacity = capacityByLine.GetValueOrDefault( targetKey );
+                    int alreadySold = soldBySupplierLine.GetValueOrDefault( targetKey );
+                    int room = Math.Max( 0, capacity - alreadySold );
+                    int take = Math.Min( remaining, room );
+                    if (take <= 0)
+                    {
+                        continue;
+                    }
+
+                    soldBySupplierLine[targetKey] = alreadySold + take;
+                    remaining -= take;
+                }
+            }
+        }
+
+        private static bool IsSingleVariantProduct(
+            string productId,
+            IEnumerable<SupplyBatch> supplyBatches,
+            IReadOnlyDictionary<string, Dictionary<string, string>>? variantIdByTitle )
+        {
+            int catalogCount = VariantLegacyDefaults.GetNamedVariantCount( productId, variantIdByTitle );
+            if (catalogCount > 1)
+            {
+                return false;
+            }
+
+            if (catalogCount == 1)
+            {
+                return true;
+            }
+
+            // Catalog unknown: treat as single-variant when supplies show 0 or 1 named variant IDs.
+            // 0 means all supplies have empty variantId (legacy single-variant product).
+            return CountNamedVariantsInSupplies( supplyBatches, productId ) <= 1;
+        }
+
+        private static int CountNamedVariantsInSupplies(
+            IEnumerable<SupplyBatch> supplyBatches,
+            string productId )
+        {
+            string normalizedProductId = ShopifyIds.NormalizeProductId( productId );
+            return supplyBatches
+                .Where( batch =>
+                    string.Equals(
+                        ShopifyIds.NormalizeProductId( batch.ShopifyProductId ),
+                        normalizedProductId,
+                        StringComparison.OrdinalIgnoreCase ) &&
+                    !string.IsNullOrWhiteSpace( batch.ShopifyVariantId ) )
+                .Select( batch => ShopifyIds.NormalizeVariantId( batch.ShopifyVariantId ) )
+                .Distinct( StringComparer.OrdinalIgnoreCase )
+                .Count();
         }
 
         private static int AllocateToMatchingBatches(
@@ -1310,10 +1478,12 @@ namespace backend.Services
             foreach (SupplyBatch batch in batches)
             {
                 if (remainingSold <= 0) break;
-                int allocated = Math.Min( remainingSold, Math.Max( 0, batch.Quantity ) );
+                int available = Math.Max( 0, batch.Quantity );
+                int allocated = Math.Min( remainingSold, available );
                 if (allocated <= 0) continue;
 
                 soldBySupplierLine[batch.LineKey] = soldBySupplierLine.GetValueOrDefault( batch.LineKey ) + allocated;
+                batch.Quantity -= allocated;
                 remainingSold -= allocated;
             }
 
@@ -1342,16 +1512,20 @@ namespace backend.Services
         {
             foreach (SupplyBatch batch in supplyBatches)
             {
-                batch.ShopifyVariantId = VariantLegacyDefaults.ResolveVariantId(
-                    batch.ShopifyProductId,
-                    batch.ShopifyVariantId,
-                    defaultVariantByProduct,
-                    variantIdByTitle,
-                    legacySaleVariantByProduct );
+                string productId = ShopifyIds.NormalizeProductId( batch.ShopifyProductId );
+                string variantId = ShopifyIds.NormalizeVariantId(
+                    VariantLegacyDefaults.ResolveVariantId(
+                        batch.ShopifyProductId,
+                        batch.ShopifyVariantId,
+                        defaultVariantByProduct,
+                        variantIdByTitle,
+                        legacySaleVariantByProduct ) );
+                batch.ShopifyProductId = productId;
+                batch.ShopifyVariantId = variantId;
                 batch.LineKey = new InventoryLineKey(
                     batch.SupplierId,
-                    batch.ShopifyProductId,
-                    batch.ShopifyVariantId );
+                    productId,
+                    variantId );
             }
         }
 
@@ -1391,38 +1565,88 @@ namespace backend.Services
                 .ToDictionary( g => g.Key, g => g.Sum( x => x.Quantity ), InventoryLineKeyComparer.Instance );
         }
 
-        private static int ResolveQuantityInStock(
-            string productId,
-            string variantId,
-            bool useProductTotals,
-            IReadOnlyDictionary<(string ProductId, string VariantId), int> stockByLine,
-            IReadOnlyDictionary<string, string> defaultVariantByProduct )
+        /// <summary>
+        /// Payments that failed to resolve to a named variant (empty VariantId on multi-variant
+        /// products) are reallocated onto that supplier's named variant lines that still need
+        /// payment (sold &gt; paid), so history-visible payments settle inventory unpaid balances.
+        /// </summary>
+        private static void RedistributeUnresolvedPaidQuantities(
+            Dictionary<InventoryLineKey, int> paidBySupplierLine,
+            Dictionary<InventoryLineKey, int> soldBySupplierLine,
+            IReadOnlyDictionary<string, Dictionary<string, string>> variantIdByTitle )
         {
-            if (stockByLine.TryGetValue( (productId, variantId), out int quantity ))
-            {
-                return quantity;
-            }
+            List<InventoryLineKey> orphans = paidBySupplierLine.Keys
+                .Where( key =>
+                    string.IsNullOrWhiteSpace( key.VariantId ) &&
+                    paidBySupplierLine.GetValueOrDefault( key ) > 0 &&
+                    VariantLegacyDefaults.GetNamedVariantCount( key.ProductId, variantIdByTitle ) > 1 )
+                .ToList();
 
-            if (string.IsNullOrWhiteSpace( variantId ) &&
-                defaultVariantByProduct.TryGetValue( productId, out string? defaultVariantId ) &&
-                !string.IsNullOrWhiteSpace( defaultVariantId ) &&
-                stockByLine.TryGetValue( (productId, defaultVariantId), out quantity ))
+            foreach (InventoryLineKey orphan in orphans)
             {
-                return quantity;
-            }
-
-            if (useProductTotals)
-            {
-                int total = stockByLine
-                    .Where( entry => string.Equals( entry.Key.ProductId, productId, StringComparison.OrdinalIgnoreCase ) )
-                    .Sum( entry => entry.Value );
-                if (total > 0)
+                int remaining = paidBySupplierLine.GetValueOrDefault( orphan );
+                if (remaining <= 0)
                 {
-                    return total;
+                    continue;
+                }
+
+                List<InventoryLineKey> targets = soldBySupplierLine.Keys
+                    .Concat( paidBySupplierLine.Keys )
+                    .Where( key =>
+                        key.SupplierId == orphan.SupplierId &&
+                        string.Equals( key.ProductId, orphan.ProductId, StringComparison.OrdinalIgnoreCase ) &&
+                        !string.IsNullOrWhiteSpace( key.VariantId ) )
+                    .Distinct( InventoryLineKeyComparer.Instance )
+                    .OrderByDescending( key =>
+                        Math.Max(
+                            0,
+                            soldBySupplierLine.GetValueOrDefault( key ) -
+                            paidBySupplierLine.GetValueOrDefault( key ) ) )
+                    .ThenBy( key => key.VariantId, StringComparer.OrdinalIgnoreCase )
+                    .ToList();
+
+                if (targets.Count == 0 &&
+                    variantIdByTitle.TryGetValue( orphan.ProductId, out Dictionary<string, string>? titles ))
+                {
+                    targets = titles.Values
+                        .Where( id => !string.IsNullOrWhiteSpace( id ) )
+                        .Distinct( StringComparer.OrdinalIgnoreCase )
+                        .Select( id => new InventoryLineKey( orphan.SupplierId, orphan.ProductId, id ) )
+                        .OrderBy( key => key.VariantId, StringComparer.OrdinalIgnoreCase )
+                        .ToList();
+                }
+
+                foreach (InventoryLineKey target in targets)
+                {
+                    if (remaining <= 0)
+                    {
+                        break;
+                    }
+
+                    int unpaidNeed = Math.Max(
+                        0,
+                        soldBySupplierLine.GetValueOrDefault( target ) -
+                        paidBySupplierLine.GetValueOrDefault( target ) );
+                    int take = unpaidNeed > 0 ? Math.Min( remaining, unpaidNeed ) : 0;
+                    if (take <= 0)
+                    {
+                        continue;
+                    }
+
+                    paidBySupplierLine[target] = paidBySupplierLine.GetValueOrDefault( target ) + take;
+                    remaining -= take;
+                }
+
+                // Any leftover still lacks a variant — keep on orphan only if nothing was moved.
+                if (remaining <= 0)
+                {
+                    paidBySupplierLine.Remove( orphan );
+                }
+                else if (remaining != paidBySupplierLine.GetValueOrDefault( orphan ))
+                {
+                    paidBySupplierLine[orphan] = remaining;
                 }
             }
-
-            return stockByLine.TryGetValue( (productId, string.Empty), out quantity ) ? quantity : 0;
         }
 
         private static string NormalizeProductId( string raw )
@@ -1445,14 +1669,22 @@ namespace backend.Services
 
             public bool Equals( InventoryLineKey x, InventoryLineKey y ) =>
                 x.SupplierId == y.SupplierId &&
-                string.Equals( x.ProductId, y.ProductId, StringComparison.OrdinalIgnoreCase ) &&
-                string.Equals( x.VariantId, y.VariantId, StringComparison.OrdinalIgnoreCase );
+                string.Equals(
+                    ShopifyIds.NormalizeProductId( x.ProductId ),
+                    ShopifyIds.NormalizeProductId( y.ProductId ),
+                    StringComparison.OrdinalIgnoreCase ) &&
+                string.Equals(
+                    ShopifyIds.NormalizeVariantId( x.VariantId ),
+                    ShopifyIds.NormalizeVariantId( y.VariantId ),
+                    StringComparison.OrdinalIgnoreCase );
 
             public int GetHashCode( InventoryLineKey obj ) =>
                 HashCode.Combine(
                     obj.SupplierId,
-                    StringComparer.OrdinalIgnoreCase.GetHashCode( obj.ProductId ),
-                    StringComparer.OrdinalIgnoreCase.GetHashCode( obj.VariantId ) );
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(
+                        ShopifyIds.NormalizeProductId( obj.ProductId ) ),
+                    StringComparer.OrdinalIgnoreCase.GetHashCode(
+                        ShopifyIds.NormalizeVariantId( obj.VariantId ) ) );
         }
 
         private sealed class SupplyBatch

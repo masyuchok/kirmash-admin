@@ -21,6 +21,7 @@ namespace backend.Models
         public string VariantName { get; set; } = string.Empty;
         public string Barcode { get; set; } = string.Empty;
         public int QuantityInStock { get; set; }
+        public decimal SalePrice { get; set; }
     }
 
     public class ProductOverpaidLineItem
@@ -50,5 +51,6 @@ namespace backend.Models
         public List<ProductVariantItem> Variants { get; set; } = new();
         public List<ProductSupplierPriceItem> SupplierPrices { get; set; } = new();
         public List<ProductOverpaidLineItem> OverpaidLines { get; set; } = new();
+        public decimal ShopifySalePrice { get; set; }
     }
 }

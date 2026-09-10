@@ -62,22 +62,22 @@ namespace backend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode( 500, new { error = "Памылка захавання цаны", details = ex.Message } );
+                return StatusCode( 500, new { error = "Памылка абнаўлення цэн", details = ex.Message } );
             }
         }
 
         [HttpGet]
-        public async Task<ActionResult<List<Supplier>>> GetAll( )
+        public async Task<ActionResult<List<Supplier>>> GetAll()
         {
             try
             {
-                List<Supplier> suppliers = await _service.GetAllAsync( );
+                List<Supplier> suppliers = await _service.GetAllAsync();
 
                 return Ok( suppliers );
             }
-            catch (Exception ex)
+            catch ( Exception ex )
             {
-                return StatusCode( 500, new { error = "Памылка атрымання спіса пастаўшчыкоў", details = ex.Message } );
+                return StatusCode( 500, new { error = "Памылка атрымання пастаўшчыкаў", details = ex.Message } );
             }
         }
 
@@ -143,17 +143,16 @@ namespace backend.Controllers
         {
             try
             {
-                await _service.UpdateSupplier(id, supplier);
-
+                await _service.UpdateSupplier( id, supplier );
                 return Ok();
             }
-            catch (InvalidOperationException ex)
+            catch ( InvalidOperationException ex )
             {
-                return BadRequest(new { error = ex.Message });
+                return BadRequest( new { error = ex.Message } );
             }
-            catch (Exception ex)
+            catch ( Exception ex )
             {
-                return StatusCode(500, new { error = "Памылка абнаўлення пастаўшчыка", details = ex.Message });
+                return StatusCode( 500, new { error = "Памылка абнаўлення пастаўшчыка", details = ex.Message } );
             }
         }
     }

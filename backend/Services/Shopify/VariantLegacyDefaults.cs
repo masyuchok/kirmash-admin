@@ -146,12 +146,18 @@ public static class VariantLegacyDefaults
             }
 
             int namedVariantCount = GetNamedVariantCount( normalizedProductId, variantIdByTitleByProduct );
-            if (namedVariantCount <= 1 &&
+            // Only collapse onto the default variant when the catalog explicitly has a single named variant.
+            // namedCount == 0 means the catalog map is incomplete — keep the stored id (hard vs soft).
+            if (namedVariantCount == 1 &&
                 defaultVariantByProduct.TryGetValue( normalizedProductId, out string? canonicalVariantId ) &&
                 !string.IsNullOrWhiteSpace( canonicalVariantId ))
             {
                 return canonicalVariantId;
             }
+
+            // Keep the stored variant id when the catalog map is incomplete or multi-variant.
+            // Clearing/collapsing it made hard-cover supplies share soft FIFO buckets.
+            return normalizedVariantId;
         }
 
         if (IsLegacyUnnamedSaleLine(

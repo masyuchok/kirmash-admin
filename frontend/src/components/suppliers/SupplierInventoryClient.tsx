@@ -321,14 +321,30 @@ export default function SupplierInventoryClient({
   };
 
   const openHistory = async (row: SupplierInventoryRow) => {
+    const variantId = row.shopifyVariantId.trim();
+    const variantTitle = row.variantTitle.trim();
+    const subtitleParts: string[] = [];
+    if (variantTitle) {
+      subtitleParts.push(variantTitle);
+    }
+    if (row.supplierName.trim()) {
+      subtitleParts.push(row.supplierName.trim());
+    }
+
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError(null);
     setHistoryData(null);
-    setHistorySubtitle(undefined);
+    setHistorySubtitle(
+      subtitleParts.length > 0 ? subtitleParts.join(' · ') : undefined
+    );
 
     try {
-      const history = await fetchProductHistory(row.shopifyProductId);
+      const history = await fetchProductHistory(row.shopifyProductId, {
+        shopifyVariantId: variantId || undefined,
+        variantTitle: variantTitle || undefined,
+        supplierId: row.supplierId > 0 ? row.supplierId : undefined,
+      });
       setHistoryData(history);
     } catch (err: unknown) {
       setHistoryError(
@@ -348,52 +364,62 @@ export default function SupplierInventoryClient({
 
   const columnCount = showSupplierColumn ? 13 : 12;
 
-  const renderSortHeader = (column: SortColumn, label: string) => (
+  const renderSortHeaderShort = (
+    column: SortColumn,
+    shortLabel: string,
+    fullLabel: string
+  ) => (
     <button
       type="button"
       onClick={() => handleSortClick(column)}
-      className="inline-flex w-full items-center justify-end gap-1 rounded text-xs font-semibold uppercase tracking-wide text-gray-500 transition hover:text-gray-700"
-      aria-label={`Сартаваць па ${label}`}
+      title={fullLabel}
+      aria-label={`Сартаваць па ${fullLabel}`}
+      className="inline-flex max-w-full items-center justify-end gap-0.5 text-right leading-tight hover:text-gray-800"
     >
-      {label}
+      <span className="whitespace-normal">{shortLabel}</span>
       {sort?.column === column && (
-        <span aria-hidden>{sort.direction === 'asc' ? '↑' : '↓'}</span>
+        <span aria-hidden className="shrink-0">
+          {sort.direction === 'asc' ? '↑' : '↓'}
+        </span>
       )}
     </button>
   );
 
   const tableClassName =
-    'w-full min-w-[1080px] border-separate border-spacing-0 text-left text-sm';
+    'w-full table-fixed border-separate border-spacing-0 text-left text-xs';
 
   const renderTableColGroup = () => (
     <colgroup>
-      {showSupplierColumn && <col className="w-28" />}
-      <col className="min-w-[12rem]" />
-      <col className="w-24" />
-      <col className="w-20" />
-      <col className="w-24" />
-      <col className="w-24" />
-      <col className="w-24" />
-      <col className="w-20" />
-      <col className="w-20" />
-      <col className="w-20" />
-      <col className="w-20" />
-      <col className="w-20" />
-      <col className="w-36" />
+      {showSupplierColumn && <col className="w-[9%]" />}
+      <col className="w-[22%]" />
+      <col className="w-[7%]" />
+      <col className="w-[5%]" />
+      <col className="w-[7%]" />
+      <col className="w-[7%]" />
+      <col className="w-[7%]" />
+      <col className="w-[5.5%]" />
+      <col className="w-[5.5%]" />
+      <col className="w-[5.5%]" />
+      <col className="w-[5.5%]" />
+      <col className="w-[5.5%]" />
+      <col className="w-[8%]" />
     </colgroup>
   );
 
+  const stickyThClass =
+    'sticky top-0 z-30 border-b border-gray-200 bg-[#f9fafb]';
+
   const renderTableHeadRow = () => (
-    <tr className="bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+    <tr className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
       {showSupplierColumn && (
-        <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5">
-          <div className="flex items-center gap-2">
-            <span>Пастаўшчык</span>
+        <th className={`${stickyThClass} px-2 py-2`}>
+          <div className="flex items-center gap-1">
+            <span title="Пастаўшчык">Паст.</span>
             <button
               type="button"
               ref={supplierFilterMenu.triggerRef}
               onClick={supplierFilterMenu.toggle}
-              className={`relative inline-flex items-center justify-center rounded-md border bg-white p-1 transition ${
+              className={`relative inline-flex items-center justify-center rounded-md border bg-white p-0.5 transition ${
                 isSupplierFilterCustomized
                   ? 'border-primary/50 text-primary'
                   : 'border-gray-200 text-gray-600 hover:border-primary/40 hover:bg-primary/10 hover:text-primary'
@@ -401,7 +427,7 @@ export default function SupplierInventoryClient({
               aria-label="Фільтр па пастаўшчыку"
               title="Фільтр па пастаўшчыку"
             >
-              <FiChevronDown className="size-3.5" aria-hidden />
+              <FiChevronDown className="size-3" aria-hidden />
               {isSupplierFilterCustomized && (
                 <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-primary" />
               )}
@@ -409,40 +435,57 @@ export default function SupplierInventoryClient({
           </div>
         </th>
       )}
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5">Тавар</th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
-        Кошт нета адзінкі
+      <th className={`${stickyThClass} px-2 py-2`}>Тавар</th>
+      <th
+        className={`${stickyThClass} px-1.5 py-2 text-right leading-tight`}
+        title="Кошт нета адзінкі"
+      >
+        Нета
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
-        ПДВ %
+      <th
+        className={`${stickyThClass} px-1.5 py-2 text-right leading-tight`}
+        title="ПДВ %"
+      >
+        ПДВ
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
-        Кошт брута адзінкі
+      <th
+        className={`${stickyThClass} px-1.5 py-2 text-right leading-tight`}
+        title="Кошт брута адзінкі"
+      >
+        Брута
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
+      <th
+        className={`${stickyThClass} px-1.5 py-2 text-right leading-tight`}
+        title="Маржа"
+      >
         Маржа
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
-        Цана продажу
+      <th
+        className={`${stickyThClass} px-1.5 py-2 text-right leading-tight`}
+        title="Цана продажу"
+      >
+        Цана
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-right">
-        {renderSortHeader('received', 'Атрымана ўсяго')}
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>
+        {renderSortHeaderShort('received', 'Атр.', 'Атрымана ўсяго')}
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('paid', 'Аплочана ўсяго')}
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>
+        {renderSortHeaderShort('paid', 'Апл.', 'Аплочана ўсяго')}
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('stock', 'У наяўнасці')}
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>
+        {renderSortHeaderShort(
+          'stock',
+          'Наяўн.',
+          'У наяўнасці (атрымана − прадана)'
+        )}
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('sold', 'Прадана')}
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>
+        {renderSortHeaderShort('sold', 'Прад.', 'Прадана')}
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        {renderSortHeader('unpaid', 'Не аплочана')}
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>
+        {renderSortHeaderShort('unpaid', 'Не апл.', 'Не аплочана')}
       </th>
-      <th className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-right">
-        Дзеі
-      </th>
+      <th className={`${stickyThClass} px-1.5 py-2 text-right`}>Дзеі</th>
     </tr>
   );
 
@@ -479,311 +522,308 @@ export default function SupplierInventoryClient({
         Назад да пастаўшчыкоў
       </button>
 
-      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-        <div className="sticky top-0 z-20 bg-white shadow-[0_1px_0_0_rgb(229,231,235)]">
-          <div className="border-b border-gray-100 px-6 py-4">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <h2 className="text-base font-semibold text-gray-900">
-                  Інвентарызацыя
-                </h2>
-                <p className="mt-1 text-sm text-gray-500">
-                  {supplierName
-                    ? `Пастаўшчык: ${supplierName}`
-                    : 'Усе пастаўшчыкі'}
-                  {salesSyncedAtUtc && (
-                    <span className="block text-xs text-gray-400">
-                      Продажы абноўлены:{' '}
-                      {new Date(salesSyncedAtUtc).toLocaleString('be-BY')}
-                    </span>
-                  )}
-                </p>
-                <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-500">
-                  <span className="inline-flex items-center gap-1.5">
-                    <span
-                      className="size-3 rounded bg-amber-100 ring-1 ring-amber-300"
-                      aria-hidden
-                    />
-                    прадана, не аплочана
+      <div className="flex max-h-[calc(100dvh-8rem)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="shrink-0 border-b border-gray-100 px-4 py-4">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-gray-900">
+                Інвентарызацыя
+              </h2>
+              <p className="mt-1 text-sm text-gray-500">
+                {supplierName
+                  ? `Пастаўшчык: ${supplierName}`
+                  : 'Усе пастаўшчыкі'}
+                {salesSyncedAtUtc && (
+                  <span className="block text-xs text-gray-400">
+                    Продажы абноўлены:{' '}
+                    {new Date(salesSyncedAtUtc).toLocaleString('be-BY')}
                   </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span
-                      className="size-3 rounded bg-violet-100 ring-1 ring-violet-300"
-                      aria-hidden
-                    />
-                    пераплата
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleExportExcel}
-                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
-                  title="Экспарт неаплочаных прадалагаў у Excel"
-                >
-                  <FiDownload className="size-4" aria-hidden />
-                  Excel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleRefreshSales()}
-                  disabled={refreshing || loading}
-                  className="inline-flex size-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
-                  aria-label="Абнавіць продажы"
-                  title="Абнавіць продажы"
-                >
-                  {refreshing ? (
-                    <span className="size-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
-                  ) : (
-                    <FiRefreshCw className="size-4" aria-hidden />
-                  )}
-                </button>
-              </div>
-              <label className="w-full max-w-xs space-y-1">
-                <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                  Пошук
+                )}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-500">
+                <span className="inline-flex items-center gap-1.5">
+                  <span
+                    className="size-3 rounded bg-amber-100 ring-1 ring-amber-300"
+                    aria-hidden
+                  />
+                  прадана, не аплочана
                 </span>
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.currentTarget.value)}
-                  placeholder="Тавар або пастаўшчык"
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                />
-              </label>
+                <span className="inline-flex items-center gap-1.5">
+                  <span
+                    className="size-3 rounded bg-violet-100 ring-1 ring-violet-300"
+                    aria-hidden
+                  />
+                  пераплата
+                </span>
+              </div>
             </div>
-            {exportNotice && (
-              <p className="mt-3 text-sm text-gray-600">{exportNotice}</p>
-            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                title="Экспарт неаплочаных прадалагаў у Excel"
+              >
+                <FiDownload className="size-4" aria-hidden />
+                Excel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleRefreshSales()}
+                disabled={refreshing || loading}
+                className="inline-flex size-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
+                aria-label="Абнавіць продажы"
+                title="Абнавіць продажы"
+              >
+                {refreshing ? (
+                  <span className="size-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-700" />
+                ) : (
+                  <FiRefreshCw className="size-4" aria-hidden />
+                )}
+              </button>
+            </div>
+            <label className="w-full max-w-xs space-y-1">
+              <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                Пошук
+              </span>
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.currentTarget.value)}
+                placeholder="Тавар або пастаўшчык"
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+              />
+            </label>
           </div>
+          {exportNotice && (
+            <p className="mt-3 text-sm text-gray-600">{exportNotice}</p>
+          )}
+        </div>
 
-          <div className="overflow-x-auto">
-            <table className={tableClassName}>
-              {renderTableColGroup()}
-              <thead className="sticky top-0 z-10 bg-gray-50 shadow-[0_1px_0_0_rgb(229,231,235)]">
-                {renderTableHeadRow()}
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {visibleRows.map((displayRow) => {
-                  if (displayRow.type === 'parent') {
-                    const { group, totals } = displayRow;
-                    const unpaidQty = Math.max(0, totals.quantityToPay);
-                    const overpaidQty = Math.max(0, -totals.quantityToPay);
-                    const isCollapsed = Boolean(collapsedProducts[group.key]);
-
-                    return (
-                      <tr
-                        key={`${group.key}::parent`}
-                        className={getGroupHighlightClass(totals)}
-                      >
-                        {showSupplierColumn && (
-                          <td className="px-4 py-3 font-medium text-gray-900">
-                            {group.supplierName || '—'}
-                          </td>
-                        )}
-                        <td className="px-4 py-3 text-gray-800">
-                          <div className="flex items-start gap-2">
-                            <button
-                              type="button"
-                              onClick={() => toggleCollapsed(group.key)}
-                              className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
-                              aria-label={
-                                isCollapsed
-                                  ? 'Разгарнуць варыянты'
-                                  : 'Згарнуць варыянты'
-                              }
-                              title={
-                                isCollapsed
-                                  ? 'Разгарнуць варыянты'
-                                  : 'Згарнуць варыянты'
-                              }
-                            >
-                              <span aria-hidden>{isCollapsed ? '▸' : '▾'}</span>
-                            </button>
-                            <div className="flex min-w-0 flex-col gap-1">
-                              <span className="font-medium">
-                                {formatInventoryProductTitle(group.variants[0])}
-                              </span>
-                              {overpaidQty > 0 && (
-                                <span className="inline-flex w-fit rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
-                                  пераплата {overpaidQty}
-                                </span>
-                              )}
-                              {unpaidQty > 0 && (
-                                <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
-                                  не аплочана {unpaidQty}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm text-gray-400">
-                          —
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm text-gray-400">
-                          —
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm text-gray-400">
-                          —
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm text-gray-400">
-                          —
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm text-gray-400">
-                          —
-                        </td>
-                        <td className="px-4 py-3 text-right tabular-nums font-medium text-gray-800">
-                          {totals.receivedQuantity}
-                        </td>
-                        <td className="px-4 py-3 text-right tabular-nums font-medium text-gray-800">
-                          {totals.paidQuantity}
-                        </td>
-                        <td className="px-4 py-3 text-right tabular-nums font-medium text-gray-800">
-                          {totals.quantityInStock}
-                        </td>
-                        <td className="px-4 py-3 text-right tabular-nums font-medium text-gray-800">
-                          {totals.soldQuantity}
-                        </td>
-                        <td
-                          className={`px-4 py-3 text-right tabular-nums font-medium ${
-                            unpaidQty > 0 ? 'text-amber-800' : 'text-gray-800'
-                          }`}
-                        >
-                          {unpaidQty}
-                        </td>
-                        <td className="px-4 py-3" />
-                      </tr>
-                    );
-                  }
-
-                  const row = displayRow.row;
-                  const unpaidQty = getUnpaidQuantity(row);
-                  const overpaidQty = getOverpaidQuantity(row);
-                  const variantLabel = row.variantTitle.trim() || '—';
+        <div className="min-h-0 flex-1 overflow-auto">
+          <table className={tableClassName}>
+            {renderTableColGroup()}
+            <thead>{renderTableHeadRow()}</thead>
+            <tbody className="divide-y divide-gray-100">
+              {visibleRows.map((displayRow) => {
+                if (displayRow.type === 'parent') {
+                  const { group, totals } = displayRow;
+                  const unpaidQty = Math.max(0, totals.quantityToPay);
+                  const overpaidQty = Math.max(0, -totals.quantityToPay);
+                  const isCollapsed = Boolean(collapsedProducts[group.key]);
 
                   return (
-                    <InventoryPricingEditorProvider
-                      key={`${row.supplierId}-${row.shopifyProductId}-${row.shopifyVariantId}`}
-                      row={row}
-                      onSave={handleSavePricing}
+                    <tr
+                      key={`${group.key}::parent`}
+                      className={getGroupHighlightClass(totals)}
                     >
-                      <tr
-                        className={`${getRowHighlightClass(row)} ${displayRow.isVariantChild ? 'bg-gray-50/40' : ''}`}
+                      {showSupplierColumn && (
+                        <td className="px-2 py-2 font-medium text-gray-900">
+                          {group.supplierName || '—'}
+                        </td>
+                      )}
+                      <td className="px-2 py-2 text-gray-800">
+                        <div className="flex items-start gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => toggleCollapsed(group.key)}
+                            className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded border border-gray-200 bg-white text-xs text-gray-600 hover:bg-gray-50"
+                            aria-label={
+                              isCollapsed
+                                ? 'Разгарнуць варыянты'
+                                : 'Згарнуць варыянты'
+                            }
+                            title={
+                              isCollapsed
+                                ? 'Разгарнуць варыянты'
+                                : 'Згарнуць варыянты'
+                            }
+                          >
+                            <span aria-hidden>{isCollapsed ? '▸' : '▾'}</span>
+                          </button>
+                          <div className="flex min-w-0 flex-col gap-1">
+                            <span className="break-words font-medium leading-snug">
+                              {formatInventoryProductTitle(group.variants[0])}
+                            </span>
+                            {overpaidQty > 0 && (
+                              <span className="inline-flex w-fit rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
+                                пераплата {overpaidQty}
+                              </span>
+                            )}
+                            {unpaidQty > 0 && (
+                              <span className="inline-flex w-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
+                                не аплочана {unpaidQty}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-1.5 py-2 text-right text-gray-400">
+                        —
+                      </td>
+                      <td className="px-1.5 py-2 text-right text-gray-400">
+                        —
+                      </td>
+                      <td className="px-1.5 py-2 text-right text-gray-400">
+                        —
+                      </td>
+                      <td className="px-1.5 py-2 text-right text-gray-400">
+                        —
+                      </td>
+                      <td className="px-1.5 py-2 text-right text-gray-400">
+                        —
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums font-medium text-gray-800">
+                        {totals.receivedQuantity}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums font-medium text-gray-800">
+                        {totals.paidQuantity}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums font-medium text-gray-800">
+                        {totals.quantityInStock}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums font-medium text-gray-800">
+                        {totals.soldQuantity}
+                      </td>
+                      <td
+                        className={`px-1.5 py-2 text-right tabular-nums font-medium ${
+                          unpaidQty > 0 ? 'text-amber-800' : 'text-gray-800'
+                        }`}
                       >
-                        {showSupplierColumn && (
-                          <td
-                            className={`py-3 font-medium text-gray-900 ${displayRow.isVariantChild ? 'pl-10' : 'px-4'}`}
-                          >
-                            {displayRow.isVariantChild
-                              ? ''
-                              : row.supplierName || '—'}
-                          </td>
-                        )}
+                        {unpaidQty}
+                      </td>
+                      <td className="px-1.5 py-2" />
+                    </tr>
+                  );
+                }
+
+                const row = displayRow.row;
+                const unpaidQty = getUnpaidQuantity(row);
+                const overpaidQty = getOverpaidQuantity(row);
+                const variantLabel = row.variantTitle.trim() || '—';
+
+                return (
+                  <InventoryPricingEditorProvider
+                    key={`${row.supplierId}-${row.shopifyProductId}-${row.shopifyVariantId}`}
+                    row={row}
+                    onSave={handleSavePricing}
+                  >
+                    <tr
+                      className={`${getRowHighlightClass(row)} ${displayRow.isVariantChild ? 'bg-gray-50/40' : ''}`}
+                    >
+                      {showSupplierColumn && (
                         <td
-                          className={`py-3 text-gray-800 ${displayRow.isVariantChild ? 'pl-10 pr-4' : 'px-4'}`}
+                          className={`py-2 font-medium text-gray-900 ${displayRow.isVariantChild ? 'pl-6' : 'px-2'}`}
                         >
-                          <div
-                            className={`flex flex-col gap-1 ${displayRow.isVariantChild ? 'ml-5' : ''}`}
-                          >
-                            {displayRow.isVariantChild ? (
-                              <div className="flex items-start gap-2">
-                                <span
-                                  className="mt-0.5 inline-flex items-center gap-1 text-gray-400"
-                                  aria-hidden
-                                >
-                                  <span className="h-5 w-px bg-gray-300" />
-                                  <span className="w-5 border-t border-gray-300" />
+                          {displayRow.isVariantChild
+                            ? ''
+                            : row.supplierName || '—'}
+                        </td>
+                      )}
+                      <td
+                        className={`py-2 text-gray-800 ${displayRow.isVariantChild ? 'pl-6 pr-2' : 'px-2'}`}
+                      >
+                        <div
+                          className={`flex flex-col gap-1 ${displayRow.isVariantChild ? 'ml-3' : ''}`}
+                        >
+                          {displayRow.isVariantChild ? (
+                            <div className="flex items-start gap-1.5">
+                              <span
+                                className="mt-0.5 inline-flex items-center gap-1 text-gray-400"
+                                aria-hidden
+                              >
+                                <span className="h-4 w-px bg-gray-300" />
+                                <span className="w-3 border-t border-gray-300" />
+                              </span>
+                              <div className="min-w-0 space-y-1">
+                                <span className="break-words text-gray-700 leading-snug">
+                                  {variantLabel}
                                 </span>
-                                <div className="min-w-0 space-y-1">
-                                  <span className="text-gray-700">
-                                    {variantLabel}
-                                  </span>
-                                  {overpaidQty > 0 && (
-                                    <span className="inline-flex w-fit rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
-                                      пераплата {overpaidQty}
-                                    </span>
-                                  )}
-                                  {unpaidQty > 0 && (
-                                    <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
-                                      не аплочана {unpaidQty}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            ) : (
-                              <>
-                                <span>{formatInventoryProductTitle(row)}</span>
                                 {overpaidQty > 0 && (
-                                  <span className="inline-flex w-fit rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
+                                  <span className="inline-flex w-fit rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
                                     пераплата {overpaidQty}
                                   </span>
                                 )}
                                 {unpaidQty > 0 && (
-                                  <span className="inline-flex w-fit rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
+                                  <span className="inline-flex w-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
                                     не аплочана {unpaidQty}
                                   </span>
                                 )}
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <InventoryPricingCells />
-                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-gray-700">
-                          {row.receivedQuantity}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-gray-700">
-                          {row.paidQuantity}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-gray-700">
-                          {row.quantityInStock}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-gray-700">
-                          {row.soldQuantity}
-                        </td>
-                        <td
-                          className={`whitespace-nowrap px-3 py-3 text-right tabular-nums font-medium ${
-                            unpaidQty > 0 ? 'text-amber-800' : 'text-gray-700'
-                          }`}
-                        >
-                          {unpaidQty}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-right">
-                          <div className="flex flex-col items-end gap-1.5">
-                            <InventoryPricingSaveButton />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void openHistory(row);
-                              }}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
-                              aria-label={`Гісторыя: ${displayRow.isVariantChild ? variantLabel : formatInventoryProductTitle(row)}`}
-                              title="Гісторыя прадукту"
-                            >
-                              <FiClock className="size-3.5" aria-hidden />
-                              Гісторыя
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    </InventoryPricingEditorProvider>
-                  );
-                })}
-                {visibleRows.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={columnCount}
-                      className="px-4 py-8 text-center text-sm text-gray-500"
-                    >
-                      {rows.length === 0
-                        ? 'Няма даных для інвентарызацыі.'
-                        : 'Нічога не знойдзена.'}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <span className="break-words leading-snug">
+                                {formatInventoryProductTitle(row)}
+                              </span>
+                              {overpaidQty > 0 && (
+                                <span className="inline-flex w-fit rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-800 ring-1 ring-inset ring-violet-500/25">
+                                  пераплата {overpaidQty}
+                                </span>
+                              )}
+                              {unpaidQty > 0 && (
+                                <span className="inline-flex w-fit rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-inset ring-amber-500/25">
+                                  не аплочана {unpaidQty}
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </td>
+                      <InventoryPricingCells />
+                      <td className="px-1.5 py-2 text-right tabular-nums text-gray-700">
+                        {row.receivedQuantity}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums text-gray-700">
+                        {row.paidQuantity}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums text-gray-700">
+                        {row.quantityInStock}
+                      </td>
+                      <td className="px-1.5 py-2 text-right tabular-nums text-gray-700">
+                        {row.soldQuantity}
+                      </td>
+                      <td
+                        className={`px-1.5 py-2 text-right tabular-nums font-medium ${
+                          unpaidQty > 0 ? 'text-amber-800' : 'text-gray-700'
+                        }`}
+                      >
+                        {unpaidQty}
+                      </td>
+                      <td className="px-1.5 py-2 text-right">
+                        <div className="flex flex-col items-end gap-1">
+                          <InventoryPricingSaveButton />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void openHistory(row);
+                            }}
+                            className="inline-flex size-7 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-600 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                            aria-label={`Гісторыя: ${displayRow.isVariantChild ? variantLabel : formatInventoryProductTitle(row)}`}
+                            title="Гісторыя прадукту"
+                          >
+                            <FiClock className="size-3.5" aria-hidden />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  </InventoryPricingEditorProvider>
+                );
+              })}
+              {visibleRows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={columnCount}
+                    className="px-4 py-8 text-center text-sm text-gray-500"
+                  >
+                    {rows.length === 0
+                      ? 'Няма даных для інвентарызацыі.'
+                      : 'Нічога не знойдзена.'}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
       {supplierFilterMenu.mounted &&

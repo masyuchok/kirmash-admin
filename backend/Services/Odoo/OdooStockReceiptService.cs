@@ -12,11 +12,16 @@ public sealed class OdooStockReceiptService
 
     private readonly OdooJsonRpcClient _client;
     private readonly IConfiguration _config;
+    private readonly OdooBukinistkaSessionResolver _sessions;
 
-    public OdooStockReceiptService( OdooJsonRpcClient client, IConfiguration config )
+    public OdooStockReceiptService(
+        OdooJsonRpcClient client,
+        IConfiguration config,
+        OdooBukinistkaSessionResolver sessions )
     {
         _client = client;
         _config = config;
+        _sessions = sessions;
     }
 
     public sealed record ReceiptLine( int ProductId, string ProductName, int UomId, decimal Quantity );
@@ -28,11 +33,6 @@ public sealed class OdooStockReceiptService
         IReadOnlyList<ReceiptLine> lines,
         CancellationToken cancellationToken = default )
     {
-        if (!TryResolveSession( request, out OdooSession session ))
-        {
-            throw new UnauthorizedAccessException( "Няма актыўнай сесіі Bukinistka." );
-        }
-
         if (lines.Count == 0)
         {
             throw new InvalidOperationException( "Дадайце хаця б адну кнігу ў прыёмку." );
@@ -46,6 +46,37 @@ public sealed class OdooStockReceiptService
             }
         }
 
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            OdooSession session = await _sessions.ResolveAsync(
+                request,
+                cancellationToken,
+                forceRefresh: attempt > 0 );
+            try
+            {
+                return await CreateIncomingReceiptCoreAsync( session, lines, cancellationToken );
+            }
+            catch (UnauthorizedAccessException ex) when (
+                attempt == 0
+                && (OdooBukinistkaSessionResolver.IsSessionExpiredMessage( ex.Message )
+                    || string.Equals(
+                        ex.Message,
+                        OdooBukinistkaSessionResolver.UserFriendlySessionExpiredMessage,
+                        StringComparison.Ordinal )))
+            {
+                _sessions.InvalidateSyncSession();
+            }
+        }
+
+        throw new UnauthorizedAccessException(
+            OdooBukinistkaSessionResolver.UserFriendlySessionExpiredMessage );
+    }
+
+    private async Task<ReceiptResult> CreateIncomingReceiptCoreAsync(
+        OdooSession session,
+        IReadOnlyList<ReceiptLine> lines,
+        CancellationToken cancellationToken )
+    {
         string partnerName = (_config["Odoo:KirmaPartnerName"] ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace( partnerName ))
         {
@@ -515,13 +546,6 @@ public sealed class OdooStockReceiptService
         }
 
         return ReadString( rows[0], "name" );
-    }
-
-    private bool TryResolveSession( HttpRequest request, out OdooSession session )
-    {
-        session = null!;
-        ClaimsPrincipal? principal = BukinistkaJwtAuthentication.TryValidateCookie( request, _config );
-        return principal is not null && OdooSessionReader.TryGetFromPrincipal( principal, out session );
     }
 
     private static int ReadInt( JsonElement row, string property )

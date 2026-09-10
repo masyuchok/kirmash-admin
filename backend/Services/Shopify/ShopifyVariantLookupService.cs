@@ -17,6 +17,7 @@ public class ShopifyVariantLookupService
         Dictionary<string, string> ProductTypeById,
         Dictionary<(string ProductId, string VariantId), string> VariantTitleByLine,
         Dictionary<(string ProductId, string VariantId), int> StockByLine,
+        Dictionary<(string ProductId, string VariantId), decimal> PriceByLine,
         Dictionary<string, string> IsbnByProductId,
         Dictionary<string, string> ProductIdByIsbn)? _cache;
     private static readonly SemaphoreSlim CacheLock = new( 1, 1 );
@@ -38,41 +39,43 @@ public class ShopifyVariantLookupService
 
     public async Task<IReadOnlyDictionary<string, string>> GetIsbnByProductIdMapCachedAsync()
     {
-        (_, _, _, _, _, _, _, _, Dictionary<string, string> isbnByProductId, _) =
+        (_, _, _, _, _, _, _, _, _, Dictionary<string, string> isbnByProductId, _) =
             await GetVariantCatalogMapsCachedAsync();
         return isbnByProductId;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetProductIdByIsbnMapCachedAsync()
     {
-        (_, _, _, _, _, _, _, _, _, Dictionary<string, string> productIdByIsbn) =
+        (_, _, _, _, _, _, _, _, _, _, Dictionary<string, string> productIdByIsbn) =
             await GetVariantCatalogMapsCachedAsync();
         return productIdByIsbn;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetVariantTitleByIdMapCachedAsync()
     {
-        (Dictionary<string, string> titleById, _, _, _, _, _, _, _, _, _) = await GetVariantCatalogMapsCachedAsync();
+        (Dictionary<string, string> titleById, _, _, _, _, _, _, _, _, _, _) =
+            await GetVariantCatalogMapsCachedAsync();
         return titleById;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetDefaultVariantIdByProductCachedAsync()
     {
-        (_, _, Dictionary<string, string> defaultVariantIdByProduct, _, _, _, _, _, _, _) =
+        (_, _, Dictionary<string, string> defaultVariantIdByProduct, _, _, _, _, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return defaultVariantIdByProduct;
     }
 
     public async Task<IReadOnlyDictionary<string, Dictionary<string, string>>> GetVariantIdByProductTitleMapCachedAsync()
     {
-        (_, Dictionary<string, Dictionary<string, string>> idByTitleByProduct, _, _, _, _, _, _, _, _) =
+        (_, Dictionary<string, Dictionary<string, string>> idByTitleByProduct, _, _, _, _, _, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return idByTitleByProduct;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetProductTitleByIdMapCachedAsync()
     {
-        (_, _, _, Dictionary<string, string> productTitleById, _, _, _, _, _, _) = await GetVariantCatalogMapsCachedAsync();
+        (_, _, _, Dictionary<string, string> productTitleById, _, _, _, _, _, _, _) =
+            await GetVariantCatalogMapsCachedAsync();
         return productTitleById;
     }
 
@@ -135,30 +138,40 @@ public class ShopifyVariantLookupService
 
     public async Task<IReadOnlyDictionary<string, string>> GetProductAuthorByIdMapCachedAsync()
     {
-        (_, _, _, _, Dictionary<string, string> productAuthorById, _, _, _, _, _) =
+        (_, _, _, _, Dictionary<string, string> productAuthorById, _, _, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return productAuthorById;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetProductTypeByIdMapCachedAsync()
     {
-        (_, _, _, _, _, Dictionary<string, string> productTypeById, _, _, _, _) =
+        (_, _, _, _, _, Dictionary<string, string> productTypeById, _, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return productTypeById;
     }
 
     public async Task<IReadOnlyDictionary<(string ProductId, string VariantId), string>> GetVariantTitleByLineMapCachedAsync()
     {
-        (_, _, _, _, _, _, Dictionary<(string ProductId, string VariantId), string> variantTitleByLine, _, _, _) =
+        (_, _, _, _, _, _, Dictionary<(string ProductId, string VariantId), string> variantTitleByLine, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return variantTitleByLine;
     }
 
     public async Task<IReadOnlyDictionary<(string ProductId, string VariantId), int>> GetStockByLineMapCachedAsync()
     {
-        (_, _, _, _, _, _, _, Dictionary<(string ProductId, string VariantId), int> stockByLine, _, _) =
+        (_, _, _, _, _, _, _, Dictionary<(string ProductId, string VariantId), int> stockByLine, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         return stockByLine;
+    }
+
+    /// <summary>
+    /// Variant sale prices from the GraphQL catalog cache (no per-product REST).
+    /// </summary>
+    public async Task<IReadOnlyDictionary<(string ProductId, string VariantId), decimal>> GetPriceByLineMapCachedAsync()
+    {
+        (_, _, _, _, _, _, _, _, Dictionary<(string ProductId, string VariantId), decimal> priceByLine, _, _) =
+            await GetVariantCatalogMapsCachedAsync();
+        return priceByLine;
     }
 
     /// <summary>
@@ -166,7 +179,7 @@ public class ShopifyVariantLookupService
     /// </summary>
     public async Task<IReadOnlySet<string>> GetMultiVariantProductIdsCachedAsync()
     {
-        (_, Dictionary<string, Dictionary<string, string>> idByTitleByProduct, _, _, _, _, _, _, _, _) =
+        (_, Dictionary<string, Dictionary<string, string>> idByTitleByProduct, _, _, _, _, _, _, _, _, _) =
             await GetVariantCatalogMapsCachedAsync();
         HashSet<string> productIds = new( StringComparer.OrdinalIgnoreCase );
         foreach (KeyValuePair<string, Dictionary<string, string>> entry in idByTitleByProduct)
@@ -202,12 +215,28 @@ public class ShopifyVariantLookupService
             return variantId;
         }
 
+        List<KeyValuePair<string, string>> matches = new();
         foreach (KeyValuePair<string, string> entry in titles)
         {
             if (VatReportHelpers.VariantTitlesEquivalentForPaymentMatch( title, entry.Key ))
             {
-                return entry.Value;
+                matches.Add( entry );
             }
+        }
+
+        if (matches.Count == 1)
+        {
+            return matches[0].Value;
+        }
+
+        if (matches.Count > 1)
+        {
+            // Prefer the shortest catalog title (e.g. "мяккая" over a longer accidental match).
+            return matches
+                .OrderBy( m => m.Key.Length )
+                .ThenBy( m => m.Key, StringComparer.OrdinalIgnoreCase )
+                .First()
+                .Value;
         }
 
         return string.Empty;
@@ -222,6 +251,7 @@ public class ShopifyVariantLookupService
         Dictionary<string, string> ProductTypeById,
         Dictionary<(string ProductId, string VariantId), string> VariantTitleByLine,
         Dictionary<(string ProductId, string VariantId), int> StockByLine,
+        Dictionary<(string ProductId, string VariantId), decimal> PriceByLine,
         Dictionary<string, string> IsbnByProductId,
         Dictionary<string, string> ProductIdByIsbn)> GetVariantCatalogMapsCachedAsync()
     {
@@ -236,6 +266,7 @@ public class ShopifyVariantLookupService
                 cached.ProductTypeById,
                 cached.VariantTitleByLine,
                 cached.StockByLine,
+                cached.PriceByLine,
                 cached.IsbnByProductId,
                 cached.ProductIdByIsbn );
         }
@@ -254,6 +285,7 @@ public class ShopifyVariantLookupService
                     cachedAgain.ProductTypeById,
                     cachedAgain.VariantTitleByLine,
                     cachedAgain.StockByLine,
+                    cachedAgain.PriceByLine,
                     cachedAgain.IsbnByProductId,
                     cachedAgain.ProductIdByIsbn );
             }
@@ -276,6 +308,8 @@ public class ShopifyVariantLookupService
             Dictionary<(string ProductId, string VariantId), string> variantTitleByLine =
                 new( ProductVariantKeyComparer.Instance );
             Dictionary<(string ProductId, string VariantId), int> stockByLine =
+                new( ProductVariantKeyComparer.Instance );
+            Dictionary<(string ProductId, string VariantId), decimal> priceByLine =
                 new( ProductVariantKeyComparer.Instance );
             Dictionary<string, string> isbnByProductId = new( StringComparer.OrdinalIgnoreCase );
             Dictionary<string, string> productIdByIsbn = new( StringComparer.OrdinalIgnoreCase );
@@ -325,6 +359,11 @@ public class ShopifyVariantLookupService
                 if (product.Variants.Count == 0)
                 {
                     stockByLine[(productId, string.Empty)] = product.TotalInventory;
+                    if (product.SalePrice > 0m)
+                    {
+                        priceByLine[(productId, string.Empty)] = product.SalePrice;
+                    }
+
                     continue;
                 }
 
@@ -339,6 +378,12 @@ public class ShopifyVariantLookupService
                     }
 
                     stockByLine[(productId, variantId)] = variant.QuantityInStock;
+                    if (variant.SalePrice > 0m)
+                    {
+                        priceByLine[(productId, variantId)] = variant.SalePrice;
+                        priceByLine[(productId, string.Empty)] = variant.SalePrice;
+                    }
+
                     variantTitleByLine[(productId, variantId)] = string.IsNullOrWhiteSpace( variantName )
                         ? "Default Title"
                         : variantName;
@@ -374,6 +419,7 @@ public class ShopifyVariantLookupService
                 productTypeById,
                 variantTitleByLine,
                 stockByLine,
+                priceByLine,
                 isbnByProductId,
                 productIdByIsbn );
             return (
@@ -385,6 +431,7 @@ public class ShopifyVariantLookupService
                 productTypeById,
                 variantTitleByLine,
                 stockByLine,
+                priceByLine,
                 isbnByProductId,
                 productIdByIsbn );
         }

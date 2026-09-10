@@ -21,6 +21,7 @@ import {
   deleteVatReportRow,
   downloadVatReportExpenseInvoice,
   downloadVatReportRowInvoice,
+  extractVatReportExpenseInvoice,
   fetchVatReportCombinedDetails,
   fetchVatReportPeriods,
   fetchVatReports,
@@ -28,6 +29,7 @@ import {
   fetchUnpaidLinkOptions,
   linkUnpaidProduct,
   regenerateVatReport,
+  replaceManualVatReportRowItems,
   setVatReportLocked,
   moveVatReportRowToForeign,
   updateVatReportExpense,
@@ -51,6 +53,7 @@ import type { SupplyCatalogProduct } from '@/lib/api/supplies';
 import type {
   VatReportDetails,
   VatReportExpenseRow,
+  VatReportPolandDetailRow,
   VatReportSourceOrderOption,
   VatReportUnpaidLinkOptions,
   VatReportUnpaidProductRow,
@@ -621,6 +624,37 @@ type ExpenseProductLineDraft = {
   vatRatePercent: number;
 };
 
+function isManualVatOrderId(
+  shopifyOrderId: string | null | undefined
+): boolean {
+  const id = (shopifyOrderId ?? '').trim();
+  return id.length === 0 || id.toLowerCase().startsWith('manual-');
+}
+
+function draftsFromPolandRowItems(
+  row: VatReportPolandDetailRow
+): ExpenseProductLineDraft[] {
+  return (row.items ?? [])
+    .filter((item) => item.shopifyProductId?.trim() && item.quantity > 0)
+    .map((item) => {
+      const variantId = item.shopifyVariantId?.trim() ?? '';
+      const title = [item.productTitle, item.variantTitle]
+        .map((part) => part?.trim() ?? '')
+        .filter(Boolean)
+        .join(' · ');
+      return {
+        lineKey: makeSupplyLineKey(item.shopifyProductId, variantId),
+        shopifyProductId: item.shopifyProductId.trim(),
+        shopifyVariantId: variantId,
+        productTitle: title || item.productTitle || item.shopifyProductId,
+        productType: item.productType ?? '',
+        quantity: item.quantity,
+        unitGrossPrice: item.unitPrice,
+        vatRatePercent: item.assignedVatRatePercent || row.vatRatePercent,
+      };
+    });
+}
+
 function visibleExpenseProductVariants(
   product: ProductWithSuppliers
 ): ProductVariant[] {
@@ -1026,6 +1060,10 @@ export default function ReportDetailsClient({
   const [expenseInvoiceFile, setExpenseInvoiceFile] = useState<File | null>(
     null
   );
+  const [expenseExtracting, setExpenseExtracting] = useState(false);
+  const [expenseExtractWarning, setExpenseExtractWarning] = useState<
+    string | null
+  >(null);
   const [expenseSuppliers, setExpenseSuppliers] = useState<Supplier[]>([]);
   const [expenseSupplierId, setExpenseSupplierId] = useState(0);
   const [expenseProductLines, setExpenseProductLines] = useState<
@@ -1036,6 +1074,7 @@ export default function ReportDetailsClient({
   );
   const [supplierProductsLoading, setSupplierProductsLoading] = useState(false);
   const [expenseProductSearch, setExpenseProductSearch] = useState('');
+  const [expenseSelectedListOpen, setExpenseSelectedListOpen] = useState(false);
   const [expenseGrossOverride, setExpenseGrossOverride] = useState<
     number | null
   >(null);
@@ -1050,9 +1089,31 @@ export default function ReportDetailsClient({
     VatReportSourceOrderOption[]
   >([]);
   const [sourceOrdersLoading, setSourceOrdersLoading] = useState(false);
+  const [sourceOrdersPeriod, setSourceOrdersPeriod] = useState<{
+    year: number;
+    month: number;
+  } | null>(null);
   const [selectedSourceIndex, setSelectedSourceIndex] = useState('');
   const [addingRow, setAddingRow] = useState(false);
   const [addRowError, setAddRowError] = useState<string | null>(null);
+  const [polandManualProductLines, setPolandManualProductLines] = useState<
+    ExpenseProductLineDraft[]
+  >([]);
+  const [polandManualProducts, setPolandManualProducts] = useState<
+    ProductWithSuppliers[]
+  >([]);
+  const [polandManualProductsLoading, setPolandManualProductsLoading] =
+    useState(false);
+  const [polandManualProductSearch, setPolandManualProductSearch] =
+    useState('');
+  const [editBooksRow, setEditBooksRow] =
+    useState<VatReportPolandDetailRow | null>(null);
+  const [editBooksLines, setEditBooksLines] = useState<
+    ExpenseProductLineDraft[]
+  >([]);
+  const [editBooksSaving, setEditBooksSaving] = useState(false);
+  const [editBooksError, setEditBooksError] = useState<string | null>(null);
+  const [editBooksSearch, setEditBooksSearch] = useState('');
   const [orderSearch, setOrderSearch] = useState('');
   const [foreignOrderSearch, setForeignOrderSearch] = useState('');
   const [foreignAddModalOpen, setForeignAddModalOpen] = useState(false);
@@ -1118,6 +1179,10 @@ export default function ReportDetailsClient({
   const [vatFilterOpen, setVatFilterOpen] = useState(false);
   const [vatFilter5, setVatFilter5] = useState(true);
   const [vatFilter23, setVatFilter23] = useState(true);
+  /** Poland order rows excluded from the PDF export table (session-only). */
+  const [excludedFromPdfRowIds, setExcludedFromPdfRowIds] = useState<
+    Set<number>
+  >(() => new Set());
   const [newRow, setNewRow] = useState({
     orderNumber: '',
     orderDateUtc: '',
@@ -1428,6 +1493,25 @@ export default function ReportDetailsClient({
   }, [foreignAddModalOpen]);
 
   useEffect(() => {
+    if (!addModalOpen || addMode !== 'manual') return;
+    let cancelled = false;
+    setPolandManualProductsLoading(true);
+    fetchProductsWithSuppliers()
+      .then((rows) => {
+        if (!cancelled) setPolandManualProducts(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setPolandManualProducts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPolandManualProductsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [addModalOpen, addMode]);
+
+  useEffect(() => {
     if (
       expenseGrossOverride !== null &&
       expenseGrossOverride < expenseProductGrossTotal
@@ -1624,7 +1708,61 @@ export default function ReportDetailsClient({
       });
   }, [expandedRow, orderSearch, vatFilter5, vatFilter23]);
 
+  useEffect(() => {
+    const validIds = new Set(
+      (expandedRow?.polandRows ?? []).map((row) => row.id)
+    );
+    setExcludedFromPdfRowIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<number>();
+      prev.forEach((id) => {
+        if (validIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [expandedRow?.polandRows]);
+
   const isVatFilterCustomized = !(vatFilter5 && vatFilter23);
+
+  const polandRowsEligibleForPdf = useMemo(
+    () =>
+      visiblePolandRows.filter((row) => !Boolean(row.invoiceFileName?.trim())),
+    [visiblePolandRows]
+  );
+
+  const allEligiblePolandExcludedFromPdf =
+    polandRowsEligibleForPdf.length > 0 &&
+    polandRowsEligibleForPdf.every((row) => excludedFromPdfRowIds.has(row.id));
+
+  const someEligiblePolandExcludedFromPdf = polandRowsEligibleForPdf.some(
+    (row) => excludedFromPdfRowIds.has(row.id)
+  );
+
+  const togglePolandRowExcludedFromPdf = useCallback((rowId: number) => {
+    setExcludedFromPdfRowIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  }, []);
+
+  const toggleAllVisiblePolandExcludedFromPdf = useCallback(() => {
+    setExcludedFromPdfRowIds((prev) => {
+      const next = new Set(prev);
+      const eligibleIds = polandRowsEligibleForPdf.map((row) => row.id);
+      const allExcluded =
+        eligibleIds.length > 0 && eligibleIds.every((id) => next.has(id));
+      if (allExcluded) {
+        eligibleIds.forEach((id) => next.delete(id));
+      } else {
+        eligibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }, [polandRowsEligibleForPdf]);
 
   const visibleExpenseRows = useMemo(() => {
     if (!expandedRow || expandedRow.type !== 'expense') return [];
@@ -1661,6 +1799,16 @@ export default function ReportDetailsClient({
     [foreignShopifyProducts]
   );
 
+  const polandManualPickerLines = useMemo(
+    () => buildCatalogPickerLines(polandManualProducts),
+    [polandManualProducts]
+  );
+
+  const polandManualProductGrossTotal = useMemo(
+    () => calcExpenseProductGrossTotal(polandManualProductLines),
+    [polandManualProductLines]
+  );
+
   const visibleForeignPickerLines = useMemo(() => {
     const search = foreignProductSearch.trim().toLowerCase();
     if (!search) return foreignPickerLines;
@@ -1677,10 +1825,63 @@ export default function ReportDetailsClient({
     });
   }, [foreignPickerLines, foreignProductSearch]);
 
+  const visiblePolandManualPickerLines = useMemo(() => {
+    const search = polandManualProductSearch.trim().toLowerCase();
+    if (!search) return polandManualPickerLines;
+    return polandManualPickerLines.filter((line) => {
+      const haystack = [
+        line.productName,
+        line.productAuthor,
+        line.variantName,
+        buildExpensePickerLineTitle(line),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [polandManualPickerLines, polandManualProductSearch]);
+
+  const visibleEditBooksPickerLines = useMemo(() => {
+    const search = editBooksSearch.trim().toLowerCase();
+    if (!search) return polandManualPickerLines;
+    return polandManualPickerLines.filter((line) => {
+      const haystack = [
+        line.productName,
+        line.productAuthor,
+        line.variantName,
+        buildExpensePickerLineTitle(line),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [polandManualPickerLines, editBooksSearch]);
+
   const foreignProductGrossTotal = useMemo(
     () => calcExpenseProductGrossTotal(foreignProductLines),
     [foreignProductLines]
   );
+
+  useEffect(() => {
+    if (addMode !== 'manual' || polandManualProductLines.length === 0) return;
+    const grossAmount = polandManualProductGrossTotal;
+    setNewRow((prev) => {
+      const recalculated = recalcVatAndNet(grossAmount, prev.vatRatePercent);
+      if (
+        prev.grossAmount === grossAmount &&
+        prev.vatAmount === recalculated.vatAmount &&
+        prev.netAmount === recalculated.netAmount
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        grossAmount,
+        vatAmount: recalculated.vatAmount,
+        netAmount: recalculated.netAmount,
+      };
+    });
+  }, [addMode, polandManualProductLines.length, polandManualProductGrossTotal]);
 
   const handleRegenerate = async (rowKey: string) => {
     setRegeneratingRowKey(rowKey);
@@ -1749,6 +1950,118 @@ export default function ReportDetailsClient({
     setEditingRowKey(rowKey);
   };
 
+  const openEditBooks = async (row: VatReportPolandDetailRow) => {
+    setEditBooksError(null);
+    setEditBooksSearch('');
+    setEditBooksRow(row);
+    setEditBooksLines(draftsFromPolandRowItems(row));
+    if (polandManualProducts.length === 0 && !polandManualProductsLoading) {
+      setPolandManualProductsLoading(true);
+      try {
+        const products = await fetchProductsWithSuppliers();
+        setPolandManualProducts(products);
+      } catch {
+        setPolandManualProducts([]);
+      } finally {
+        setPolandManualProductsLoading(false);
+      }
+    }
+  };
+
+  const closeEditBooks = () => {
+    if (editBooksSaving) return;
+    setEditBooksRow(null);
+    setEditBooksLines([]);
+    setEditBooksError(null);
+    setEditBooksSearch('');
+  };
+
+  const toggleEditBooksPickerLine = (
+    pickerLine: CatalogPickerLine,
+    checked: boolean
+  ) => {
+    if (checked) {
+      setEditBooksLines((prev) => {
+        if (prev.some((item) => item.lineKey === pickerLine.lineKey))
+          return prev;
+        return [
+          ...prev,
+          {
+            lineKey: pickerLine.lineKey,
+            shopifyProductId: pickerLine.shopifyProductId,
+            shopifyVariantId: pickerLine.shopifyVariantId,
+            productTitle: buildExpensePickerLineTitle(pickerLine),
+            productType: '',
+            quantity: 1,
+            unitGrossPrice: 0,
+            vatRatePercent: editBooksRow?.vatRatePercent ?? 5,
+          },
+        ];
+      });
+      return;
+    }
+    setEditBooksLines((prev) =>
+      prev.filter((item) => item.lineKey !== pickerLine.lineKey)
+    );
+  };
+
+  const updateEditBooksQuantity = (lineKey: string, quantity: number) => {
+    const safeQty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+    setEditBooksLines((prev) =>
+      prev.map((line) =>
+        line.lineKey === lineKey ? { ...line, quantity: safeQty } : line
+      )
+    );
+  };
+
+  const updateEditBooksUnitPrice = (lineKey: string, price: number) => {
+    const safePrice = Number.isFinite(price) && price >= 0 ? price : 0;
+    setEditBooksLines((prev) =>
+      prev.map((line) =>
+        line.lineKey === lineKey ? { ...line, unitGrossPrice: safePrice } : line
+      )
+    );
+  };
+
+  const submitEditBooks = async () => {
+    if (!editBooksRow) return;
+    if (
+      editBooksLines.some(
+        (line) =>
+          !Number.isFinite(line.unitGrossPrice) || line.unitGrossPrice < 0
+      )
+    ) {
+      setEditBooksError('Праверце цэны тавараў.');
+      return;
+    }
+    setEditBooksSaving(true);
+    setEditBooksError(null);
+    try {
+      await replaceManualVatReportRowItems({
+        rowId: editBooksRow.id,
+        items: editBooksLines.map((line) => ({
+          shopifyProductId: line.shopifyProductId,
+          shopifyVariantId: line.shopifyVariantId || undefined,
+          productTitle: line.productTitle,
+          productType: line.productType,
+          quantity: line.quantity,
+          unitPrice: line.unitGrossPrice,
+        })),
+      });
+      const { details, foreignRows } = await loadCombinedDetails(reportId);
+      setForeignOrderRows(foreignRows);
+      setData(details);
+      setEditBooksRow(null);
+      setEditBooksLines([]);
+    } catch (err: unknown) {
+      setEditBooksError(
+        err instanceof Error ? err.message : 'Не ўдалося захаваць кнігі.'
+      );
+    } finally {
+      setEditBooksSaving(false);
+    }
+  };
+
   const toSourceKey = (option: VatReportSourceOrderOption) =>
     `${option.shopifyOrderId}|${option.vatRatePercent}|${option.orderNumber}`;
 
@@ -1768,18 +2081,22 @@ export default function ReportDetailsClient({
       netAmount: 0,
     });
     setSelectedSourceIndex('');
+    setPolandManualProductLines([]);
+    setPolandManualProductSearch('');
     setAddRowError(null);
   };
 
-  const openAddModal = async () => {
-    if (data?.isLocked) return;
-    setAddModalOpen(true);
-    setAddMode('select');
-    resetNewRow();
+  const loadSourceOrders = async (year: number, month: number) => {
     setSourceOrdersLoading(true);
+    setSelectedSourceIndex('');
+    setAddRowError(null);
     try {
-      const options = await fetchVatReportSourceOrders(reportId);
+      const options = await fetchVatReportSourceOrders(reportId, {
+        year,
+        month,
+      });
       setSourceOrderOptions(options);
+      setSourceOrdersPeriod({ year, month });
     } catch (err: unknown) {
       setAddRowError(
         err instanceof Error ? err.message : 'Памылка загрузкі спісу замоў'
@@ -1790,8 +2107,98 @@ export default function ReportDetailsClient({
     }
   };
 
+  const openAddModal = async () => {
+    if (data?.isLocked) return;
+    setAddModalOpen(true);
+    setAddMode('select');
+    resetNewRow();
+    const year = data?.periodYear ?? new Date().getFullYear();
+    const month = data?.periodMonth ?? new Date().getMonth() + 1;
+    setSourceOrdersPeriod({ year, month });
+    await loadSourceOrders(year, month);
+  };
+
+  const shiftSourceOrdersPeriod = async (deltaMonths: number) => {
+    const base =
+      sourceOrdersPeriod ??
+      (data
+        ? { year: data.periodYear, month: data.periodMonth }
+        : { year: new Date().getFullYear(), month: new Date().getMonth() + 1 });
+    const next = shiftReportPeriod(base.month, base.year, deltaMonths);
+    await loadSourceOrders(next.year, next.month);
+  };
+
+  const togglePolandManualPickerLine = (
+    line: CatalogPickerLine,
+    selected: boolean
+  ) => {
+    const product = polandManualProducts.find(
+      (p) => p.shopifyProductId === line.shopifyProductId
+    );
+    if (selected) {
+      setPolandManualProductLines((prev) => {
+        if (prev.some((item) => item.lineKey === line.lineKey)) return prev;
+        return [
+          ...prev,
+          {
+            lineKey: line.lineKey,
+            shopifyProductId: line.shopifyProductId,
+            shopifyVariantId: line.shopifyVariantId,
+            productTitle: buildExpensePickerLineTitle(line),
+            productType: product?.productType ?? '',
+            quantity: 1,
+            unitGrossPrice: 0,
+            vatRatePercent: 23,
+          },
+        ];
+      });
+      return;
+    }
+    setPolandManualProductLines((prev) =>
+      prev.filter((item) => item.lineKey !== line.lineKey)
+    );
+  };
+
+  const updatePolandManualProductQuantity = (
+    lineKey: string,
+    quantity: number
+  ) => {
+    const safeQty = Math.max(1, Math.floor(Number(quantity) || 1));
+    setPolandManualProductLines((prev) =>
+      prev.map((line) =>
+        line.lineKey === lineKey ? { ...line, quantity: safeQty } : line
+      )
+    );
+  };
+
+  const updatePolandManualProductUnitPrice = (
+    lineKey: string,
+    unitGrossPrice: number
+  ) => {
+    const safePrice = Math.max(0, Number(unitGrossPrice) || 0);
+    setPolandManualProductLines((prev) =>
+      prev.map((line) =>
+        line.lineKey === lineKey ? { ...line, unitGrossPrice: safePrice } : line
+      )
+    );
+  };
+
   const submitAddRow = async () => {
     setAddRowError(null);
+    const isManualWithProducts =
+      addMode === 'manual' && polandManualProductLines.length > 0;
+    if (isManualWithProducts) {
+      if (
+        polandManualProductLines.some(
+          (line) =>
+            !Number.isFinite(line.unitGrossPrice) || line.unitGrossPrice <= 0
+        )
+      ) {
+        setAddRowError('Укажыце брута-цэну для кожнага тавару.');
+        return;
+      }
+    }
+
     const payload = {
       orderNumber: newRow.orderNumber.trim(),
       orderDateUtc: newRow.orderDateUtc.trim(),
@@ -1805,6 +2212,19 @@ export default function ReportDetailsClient({
               Number(selectedSourceIndex)
             ]?.shopifyOrderId?.trim() || undefined
           : undefined,
+      items: isManualWithProducts
+        ? polandManualProductLines.map((line) => ({
+            shopifyProductId: line.shopifyProductId,
+            shopifyVariantId: line.shopifyVariantId,
+            variantTitle: line.productTitle.includes(' — ')
+              ? line.productTitle.split(' — ').slice(1).join(' — ').trim()
+              : '',
+            productTitle: line.productTitle,
+            productType: line.productType,
+            quantity: line.quantity,
+            unitPrice: line.unitGrossPrice,
+          }))
+        : undefined,
     };
     if (!payload.orderNumber) {
       setAddRowError('Нумар замовы абавязковы.');
@@ -1818,10 +2238,19 @@ export default function ReportDetailsClient({
       setAddRowError('Стаўка VAT павінна быць 5 або 23.');
       return;
     }
+    if (addMode === 'manual' && !isManualWithProducts) {
+      setAddRowError('Выберыце хаця б адзін тавар для кастомнага заказа.');
+      return;
+    }
 
     setAddingRow(true);
     try {
-      await createVatReportRow(reportId, payload);
+      await createVatReportRow(reportId, {
+        ...payload,
+        orderDateUtc: new Date(
+          `${payload.orderDateUtc}T12:00:00`
+        ).toISOString(),
+      });
       const { details, foreignRows } = await loadCombinedDetails(reportId);
       setForeignOrderRows(foreignRows);
       setData(details);
@@ -2002,9 +2431,11 @@ export default function ReportDetailsClient({
       expenseInvoiceTypeId: expenseTypes[0]?.id || 0,
     });
     setExpenseInvoiceFile(null);
+    setExpenseExtractWarning(null);
     setExpenseSupplierId(0);
     setExpenseProductLines([]);
     setExpenseProductSearch('');
+    setExpenseSelectedListOpen(false);
     setSupplierProducts([]);
     setExpenseGrossOverride(null);
     setExpenseVatOverride(null);
@@ -2075,6 +2506,7 @@ export default function ReportDetailsClient({
       expenseInvoiceTypeId: expense.expenseInvoiceTypeId,
     });
     setExpenseInvoiceFile(null);
+    setExpenseExtractWarning(null);
     setExpenseModalOpen(true);
   };
 
@@ -2128,6 +2560,201 @@ export default function ReportDetailsClient({
         line.lineKey === lineKey ? { ...line, unitGrossPrice: safePrice } : line
       )
     );
+  };
+
+  const exportExpenseSelectedProductsJson = () => {
+    if (expenseProductLines.length === 0) {
+      setError('Няма выбраных тавараў для экспарту.');
+      return;
+    }
+
+    const supplierName =
+      expenseSuppliers.find((s) => s.id === expenseSupplierId)?.name ?? null;
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      supplierId: expenseSupplierId > 0 ? expenseSupplierId : null,
+      supplierName,
+      invoiceNumber: newExpense.invoiceNumber.trim() || null,
+      expenseDateUtc: newExpense.expenseDateUtc || null,
+      productsCount: expenseProductLines.length,
+      grossTotal: expenseProductGrossTotal,
+      products: expenseProductLines.map((line) => ({
+        title: line.productTitle,
+        shopifyProductId: line.shopifyProductId,
+        shopifyVariantId: line.shopifyVariantId || null,
+        quantity: line.quantity,
+        unitGrossPrice: line.unitGrossPrice,
+        lineGrossPrice: round2(line.unitGrossPrice * line.quantity),
+        vatRatePercent: line.vatRatePercent,
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const datePart = (newExpense.expenseDateUtc || '').replaceAll('-', '');
+    const invoicePart = (newExpense.invoiceNumber || 'expense')
+      .trim()
+      .replace(/[^\w\-]+/g, '_')
+      .slice(0, 40);
+    anchor.href = url;
+    anchor.download = `expense-products_${datePart || 'export'}_${invoicePart}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const extractExpenseFromInvoice = async () => {
+    if (!expenseInvoiceFile) {
+      setError('Спачатку выберыце PDF-фактуру.');
+      return;
+    }
+    if (
+      !expenseInvoiceFile.name.toLowerCase().endsWith('.pdf') &&
+      expenseInvoiceFile.type !== 'application/pdf'
+    ) {
+      setError('Распазнаванне працуе толькі з PDF.');
+      return;
+    }
+
+    setExpenseExtracting(true);
+    setExpenseExtractWarning(null);
+    setError(null);
+    try {
+      const extracted = await extractVatReportExpenseInvoice(
+        expenseInvoiceFile,
+        expenseSupplierId > 0 ? { supplierId: expenseSupplierId } : undefined
+      );
+
+      // Type and supplier stay as the user chose — AI must not overwrite them.
+      const nextSupplierId = expenseSupplierId;
+      const selectedTypeName =
+        expenseTypes.find((t) => t.id === newExpense.expenseInvoiceTypeId)
+          ?.name ?? '';
+      const isSupplierType = selectedTypeName === SUPPLIER_PAYMENT_TYPE_NAME;
+
+      const grossAmount = extracted.grossAmount ?? 0;
+      const vatAmount = extracted.vatAmount ?? 0;
+      const netAmount =
+        extracted.netAmount ??
+        (grossAmount > 0 || vatAmount > 0
+          ? round2(grossAmount - vatAmount)
+          : 0);
+
+      setNewExpense((prev) => ({
+        ...prev,
+        grossAmount,
+        vatAmount,
+        netAmount,
+        expenseDateUtc: extracted.expenseDateUtc || prev.expenseDateUtc,
+        invoiceNumber: extracted.invoiceNumber || prev.invoiceNumber,
+        comment: extracted.comment || prev.comment,
+      }));
+
+      if (isSupplierType || nextSupplierId > 0) {
+        setExpenseGrossOverride(grossAmount > 0 ? grossAmount : null);
+        setExpenseVatOverride(vatAmount > 0 ? vatAmount : null);
+      }
+
+      if (isSupplierType && extracted.products.length > 0) {
+        setExpenseProductSearch('');
+        const catalogProducts = await fetchProductsWithSuppliers();
+        let supplyRows: SupplyCatalogProduct[] = [];
+        try {
+          supplyRows = await fetchSupplyCatalogProducts(
+            nextSupplierId > 0 ? nextSupplierId : undefined
+          );
+        } catch {
+          supplyRows = [];
+        }
+
+        const pickerLines =
+          nextSupplierId > 0
+            ? buildExpensePickerLinesFromSupply(catalogProducts, supplyRows)
+            : buildExpensePickerLinesFromCatalog(catalogProducts, supplyRows);
+
+        setSupplierProducts(pickerLines);
+
+        const pickerByKey = new Map(
+          pickerLines.map((line) => [line.lineKey, line])
+        );
+        const matchedLines: ExpenseProductLineDraft[] = [];
+        for (const product of extracted.products) {
+          if (!product.shopifyProductId) continue;
+          const lineKey = makeSupplyLineKey(
+            product.shopifyProductId,
+            product.shopifyVariantId
+          );
+          const pickerLine = pickerByKey.get(lineKey);
+          const unitGrossPrice =
+            product.unitGrossPrice != null && product.unitGrossPrice > 0
+              ? round2(product.unitGrossPrice)
+              : pickerLine && pickerLine.supplierPrice > 0
+                ? round2(pickerLine.supplierPrice)
+                : 0;
+          const vatRatePercent =
+            product.vatRatePercent != null && product.vatRatePercent > 0
+              ? product.vatRatePercent
+              : (pickerLine?.vatRatePercent ?? 23);
+          matchedLines.push({
+            lineKey,
+            shopifyProductId: product.shopifyProductId,
+            shopifyVariantId: product.shopifyVariantId,
+            productTitle:
+              product.catalogProductName ||
+              (pickerLine
+                ? buildExpensePickerLineTitle(pickerLine)
+                : product.title),
+            productType: '',
+            quantity: Math.max(1, Math.trunc(product.quantity) || 1),
+            unitGrossPrice,
+            vatRatePercent,
+          });
+        }
+        setExpenseProductLines(matchedLines);
+
+        if (matchedLines.length > 0) {
+          setExpenseSelectedListOpen(true);
+        }
+
+        // If header totals were missing, derive from matched lines.
+        if (matchedLines.length > 0 && grossAmount <= 0 && vatAmount <= 0) {
+          const derivedGross = round2(
+            matchedLines.reduce(
+              (sum, line) => sum + line.unitGrossPrice * line.quantity,
+              0
+            )
+          );
+          const derivedVat = round2(
+            matchedLines.reduce((sum, line) => {
+              const lineGross = line.unitGrossPrice * line.quantity;
+              const rate = Math.max(0, line.vatRatePercent) / 100;
+              return sum + (lineGross * rate) / (1 + rate);
+            }, 0)
+          );
+          const derivedNet = round2(derivedGross - derivedVat);
+          setNewExpense((prev) => ({
+            ...prev,
+            grossAmount: derivedGross,
+            vatAmount: derivedVat,
+            netAmount: derivedNet,
+          }));
+          setExpenseGrossOverride(derivedGross > 0 ? derivedGross : null);
+          setExpenseVatOverride(derivedVat > 0 ? derivedVat : null);
+        }
+      }
+
+      setExpenseExtractWarning(extracted.warning || null);
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error ? err.message : 'Не ўдалося распазнаць фактуру.'
+      );
+    } finally {
+      setExpenseExtracting(false);
+    }
   };
 
   const submitExpense = async () => {
@@ -2538,17 +3165,20 @@ export default function ReportDetailsClient({
   const handleExportTableToPdf = () => {
     const table = detailsTableRef.current;
     if (!table) return;
-    const ordersWithInvoice = new Set(
-      (expandedRow?.polandRows ?? [])
-        .filter((r) => Boolean(r.invoiceFileName))
-        .map((r) => r.orderNumber.trim().toLowerCase())
-    );
+
+    const excludedRowIds = new Set<number>(excludedFromPdfRowIds);
+    for (const row of expandedRow?.polandRows ?? []) {
+      if (row.invoiceFileName?.trim()) {
+        excludedRowIds.add(row.id);
+      }
+    }
+
     const exportRows = visiblePolandRows.filter(
-      (r) => !ordersWithInvoice.has(r.orderNumber.trim().toLowerCase())
+      (r) => !excludedRowIds.has(r.id)
     );
     if (exportRows.length === 0) {
       setError(
-        'Для экспарту няма радкоў: усе заказы маюць загружаныя фактуры.'
+        'Для экспарту няма радкоў: усе заказы маюць загружаныя фактуры або выключаныя з PDF.'
       );
       return;
     }
@@ -2557,21 +3187,28 @@ export default function ReportDetailsClient({
     const body = printableTable.tBodies[0];
     if (body) {
       Array.from(body.rows).forEach((tr) => {
-        const cells = tr.querySelectorAll('td');
-        if (cells.length < 2) return;
-        const orderNumber = cells[0]?.textContent?.trim().toLowerCase() ?? '';
-        if (ordersWithInvoice.has(orderNumber)) {
+        if (tr.hasAttribute('data-pdf-skip-row')) {
           tr.remove();
+          return;
+        }
+        const rowIdAttr = tr.getAttribute('data-poland-row-id');
+        const rowId = rowIdAttr ? Number(rowIdAttr) : NaN;
+        if (Number.isFinite(rowId) && excludedRowIds.has(rowId)) {
+          tr.remove();
+          return;
+        }
+        // Keep only the clean order number in the export cell (drop UI badges).
+        const orderValue = tr.querySelector('[data-pdf-order-value]');
+        const orderCell = tr.querySelector('[data-pdf-order-number]');
+        if (orderCell && orderValue) {
+          orderCell.textContent = orderValue.textContent?.trim() ?? '';
         }
       });
     }
-    // Remove action column cells and keep only data columns.
-    printableTable.querySelectorAll('tr').forEach((row) => {
-      const cells = Array.from(row.querySelectorAll('th,td'));
-      if (cells.length >= 7) {
-        cells[cells.length - 1]?.remove();
-      }
-    });
+    // Drop UI-only columns (exclude checkbox + actions).
+    printableTable
+      .querySelectorAll('[data-pdf-skip]')
+      .forEach((el) => el.remove());
     // Remove VAT filter control from export header.
     printableTable
       .querySelectorAll('button[aria-label="Фільтр па стаўцы VAT"]')
@@ -3630,6 +4267,27 @@ export default function ReportDetailsClient({
                 >
                   <thead>
                     <tr className="border-b border-gray-200 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      <th
+                        className="w-10 px-3 py-2.5 text-center"
+                        data-pdf-skip="true"
+                        title="Выключыць з экспарту PDF"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={allEligiblePolandExcludedFromPdf}
+                          ref={(el) => {
+                            if (!el) return;
+                            el.indeterminate =
+                              someEligiblePolandExcludedFromPdf &&
+                              !allEligiblePolandExcludedFromPdf;
+                          }}
+                          onChange={toggleAllVisiblePolandExcludedFromPdf}
+                          disabled={polandRowsEligibleForPdf.length === 0}
+                          className="size-3.5 rounded border-gray-300 accent-primary disabled:opacity-40"
+                          aria-label="Выключыць усе бачныя заказы з PDF"
+                          title="Выключыць з PDF"
+                        />
+                      </th>
                       <th className="px-4 py-2.5">Нумар замовы</th>
                       <th className="px-4 py-2.5">Дата</th>
                       <th className="relative px-4 py-2.5 text-right">
@@ -3685,7 +4343,12 @@ export default function ReportDetailsClient({
                       <th className="px-4 py-2.5 text-right">Сума брута</th>
                       <th className="px-4 py-2.5 text-right">VAT</th>
                       <th className="px-4 py-2.5 text-right">Сума нета</th>
-                      <th className="px-4 py-2.5 text-right">Дзеянне</th>
+                      <th
+                        className="px-4 py-2.5 text-right"
+                        data-pdf-skip="true"
+                      >
+                        Дзеянне
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -3695,9 +4358,20 @@ export default function ReportDetailsClient({
                           const rowKey = String(row.id);
                           const isEditing = editingRowKey === rowKey;
                           const edited = editedRows[rowKey];
+                          const excludedFromPdf = excludedFromPdfRowIds.has(
+                            row.id
+                          );
+                          const hasInvoice = Boolean(row.invoiceFileName);
                           return (
                             <tr
-                              className={`${row.invoiceFileName ? 'bg-emerald-200/60 font-medium' : ''} cursor-pointer hover:bg-primary/10`}
+                              data-poland-row-id={row.id}
+                              className={`${
+                                hasInvoice
+                                  ? 'bg-emerald-200/60 font-medium'
+                                  : excludedFromPdf
+                                    ? 'bg-amber-50/80 text-gray-500'
+                                    : ''
+                              } cursor-pointer hover:bg-primary/10`}
                               onClick={(e) => {
                                 const target = e.target as HTMLElement;
                                 if (
@@ -3711,12 +4385,57 @@ export default function ReportDetailsClient({
                                 );
                               }}
                             >
-                              <td className="px-4 py-3">
+                              <td
+                                className="px-3 py-3 text-center"
+                                data-pdf-skip="true"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={excludedFromPdf}
+                                  disabled={hasInvoice}
+                                  onChange={() =>
+                                    togglePolandRowExcludedFromPdf(row.id)
+                                  }
+                                  className="size-3.5 rounded border-gray-300 accent-primary disabled:cursor-not-allowed disabled:opacity-40"
+                                  aria-label={
+                                    hasInvoice
+                                      ? 'Ужо выключаны з PDF (ёсць фактура)'
+                                      : excludedFromPdf
+                                        ? 'Уключыць у PDF'
+                                        : 'Выключыць з PDF'
+                                  }
+                                  title={
+                                    hasInvoice
+                                      ? 'Заказы з загружанай фактурай ужо не трапляюць у PDF'
+                                      : excludedFromPdf
+                                        ? 'Уключыць у PDF'
+                                        : 'Выключыць з PDF'
+                                  }
+                                />
+                              </td>
+                              <td
+                                className="px-4 py-3"
+                                data-pdf-order-number="true"
+                              >
                                 <div className="inline-flex items-center gap-2">
-                                  <span>{row.orderNumber}</span>
-                                  {row.invoiceFileName && (
+                                  <span
+                                    data-pdf-order-value="true"
+                                    className={
+                                      excludedFromPdf && !hasInvoice
+                                        ? 'line-through'
+                                        : undefined
+                                    }
+                                  >
+                                    {row.orderNumber}
+                                  </span>
+                                  {hasInvoice && (
                                     <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
                                       Фактура загружана
+                                    </span>
+                                  )}
+                                  {excludedFromPdf && !hasInvoice && (
+                                    <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                                      Не ў PDF
                                     </span>
                                   )}
                                 </div>
@@ -3872,7 +4591,10 @@ export default function ReportDetailsClient({
                                   formatAmount(row.netAmount)
                                 )}
                               </td>
-                              <td className="px-4 py-3 text-right">
+                              <td
+                                className="px-4 py-3 text-right"
+                                data-pdf-skip="true"
+                              >
                                 <div className="inline-flex items-center gap-2">
                                   <button
                                     type="button"
@@ -3909,6 +4631,12 @@ export default function ReportDetailsClient({
                                     type="button"
                                     onClick={async () => {
                                       if (isLocked) return;
+                                      if (
+                                        isManualVatOrderId(row.shopifyOrderId)
+                                      ) {
+                                        void openEditBooks(row);
+                                        return;
+                                      }
                                       if (isEditing) {
                                         const edited = editedRows[rowKey];
                                         if (edited) {
@@ -3956,16 +4684,20 @@ export default function ReportDetailsClient({
                                         : 'border-gray-200 bg-white hover:border-primary/40 hover:bg-primary/10 hover:text-primary'
                                     }`}
                                     aria-label={
-                                      isEditing
-                                        ? 'Завяршыць рэдагаванне радка'
-                                        : 'Рэдагаваць радок'
+                                      isManualVatOrderId(row.shopifyOrderId)
+                                        ? 'Рэдагаваць кнігі'
+                                        : isEditing
+                                          ? 'Завяршыць рэдагаванне радка'
+                                          : 'Рэдагаваць радок'
                                     }
                                     title={
                                       isLocked
                                         ? lockedTitle
-                                        : isEditing
-                                          ? 'Завяршыць рэдагаванне радка'
-                                          : 'Рэдагаваць радок'
+                                        : isManualVatOrderId(row.shopifyOrderId)
+                                          ? 'Рэдагаваць кнігі'
+                                          : isEditing
+                                            ? 'Завяршыць рэдагаванне радка'
+                                            : 'Рэдагаваць радок'
                                     }
                                   >
                                     <FiEdit2 className="size-4" aria-hidden />
@@ -4032,10 +4764,13 @@ export default function ReportDetailsClient({
                         })()}
                         {expandedPolandRowId === row.id &&
                           row.items.length > 0 && (
-                            <tr className="bg-gray-50/50">
+                            <tr
+                              className="bg-gray-50/50"
+                              data-pdf-skip-row="true"
+                            >
                               <td
                                 className="px-4 py-2 text-xs text-gray-500"
-                                colSpan={7}
+                                colSpan={8}
                               >
                                 {row.items.map((item, itemIdx) => (
                                   <div
@@ -4054,9 +4789,9 @@ export default function ReportDetailsClient({
                       </Fragment>
                     ))}
                     {visiblePolandRows.length === 0 && (
-                      <tr>
+                      <tr data-pdf-skip-row="true">
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           className="px-4 py-6 text-center text-sm text-gray-500"
                         >
                           Няма радкоў па выбраных фільтрах.
@@ -4550,6 +5285,22 @@ export default function ReportDetailsClient({
                                                 type="button"
                                                 onClick={async () => {
                                                   if (isLocked) return;
+                                                  if (
+                                                    isManualVatOrderId(
+                                                      group.shopifyOrderId
+                                                    )
+                                                  ) {
+                                                    const merged: VatReportPolandDetailRow =
+                                                      {
+                                                        ...group,
+                                                        items:
+                                                          row.polandRows.flatMap(
+                                                            (g) => g.items ?? []
+                                                          ),
+                                                      };
+                                                    void openEditBooks(merged);
+                                                    return;
+                                                  }
                                                   if (isEditing) {
                                                     const changed =
                                                       editedRows[rowKey];
@@ -4616,16 +5367,24 @@ export default function ReportDetailsClient({
                                                     : 'border-gray-200 bg-white hover:border-primary/40 hover:bg-primary/15 hover:text-primary'
                                                 }`}
                                                 aria-label={
-                                                  isEditing
-                                                    ? 'Завяршыць рэдагаванне радка'
-                                                    : 'Рэдагаваць радок'
+                                                  isManualVatOrderId(
+                                                    group.shopifyOrderId
+                                                  )
+                                                    ? 'Рэдагаваць кнігі'
+                                                    : isEditing
+                                                      ? 'Завяршыць рэдагаванне радка'
+                                                      : 'Рэдагаваць радок'
                                                 }
                                                 title={
                                                   isLocked
                                                     ? lockedTitle
-                                                    : isEditing
-                                                      ? 'Завяршыць рэдагаванне радка'
-                                                      : 'Рэдагаваць радок'
+                                                    : isManualVatOrderId(
+                                                          group.shopifyOrderId
+                                                        )
+                                                      ? 'Рэдагаваць кнігі'
+                                                      : isEditing
+                                                        ? 'Завяршыць рэдагаванне радка'
+                                                        : 'Рэдагаваць радок'
                                                 }
                                               >
                                                 <FiEdit2
@@ -5281,197 +6040,373 @@ export default function ReportDetailsClient({
       )}
 
       {addModalOpen && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-base font-semibold text-gray-900">
-                Дадаць радок справаздачы
-              </div>
-              <div className="inline-flex rounded-lg border border-gray-200 p-1 text-sm">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAddMode('select');
-                    setAddRowError(null);
-                  }}
-                  className={`rounded-md px-3 py-1 ${addMode === 'select' ? 'bg-primary text-white' : 'text-gray-700 hover:bg-gray-50'}`}
-                >
-                  Выбраць заказ
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAddMode('manual');
-                    setSelectedSourceIndex('');
-                    setAddRowError(null);
-                  }}
-                  className={`rounded-md px-3 py-1 ${addMode === 'manual' ? 'bg-primary text-white' : 'text-gray-700 hover:bg-gray-50'}`}
-                >
-                  Увесці ўручную
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              {addRowError && (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-                  {addRowError}
+        <div className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-black/40 p-3 sm:items-center sm:p-4">
+          <div className="my-auto flex max-h-[min(760px,calc(100dvh-1.5rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl sm:my-0">
+            <div className="shrink-0 border-b border-gray-100 px-4 py-3 sm:px-5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-base font-semibold text-gray-900">
+                  Дадаць радок справаздачы
                 </div>
-              )}
-
-              {addMode === 'select' && (
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Нумар замовы (за гэты месяц)
-                    {sourceOrdersLoading && (
-                      <span className="ml-2 text-xs font-normal text-gray-500">
-                        Загрузка...
-                      </span>
-                    )}
-                  </span>
-                  <select
-                    value={selectedSourceIndex}
-                    onChange={(e) => setSelectedSourceIndex(e.target.value)}
-                    disabled={addingRow}
-                    className="relative z-[81] w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                <div className="inline-flex rounded-lg border border-gray-200 p-1 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddMode('select');
+                      setPolandManualProductLines([]);
+                      setPolandManualProductSearch('');
+                      setAddRowError(null);
+                    }}
+                    className={`rounded-md px-3 py-1 ${addMode === 'select' ? 'bg-primary text-white' : 'text-gray-700 hover:bg-gray-50'}`}
                   >
-                    <option value="">
-                      {sourceOrdersLoading
-                        ? 'Загрузка спісу замоў...'
-                        : 'Выберыце заказ'}
-                    </option>
-                    {sourceOrderOptions.map((option, index) => (
-                      <option
-                        key={toSourceKey(option) + index}
-                        value={String(index)}
-                      >
-                        {formatSourceOrderLabel(option)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Нумар замовы
-                  </span>
-                  <input
-                    type="text"
-                    value={newRow.orderNumber}
-                    onChange={(e) => {
-                      const orderNumber = e.target.value;
-                      setNewRow((prev) => ({ ...prev, orderNumber }));
+                    Выбраць заказ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddMode('manual');
+                      setSelectedSourceIndex('');
+                      setAddRowError(null);
                     }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Дата замовы
-                  </span>
-                  <input
-                    type="date"
-                    value={newRow.orderDateUtc}
-                    onChange={(e) => {
-                      const orderDateUtc = e.target.value;
-                      setNewRow((prev) => ({ ...prev, orderDateUtc }));
-                    }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Стаўка VAT
-                  </span>
-                  <select
-                    value={newRow.vatRatePercent}
-                    onChange={(e) => {
-                      const vatRatePercent = Number(e.target.value) || 0;
-                      setNewRow((prev) => {
-                        const recalculated = recalcVatAndNet(
-                          prev.grossAmount,
-                          vatRatePercent
-                        );
-                        return {
-                          ...prev,
-                          vatRatePercent,
-                          vatAmount: recalculated.vatAmount,
-                          netAmount: recalculated.netAmount,
-                        };
-                      });
-                    }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    className={`rounded-md px-3 py-1 ${addMode === 'manual' ? 'bg-primary text-white' : 'text-gray-700 hover:bg-gray-50'}`}
                   >
-                    <option value={5}>5</option>
-                    <option value={23}>23</option>
-                  </select>
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Сума брута
-                  </span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={newRow.grossAmount}
-                    onChange={(e) => {
-                      const grossAmount = Number(e.target.value) || 0;
-                      setNewRow((prev) => {
-                        const recalculated = recalcVatAndNet(
-                          grossAmount,
-                          prev.vatRatePercent
-                        );
-                        return {
-                          ...prev,
-                          grossAmount,
-                          vatAmount: recalculated.vatAmount,
-                          netAmount: recalculated.netAmount,
-                        };
-                      });
-                    }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">VAT</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={newRow.vatAmount}
-                    onChange={(e) => {
-                      const vatAmount = Number(e.target.value) || 0;
-                      setNewRow((prev) => ({ ...prev, vatAmount }));
-                    }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                  />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-sm font-medium text-gray-700">
-                    Сума нета
-                  </span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={newRow.netAmount}
-                    onChange={(e) => {
-                      const netAmount = Number(e.target.value) || 0;
-                      setNewRow((prev) => ({ ...prev, netAmount }));
-                    }}
-                    disabled={addingRow}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
-                  />
-                </label>
+                    Увесці ўручную
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div className="mt-5 flex items-center justify-end gap-2">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 sm:px-5">
+              <div className="space-y-3">
+                {addRowError && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                    {addRowError}
+                  </div>
+                )}
+
+                {addMode === 'select' && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-gray-700">
+                        Месяц замоў
+                      </span>
+                      <div className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void shiftSourceOrdersPeriod(-1);
+                          }}
+                          disabled={addingRow || sourceOrdersLoading}
+                          className="inline-flex size-8 items-center justify-center rounded-md text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+                          aria-label="Папярэдні месяц"
+                          title="Папярэдні месяц"
+                        >
+                          <FiChevronLeft className="size-4" aria-hidden />
+                        </button>
+                        <span className="min-w-[9.5rem] px-2 text-center text-sm font-medium text-gray-800">
+                          {sourceOrdersPeriod
+                            ? formatMonthYearBe(
+                                sourceOrdersPeriod.month,
+                                sourceOrdersPeriod.year
+                              )
+                            : '—'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void shiftSourceOrdersPeriod(1);
+                          }}
+                          disabled={addingRow || sourceOrdersLoading}
+                          className="inline-flex size-8 items-center justify-center rounded-md text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+                          aria-label="Наступны месяц"
+                          title="Наступны месяц"
+                        >
+                          <FiChevronRight className="size-4" aria-hidden />
+                        </button>
+                      </div>
+                    </div>
+                    <label className="block space-y-1.5">
+                      <span className="text-sm font-medium text-gray-700">
+                        Нумар замовы
+                        {sourceOrdersLoading && (
+                          <span className="ml-2 text-xs font-normal text-gray-500">
+                            Загрузка...
+                          </span>
+                        )}
+                      </span>
+                      <select
+                        value={selectedSourceIndex}
+                        onChange={(e) => setSelectedSourceIndex(e.target.value)}
+                        disabled={addingRow || sourceOrdersLoading}
+                        className="relative z-[81] w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:bg-gray-50"
+                      >
+                        <option value="">
+                          {sourceOrdersLoading
+                            ? 'Загрузка спісу замоў...'
+                            : sourceOrderOptions.length === 0
+                              ? 'Няма замоў за гэты месяц'
+                              : 'Выберыце заказ'}
+                        </option>
+                        {sourceOrderOptions.map((option, index) => (
+                          <option
+                            key={toSourceKey(option) + index}
+                            value={String(index)}
+                          >
+                            {formatSourceOrderLabel(option)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      Нумар замовы
+                    </span>
+                    <input
+                      type="text"
+                      value={newRow.orderNumber}
+                      onChange={(e) => {
+                        const orderNumber = e.target.value;
+                        setNewRow((prev) => ({ ...prev, orderNumber }));
+                      }}
+                      disabled={addingRow}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      Дата замовы
+                    </span>
+                    <input
+                      type="date"
+                      value={newRow.orderDateUtc}
+                      onChange={(e) => {
+                        const orderDateUtc = e.target.value;
+                        setNewRow((prev) => ({ ...prev, orderDateUtc }));
+                      }}
+                      disabled={addingRow}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      Стаўка VAT
+                    </span>
+                    <select
+                      value={newRow.vatRatePercent}
+                      onChange={(e) => {
+                        const vatRatePercent = Number(e.target.value) || 0;
+                        setNewRow((prev) => {
+                          const recalculated = recalcVatAndNet(
+                            prev.grossAmount,
+                            vatRatePercent
+                          );
+                          return {
+                            ...prev,
+                            vatRatePercent,
+                            vatAmount: recalculated.vatAmount,
+                            netAmount: recalculated.netAmount,
+                          };
+                        });
+                      }}
+                      disabled={addingRow}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    >
+                      <option value={5}>5</option>
+                      <option value={23}>23</option>
+                    </select>
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      Сума брута
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newRow.grossAmount}
+                      onChange={(e) => {
+                        const grossAmount = Number(e.target.value) || 0;
+                        setNewRow((prev) => {
+                          const recalculated = recalcVatAndNet(
+                            grossAmount,
+                            prev.vatRatePercent
+                          );
+                          return {
+                            ...prev,
+                            grossAmount,
+                            vatAmount: recalculated.vatAmount,
+                            netAmount: recalculated.netAmount,
+                          };
+                        });
+                      }}
+                      disabled={
+                        addingRow || polandManualProductLines.length > 0
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:bg-gray-50"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      VAT
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newRow.vatAmount}
+                      onChange={(e) => {
+                        const vatAmount = Number(e.target.value) || 0;
+                        setNewRow((prev) => ({ ...prev, vatAmount }));
+                      }}
+                      disabled={
+                        addingRow || polandManualProductLines.length > 0
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:bg-gray-50"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-700">
+                      Сума нета
+                    </span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newRow.netAmount}
+                      onChange={(e) => {
+                        const netAmount = Number(e.target.value) || 0;
+                        setNewRow((prev) => ({ ...prev, netAmount }));
+                      }}
+                      disabled={
+                        addingRow || polandManualProductLines.length > 0
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:bg-gray-50"
+                    />
+                  </label>
+                </div>
+
+                {addMode === 'manual' && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-gray-700">
+                        Тавары
+                      </span>
+                      {polandManualProductLines.length > 0 && (
+                        <span className="text-xs text-gray-500">
+                          Выбрана: {polandManualProductLines.length}
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="search"
+                      value={polandManualProductSearch}
+                      onChange={(e) =>
+                        setPolandManualProductSearch(e.target.value)
+                      }
+                      placeholder="Пошук тавару..."
+                      disabled={addingRow}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                    />
+                    <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-200">
+                      {polandManualProductsLoading && (
+                        <div className="px-3 py-4 text-sm text-gray-500">
+                          Загрузка тавараў з Shopify...
+                        </div>
+                      )}
+                      {!polandManualProductsLoading &&
+                        visiblePolandManualPickerLines.length === 0 && (
+                          <div className="px-3 py-4 text-sm text-gray-500">
+                            {polandManualProductSearch.trim()
+                              ? 'Тавары не знойдзены'
+                              : 'Няма тавараў у Shopify'}
+                          </div>
+                        )}
+                      {!polandManualProductsLoading &&
+                        visiblePolandManualPickerLines.map((pickerLine) => {
+                          const line = polandManualProductLines.find(
+                            (item) => item.lineKey === pickerLine.lineKey
+                          );
+                          const selected = Boolean(line);
+                          return (
+                            <div
+                              key={pickerLine.lineKey}
+                              className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-100 px-3 py-2 last:border-b-0"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                disabled={addingRow}
+                                onChange={(e) =>
+                                  togglePolandManualPickerLine(
+                                    pickerLine,
+                                    e.target.checked
+                                  )
+                                }
+                                className="size-4 shrink-0 rounded border-gray-300 accent-primary"
+                              />
+                              <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
+                                <span className="line-clamp-2">
+                                  {buildExpensePickerLineTitle(pickerLine)}
+                                </span>
+                              </span>
+                              {selected && (
+                                <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+                                  <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                                    <span>Кол.</span>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      step="1"
+                                      value={line?.quantity ?? 1}
+                                      disabled={addingRow}
+                                      onChange={(e) =>
+                                        updatePolandManualProductQuantity(
+                                          pickerLine.lineKey,
+                                          Number(e.target.value)
+                                        )
+                                      }
+                                      className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                                    />
+                                  </label>
+                                  <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                                    <span>Цана брута</span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      value={line?.unitGrossPrice || ''}
+                                      disabled={addingRow}
+                                      onChange={(e) =>
+                                        updatePolandManualProductUnitPrice(
+                                          pickerLine.lineKey,
+                                          Number(e.target.value)
+                                        )
+                                      }
+                                      className="w-24 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                                    />
+                                  </label>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                    {polandManualProductLines.length > 0 && (
+                      <div className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                        Сума тавараў:{' '}
+                        <span className="font-medium tabular-nums">
+                          {formatAmount(polandManualProductGrossTotal)}
+                        </span>
+                        . Наяўнасць у Shopify спішацца; пры Sync пры продажы —
+                        Wydanie ў Odoo.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="shrink-0 flex items-center justify-end gap-2 border-t border-gray-100 px-4 py-3 sm:px-5">
               <button
                 type="button"
                 onClick={() => setAddModalOpen(false)}
@@ -5485,8 +6420,10 @@ export default function ReportDetailsClient({
                 onClick={submitAddRow}
                 disabled={
                   addingRow ||
-                  (addMode === 'select' && !selectedSourceIndex) ||
-                  sourceOrdersLoading
+                  (addMode === 'select' &&
+                    (!selectedSourceIndex || sourceOrdersLoading)) ||
+                  (addMode === 'manual' &&
+                    polandManualProductLines.length === 0)
                 }
                 className="inline-flex min-w-24 items-center justify-center rounded-lg border border-primary bg-primary px-3 py-1.5 text-sm font-medium text-white transition hover:bg-primary/90 disabled:opacity-60"
               >
@@ -6135,6 +7072,7 @@ export default function ReportDetailsClient({
                         setExpenseSupplierId(0);
                         setExpenseProductLines([]);
                         setExpenseProductSearch('');
+                        setExpenseSelectedListOpen(false);
                         setSupplierProducts([]);
                         setExpenseGrossOverride(null);
                         setExpenseVatOverride(null);
@@ -6162,6 +7100,7 @@ export default function ReportDetailsClient({
                           setExpenseSupplierId(nextSupplierId);
                           setExpenseProductLines([]);
                           setExpenseProductSearch('');
+                          setExpenseSelectedListOpen(false);
                           setExpenseGrossOverride(null);
                           setExpenseVatOverride(null);
                         }}
@@ -6181,9 +7120,13 @@ export default function ReportDetailsClient({
                           Тавары для аплаты
                         </span>
                         {expenseProductLines.length > 0 && (
-                          <span className="text-xs text-gray-500">
-                            Выбрана: {expenseProductLines.length}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setExpenseSelectedListOpen(true)}
+                            className="text-xs font-medium text-primary hover:underline"
+                          >
+                            Выбрана: {expenseProductLines.length} — прагледзець
+                          </button>
                         )}
                       </div>
                       <input
@@ -6495,24 +7438,47 @@ export default function ReportDetailsClient({
                   <span className="text-sm font-medium text-gray-700">
                     Фактура
                   </span>
-                  <div className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
                     <label className="cursor-pointer rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-200">
                       Выберыце файл
                       <input
                         type="file"
                         accept=".pdf,.png,.jpg,.jpeg,.webp"
-                        onChange={(e) =>
-                          setExpenseInvoiceFile(e.target.files?.[0] ?? null)
-                        }
+                        onChange={(e) => {
+                          setExpenseInvoiceFile(e.target.files?.[0] ?? null);
+                          setExpenseExtractWarning(null);
+                        }}
                         className="hidden"
                       />
                     </label>
-                    <span className="truncate text-sm text-gray-500">
+                    <span className="min-w-0 flex-1 truncate text-sm text-gray-500">
                       {expenseInvoiceFile?.name ??
                         editingExpenseInvoiceFileName ??
                         'Файл не выбраны'}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => void extractExpenseFromInvoice()}
+                      disabled={
+                        expenseExtracting ||
+                        expenseSaving ||
+                        !expenseInvoiceFile
+                      }
+                      className="inline-flex items-center justify-center rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Распазнаць палі з PDF праз AI"
+                    >
+                      {expenseExtracting ? 'Распазнаём…' : 'Распазнаць'}
+                    </button>
                   </div>
+                  <p className="text-xs text-gray-500">
+                    Лепей спачатку выбраць пастаўшчыка — тады тавары
+                    супастаўляюцца па яго каталогу.
+                  </p>
+                  {expenseExtractWarning && (
+                    <p className="text-xs text-amber-700">
+                      {expenseExtractWarning}
+                    </p>
+                  )}
                 </div>
                 <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 sm:col-span-2">
                   <input
@@ -6578,6 +7544,137 @@ export default function ReportDetailsClient({
                   ) : (
                     'Дадаць'
                   )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {expenseModalOpen && expenseSelectedListOpen && (
+        <div className="fixed inset-0 z-[90] flex items-end justify-center overflow-y-auto bg-black/50 p-3 sm:items-center sm:p-4">
+          <div className="my-auto flex max-h-[min(820px,calc(100dvh-1.5rem))] w-full max-w-3xl min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-gray-100 px-4 py-3 sm:px-5">
+              <div>
+                <div className="text-base font-semibold text-gray-900">
+                  Выбраныя тавары
+                </div>
+                <div className="mt-0.5 text-xs text-gray-500">
+                  {expenseProductLines.length} паз. · сума брута{' '}
+                  {formatAmount(expenseProductGrossTotal)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExpenseSelectedListOpen(false)}
+                className="rounded-lg border border-gray-200 px-2.5 py-1 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Закрыць
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              {expenseProductLines.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-gray-500">
+                  Няма выбраных тавараў.
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {expenseProductLines.map((line, index) => {
+                    const lineGross = round2(
+                      line.unitGrossPrice * line.quantity
+                    );
+                    return (
+                      <div
+                        key={line.lineKey}
+                        className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:gap-3 sm:px-5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-gray-400">
+                            {index + 1}.
+                          </div>
+                          <div className="text-sm font-medium text-gray-900">
+                            {line.productTitle}
+                          </div>
+                          <div className="mt-0.5 text-xs text-gray-500">
+                            VAT {formatAmount(line.vatRatePercent)}% · радок{' '}
+                            {formatAmount(lineGross)}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+                          <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                            <span>Кол.</span>
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={line.quantity}
+                              onChange={(e) =>
+                                updateExpenseProductQuantity(
+                                  line.lineKey,
+                                  Number(e.target.value)
+                                )
+                              }
+                              className="w-16 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                            />
+                          </label>
+                          <label className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                            <span>Брута</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={line.unitGrossPrice || ''}
+                              onChange={(e) =>
+                                updateExpenseProductUnitGrossPrice(
+                                  line.lineKey,
+                                  Number(e.target.value)
+                                )
+                              }
+                              className="w-24 rounded-md border border-gray-200 bg-white px-2 py-1 text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpenseProductLines((prev) =>
+                                prev.filter(
+                                  (item) => item.lineKey !== line.lineKey
+                                )
+                              )
+                            }
+                            className="rounded-md border border-gray-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+                          >
+                            Прыбраць
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-gray-100 px-4 py-3 sm:px-5">
+              <div className="text-sm text-gray-700">
+                Разам брута:{' '}
+                <span className="font-semibold text-gray-900">
+                  {formatAmount(expenseProductGrossTotal)}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={exportExpenseSelectedProductsJson}
+                  disabled={expenseProductLines.length === 0}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  Экспорт JSON
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExpenseSelectedListOpen(false)}
+                  className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary/90"
+                >
+                  Гатова
                 </button>
               </div>
             </div>
@@ -6690,10 +7787,11 @@ export default function ReportDetailsClient({
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
             <div className="text-base font-semibold text-gray-900">
-              Пацвердзіце перегенерацыю
+              Пацвердзіце абнаўленне з Shopify
             </div>
             <p className="mt-2 text-sm text-gray-600">
-              Вы сапраўды хочаце перегенераваць справаздачу?
+              Абновяцца толькі заказы з Shopify. Ручныя фактуры і заказы
+              застануцца без змен.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
@@ -6713,8 +7811,189 @@ export default function ReportDetailsClient({
                 {regeneratingRowKey ? (
                   <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-white" />
                 ) : (
-                  'Перагенераваць'
+                  'Абнавіць'
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editBooksRow && (
+        <div className="fixed inset-0 z-[85] flex items-end justify-center overflow-y-auto bg-black/40 p-3 sm:items-center sm:p-4">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-5 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Рэдагаваць кнігі
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  {editBooksRow.orderNumber.split(' || ')[0]?.trim() ||
+                    editBooksRow.orderNumber}{' '}
+                  · дадайце або выдаліце тавары
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEditBooks}
+                disabled={editBooksSaving}
+                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50"
+                aria-label="Закрыць"
+              >
+                <FiX className="size-5" aria-hidden />
+              </button>
+            </div>
+
+            <div className="space-y-3 overflow-y-auto px-5 py-4">
+              {editBooksError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                  {editBooksError}
+                </div>
+              ) : null}
+
+              {editBooksLines.length > 0 ? (
+                <div className="space-y-2 rounded-lg border border-gray-200 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    Выбрана: {editBooksLines.length}
+                  </p>
+                  {editBooksLines.map((line) => (
+                    <div
+                      key={line.lineKey}
+                      className="flex flex-wrap items-center gap-2 border-b border-gray-100 pb-2 last:border-b-0 last:pb-0"
+                    >
+                      <span className="min-w-0 flex-1 text-sm text-gray-800">
+                        {line.productTitle}
+                      </span>
+                      <label className="inline-flex items-center gap-1 text-xs text-gray-600">
+                        <span>Кол.</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={line.quantity}
+                          disabled={editBooksSaving}
+                          onChange={(e) =>
+                            updateEditBooksQuantity(
+                              line.lineKey,
+                              Number(e.target.value)
+                            )
+                          }
+                          className="w-16 rounded-md border border-gray-200 px-2 py-1 text-sm"
+                        />
+                      </label>
+                      <label className="inline-flex items-center gap-1 text-xs text-gray-600">
+                        <span>Цана</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={line.unitGrossPrice || ''}
+                          disabled={editBooksSaving}
+                          onChange={(e) =>
+                            updateEditBooksUnitPrice(
+                              line.lineKey,
+                              Number(e.target.value)
+                            )
+                          }
+                          className="w-24 rounded-md border border-gray-200 px-2 py-1 text-sm"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={editBooksSaving}
+                        onClick={() =>
+                          setEditBooksLines((prev) =>
+                            prev.filter((item) => item.lineKey !== line.lineKey)
+                          )
+                        }
+                        className="rounded-md p-1.5 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        aria-label="Выдаліць"
+                        title="Выдаліць"
+                      >
+                        <FiTrash2 className="size-4" aria-hidden />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-4 text-center text-sm text-gray-500">
+                  Кніг пакуль няма — абярыце з каталога ніжэй.
+                </p>
+              )}
+
+              <div>
+                <input
+                  type="search"
+                  value={editBooksSearch}
+                  onChange={(e) => setEditBooksSearch(e.target.value)}
+                  placeholder="Пошук тавару…"
+                  className="mb-2 h-10 w-full rounded-lg border border-gray-200 px-3 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                />
+                <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-200">
+                  {polandManualProductsLoading ? (
+                    <div className="px-3 py-4 text-sm text-gray-500">
+                      Загрузка тавараў з Shopify...
+                    </div>
+                  ) : visibleEditBooksPickerLines.length === 0 ? (
+                    <div className="px-3 py-4 text-sm text-gray-500">
+                      {editBooksSearch.trim()
+                        ? 'Тавары не знойдзены'
+                        : 'Няма тавараў у Shopify'}
+                    </div>
+                  ) : (
+                    visibleEditBooksPickerLines.map((pickerLine) => {
+                      const line = editBooksLines.find(
+                        (item) => item.lineKey === pickerLine.lineKey
+                      );
+                      const selected = Boolean(line);
+                      return (
+                        <div
+                          key={pickerLine.lineKey}
+                          className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-100 px-3 py-2 last:border-b-0"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            disabled={editBooksSaving}
+                            onChange={(e) =>
+                              toggleEditBooksPickerLine(
+                                pickerLine,
+                                e.target.checked
+                              )
+                            }
+                            className="size-4 shrink-0 rounded border-gray-300 accent-primary"
+                          />
+                          <span className="min-w-0 flex-1 basis-[12rem] text-sm text-gray-800">
+                            <span className="line-clamp-2">
+                              {buildExpensePickerLineTitle(pickerLine)}
+                            </span>
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 px-5 py-4">
+              <button
+                type="button"
+                onClick={closeEditBooks}
+                disabled={editBooksSaving}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Скасаваць
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void submitEditBooks();
+                }}
+                disabled={editBooksSaving}
+                className="inline-flex items-center rounded-lg bg-primary px-3 py-2 text-sm font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+              >
+                {editBooksSaving ? 'Захаванне…' : 'Захаваць'}
               </button>
             </div>
           </div>

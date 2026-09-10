@@ -11,6 +11,7 @@ public sealed class BukinistkaPosShopifySyncService
     private readonly AppDbContext _db;
     private readonly OdooPosSalesReader _posReader;
     private readonly ShopifyInventoryService _inventory;
+    private readonly KirmaBukinistkaOfferService _offers;
     private readonly IConfiguration _config;
     private readonly ILogger<BukinistkaPosShopifySyncService> _logger;
 
@@ -18,12 +19,14 @@ public sealed class BukinistkaPosShopifySyncService
         AppDbContext db,
         OdooPosSalesReader posReader,
         ShopifyInventoryService inventory,
+        KirmaBukinistkaOfferService offers,
         IConfiguration config,
         ILogger<BukinistkaPosShopifySyncService> logger )
     {
         _db = db;
         _posReader = posReader;
         _inventory = inventory;
+        _offers = offers;
         _config = config;
         _logger = logger;
     }
@@ -77,19 +80,56 @@ public sealed class BukinistkaPosShopifySyncService
             .Distinct()
             .ToHashSetAsync( cancellationToken );
 
+        List<string> pendingPosDeductionKeys = await _db.KirmaBukinistkaPendingOfferSaleDeductions
+            .AsNoTracking()
+            .Where( x => x.Source == KirmaBukinistkaPendingOfferSaleDeduction.SourceOdooPosLine )
+            .Select( x => x.SourceKey )
+            .Distinct()
+            .ToListAsync( cancellationToken );
+        foreach (string key in pendingPosDeductionKeys)
+        {
+            if (int.TryParse( key, out int lineId ) && lineId > 0)
+            {
+                alreadyProcessedLineIds.Add( lineId );
+            }
+        }
+
         List<KirmaBukinistkaOffer> acceptedOffers = await _db.KirmaBukinistkaOffers
             .Where( x =>
                 x.Status == KirmaBukinistkaOfferStatuses.Accepted
                 && x.OdooProductId != null
-                && x.OdooProductId > 0 )
+                && x.OdooProductId > 0
+                && (x.IsAssignment
+                    || string.IsNullOrWhiteSpace( x.Direction )
+                    || x.Direction == KirmaBukinistkaOfferDirections.KirmaToBukinistka) )
             .OrderBy( x => x.CreatedAtUtc )
             .ThenBy( x => x.Id )
             .ToListAsync( cancellationToken );
 
+        HashSet<int> pendingBukToKirmaOdooIds = await _db.KirmaBukinistkaOffers
+            .AsNoTracking()
+            .Where( x =>
+                x.Status == KirmaBukinistkaOfferStatuses.Pending
+                && x.Quantity > 0
+                && x.Direction == KirmaBukinistkaOfferDirections.BukinistkaToKirma
+                && x.OdooProductId != null
+                && x.OdooProductId > 0 )
+            .Select( x => x.OdooProductId!.Value )
+            .Distinct()
+            .ToHashSetAsync( cancellationToken );
+
         Dictionary<int, int> soldByOfferId = await _db.KirmaBukinistkaPosSales
             .AsNoTracking()
-            .Where( x => x.OfferId != null && !x.IsOwnStock )
+            .Where( x => x.OfferId != null && !x.IsOwnStock && !x.IsReversed && !x.IsReturn )
             .GroupBy( x => x.OfferId!.Value )
+            .Select( g => new { OfferId = g.Key, Qty = g.Sum( x => x.Quantity ) } )
+            .ToDictionaryAsync( x => x.OfferId, x => x.Qty, cancellationToken );
+
+        // Shopify→Odoo Wydanie also consumes the same accepted Kirma consignment qty.
+        Dictionary<int, int> wydanieByOfferId = await _db.KirmaBukinistkaShopifyDeliverySyncs
+            .AsNoTracking()
+            .Where( x => !x.IsCancelled )
+            .GroupBy( x => x.OfferId )
             .Select( g => new { OfferId = g.Key, Qty = g.Sum( x => x.Quantity ) } )
             .ToDictionaryAsync( x => x.OfferId, x => x.Qty, cancellationToken );
 
@@ -103,7 +143,9 @@ public sealed class BukinistkaPosShopifySyncService
         foreach (KirmaBukinistkaOffer offer in acceptedOffers)
         {
             int odooProductId = offer.OdooProductId!.Value;
-            int alreadySold = soldByOfferId.GetValueOrDefault( offer.Id );
+            int alreadySold =
+                soldByOfferId.GetValueOrDefault( offer.Id )
+                + wydanieByOfferId.GetValueOrDefault( offer.Id );
             int remaining = offer.Quantity - alreadySold;
             if (remaining <= 0)
             {
@@ -138,7 +180,8 @@ public sealed class BukinistkaPosShopifySyncService
             bool hasKirma = remainingByOdooProduct.TryGetValue( line.ProductId, out Queue<OfferBucket>? queue )
                             && queue is not null
                             && queue.Count > 0;
-            if (!hasOwn && !hasKirma)
+            bool hasPendingBukToKirma = pendingBukToKirmaOdooIds.Contains( line.ProductId );
+            if (!hasOwn && !hasKirma && !hasPendingBukToKirma)
             {
                 continue;
             }
@@ -227,19 +270,159 @@ public sealed class BukinistkaPosShopifySyncService
                 }
             }
 
-            if (createdForLine.Count == 0)
+            // 3) Leftover → shrink Pending Buk→Kirma offers for this Odoo product.
+            int pendingShrunk = 0;
+            if (toAllocate > 0 && hasPendingBukToKirma)
+            {
+                pendingShrunk = await _offers.ShrinkPendingBukToKirmaForPosSaleAsync(
+                    line.LineId,
+                    line.ProductId,
+                    toAllocate,
+                    now,
+                    cancellationToken );
+            }
+
+            if (createdForLine.Count == 0 && pendingShrunk <= 0)
             {
                 continue;
             }
 
-            _db.KirmaBukinistkaPosSales.AddRange( createdForLine );
+            if (createdForLine.Count > 0)
+            {
+                _db.KirmaBukinistkaPosSales.AddRange( createdForLine );
+            }
+
             alreadyProcessedLineIds.Add( line.LineId );
+            linesProcessed++;
+        }
+
+        // POS returns (negative qty): restore Shopify and hide reversed sales.
+        List<OdooPosSalesReader.PosOrderLine> returnLines =
+            await _posReader.FetchReturnLinesSinceAsync(
+                since,
+                state.LastProcessedOrderId,
+                cancellationToken );
+
+        List<KirmaBukinistkaPosSale> openSales = await _db.KirmaBukinistkaPosSales
+            .Where( x => !x.IsReversed && !x.IsReturn && x.Quantity > 0 )
+            .OrderBy( x => x.SoldAtUtc )
+            .ThenBy( x => x.Id )
+            .ToListAsync( cancellationToken );
+
+        Dictionary<int, Queue<KirmaBukinistkaPosSale>> openByProduct = new();
+        foreach (KirmaBukinistkaPosSale sale in openSales)
+        {
+            if (!openByProduct.TryGetValue( sale.OdooProductId, out Queue<KirmaBukinistkaPosSale>? q ))
+            {
+                q = new Queue<KirmaBukinistkaPosSale>();
+                openByProduct[sale.OdooProductId] = q;
+            }
+
+            q.Enqueue( sale );
+        }
+
+        // Reload own buffers tracked in memory + DB for return restore.
+        Dictionary<int, KirmaBukinistkaOdooOwnStockBuffer> ownBuffersAll = await _db
+            .KirmaBukinistkaOdooOwnStockBuffers
+            .ToDictionaryAsync( x => x.OdooProductId, cancellationToken );
+
+        foreach (OdooPosSalesReader.PosOrderLine ret in returnLines)
+        {
+            maxOrderId = Math.Max( maxOrderId, ret.OrderId );
+            if (alreadyProcessedLineIds.Contains( ret.LineId ))
+            {
+                continue;
+            }
+
+            int toReverse = (int)Math.Floor( ret.Quantity );
+            if (toReverse <= 0)
+            {
+                continue;
+            }
+
+            if (!openByProduct.TryGetValue( ret.ProductId, out Queue<KirmaBukinistkaPosSale>? saleQueue )
+                || saleQueue.Count == 0)
+            {
+                // No synced Kirma/own sale to reverse — ignore.
+                continue;
+            }
+
+            int reversedUnits = 0;
+            while (toReverse > 0 && saleQueue.Count > 0)
+            {
+                KirmaBukinistkaPosSale sale = saleQueue.Peek();
+                int take = Math.Min( toReverse, sale.Quantity );
+                if (take <= 0)
+                {
+                    saleQueue.Dequeue();
+                    continue;
+                }
+
+                if (sale.IsOwnStock)
+                {
+                    if (!ownBuffersAll.TryGetValue( sale.OdooProductId, out KirmaBukinistkaOdooOwnStockBuffer? buf ))
+                    {
+                        buf = new KirmaBukinistkaOdooOwnStockBuffer
+                        {
+                            OdooProductId = sale.OdooProductId,
+                            OwnQtyRemaining = 0,
+                            UpdatedAtUtc = now,
+                        };
+                        _db.KirmaBukinistkaOdooOwnStockBuffers.Add( buf );
+                        ownBuffersAll[sale.OdooProductId] = buf;
+                    }
+
+                    buf.OwnQtyRemaining += take;
+                    buf.UpdatedAtUtc = now;
+                }
+                else if (!string.IsNullOrWhiteSpace( sale.ShopifyProductId ))
+                {
+                    shopifyDeltas[sale.ShopifyProductId] =
+                        shopifyDeltas.GetValueOrDefault( sale.ShopifyProductId ) + take;
+                }
+
+                sale.Quantity -= take;
+                if (sale.Quantity <= 0)
+                {
+                    sale.Quantity = 0;
+                    sale.IsReversed = true;
+                    saleQueue.Dequeue();
+                }
+
+                toReverse -= take;
+                reversedUnits += take;
+            }
+
+            if (reversedUnits <= 0)
+            {
+                continue;
+            }
+
+            // Idempotency marker for this return line (hidden from sales list).
+            _db.KirmaBukinistkaPosSales.Add( new KirmaBukinistkaPosSale
+            {
+                OdooPosOrderId = ret.OrderId,
+                OdooPosOrderLineId = ret.LineId,
+                OdooPosOrderName = ret.OrderName,
+                OfferId = null,
+                OdooProductId = ret.ProductId,
+                ShopifyProductId = string.Empty,
+                ShopifyVariantId = string.Empty,
+                Quantity = reversedUnits,
+                ProductName = ResolveProductName( ret.ProductId, acceptedOffers ),
+                IsOwnStock = false,
+                IsReturn = true,
+                IsReversed = false,
+                SoldAtUtc = ret.SoldAtUtc,
+                CreatedAtUtc = now,
+            } );
+            alreadyProcessedLineIds.Add( ret.LineId );
             linesProcessed++;
         }
 
         foreach ((string productKey, int delta) in shopifyDeltas)
         {
-            if (delta >= 0 || string.IsNullOrWhiteSpace( productKey ))
+            if (delta == 0 || string.IsNullOrWhiteSpace( productKey ))
             {
                 continue;
             }
@@ -271,10 +454,15 @@ public sealed class BukinistkaPosShopifySyncService
 
         await _db.SaveChangesAsync( cancellationToken );
 
+        ProductLedgerService.InvalidateSoldByLineCache();
+
         return new KirmaBukinistkaPosSyncResultDto
         {
             Skipped = false,
-            OrdersScanned = lines.Select( x => x.OrderId ).Distinct().Count(),
+            OrdersScanned = lines.Select( x => x.OrderId )
+                .Concat( returnLines.Select( x => x.OrderId ) )
+                .Distinct()
+                .Count(),
             LinesProcessed = linesProcessed,
             UnitsSynced = unitsSynced,
             SyncedAtUtc = now,
@@ -284,27 +472,65 @@ public sealed class BukinistkaPosShopifySyncService
     public async Task<List<KirmaBukinistkaPosSaleDto>> ListSalesAsync(
         CancellationToken cancellationToken = default )
     {
-        // Only Kirma-attributed sales (own-stock burn is internal accounting).
+        // Only active Kirma-attributed sales awaiting invoice (own-stock / returns / reversed / invoiced hidden).
         List<KirmaBukinistkaPosSale> rows = await _db.KirmaBukinistkaPosSales
             .AsNoTracking()
-            .Where( x => !x.IsOwnStock )
+            .Where( x =>
+                !x.IsOwnStock &&
+                !x.IsReturn &&
+                !x.IsReversed &&
+                !x.IsInvoiced &&
+                x.Quantity > 0 )
             .OrderByDescending( x => x.SoldAtUtc )
             .ThenByDescending( x => x.Id )
             .Take( 500 )
             .ToListAsync( cancellationToken );
 
-        return rows.Select( x => new KirmaBukinistkaPosSaleDto
+        HashSet<int> offerIds = rows
+            .Where( x => x.OfferId.HasValue && x.OfferId.Value > 0 )
+            .Select( x => x.OfferId!.Value )
+            .ToHashSet();
+        Dictionary<int, (decimal Gross, string? Supplier)> offerMeta = offerIds.Count == 0
+            ? new Dictionary<int, (decimal, string?)>()
+            : await _db.KirmaBukinistkaOffers
+                .AsNoTracking()
+                .Where( o => offerIds.Contains( o.Id ) )
+                .ToDictionaryAsync(
+                    o => o.Id,
+                    o => (
+                        Math.Round( o.GrossUnitCost, 2, MidpointRounding.AwayFromZero ),
+                        string.IsNullOrWhiteSpace( o.SupplierName ) ? null : o.SupplierName.Trim()
+                    ),
+                    cancellationToken );
+
+        return rows.Select( x =>
         {
-            Id = x.Id,
-            OdooPosOrderId = x.OdooPosOrderId,
-            OdooPosOrderName = x.OdooPosOrderName,
-            OdooProductId = x.OdooProductId,
-            ShopifyProductId = x.ShopifyProductId,
-            Quantity = x.Quantity,
-            ProductName = x.ProductName,
-            IsOwnStock = false,
-            SoldAtUtc = x.SoldAtUtc,
-            CreatedAtUtc = x.CreatedAtUtc,
+            decimal? gross = null;
+            string? supplier = null;
+            if (x.OfferId.HasValue &&
+                offerMeta.TryGetValue( x.OfferId.Value, out (decimal Gross, string? Supplier) meta ))
+            {
+                gross = meta.Gross;
+                supplier = meta.Supplier;
+            }
+
+            return new KirmaBukinistkaPosSaleDto
+            {
+                Id = x.Id,
+                OdooPosOrderId = x.OdooPosOrderId,
+                OdooPosOrderName = x.OdooPosOrderName,
+                OfferId = x.OfferId,
+                OdooProductId = x.OdooProductId,
+                ShopifyProductId = x.ShopifyProductId,
+                ShopifyVariantId = x.ShopifyVariantId,
+                Quantity = x.Quantity,
+                ProductName = x.ProductName,
+                GrossUnitCost = gross,
+                SupplierName = supplier,
+                IsOwnStock = false,
+                SoldAtUtc = x.SoldAtUtc,
+                CreatedAtUtc = x.CreatedAtUtc,
+            };
         } ).ToList();
     }
 

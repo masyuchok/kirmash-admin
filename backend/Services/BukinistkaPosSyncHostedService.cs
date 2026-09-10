@@ -59,6 +59,27 @@ public sealed class BukinistkaPosSyncHostedService : BackgroundService
                         result.LinesProcessed,
                         result.UnitsSynced );
                 }
+
+                BukinistkaShopifyOdooDeliverySyncService deliverySync =
+                    scope.ServiceProvider.GetRequiredService<BukinistkaShopifyOdooDeliverySyncService>();
+                Models.KirmaBukinistkaShopifyDeliverySyncResultDto deliveryResult =
+                    await deliverySync.SyncAsync( stoppingToken );
+
+                if (deliveryResult.Skipped)
+                {
+                    _logger.LogDebug(
+                        "Bukinistka Shopify→Odoo Wydanie sync skipped: {Reason}",
+                        deliveryResult.SkipReason );
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Bukinistka Shopify→Odoo Wydanie sync done: orders={Orders}, pickings={Pickings}, cancelled={Cancelled}, units={Units}",
+                        deliveryResult.OrdersScanned,
+                        deliveryResult.PickingsCreated,
+                        deliveryResult.PickingsCancelled,
+                        deliveryResult.UnitsSynced );
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

@@ -1,10 +1,5 @@
-import BukinistkaHomeClient from '@/components/bukinistka/BukinistkaHomeClient';
-import type { Metadata } from 'next';
-
-export const metadata: Metadata = {
-  title: 'Bukinistka | Kirma.sh',
-};
+import { redirect } from 'next/navigation';
 
 export default function BukinistkaPage() {
-  return <BukinistkaHomeClient />;
+  redirect('/bukinistka/products');
 }

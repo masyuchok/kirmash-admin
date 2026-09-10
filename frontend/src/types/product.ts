@@ -35,6 +35,7 @@ export type ProductWithSuppliers = {
   mainImageUrl: string | null;
   quantityInStock: number;
   shopifyQuantityInStock: number;
+  shopifySalePrice: number;
   hasSupplyQuantityOverride: boolean;
   lastSyncedSupplierName: string;
   suppliers: string[];

@@ -267,7 +267,7 @@ export function InventoryPricingEditorProvider({
 }
 
 const inputClass =
-  'w-full rounded-md border border-gray-200 bg-white px-2 py-1 text-right text-sm tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60';
+  'w-full min-w-0 rounded-md border border-gray-200 bg-white px-1 py-0.5 text-right text-xs tabular-nums text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/20 disabled:opacity-60';
 
 export default function InventoryPricingCells() {
   const {
@@ -291,7 +291,7 @@ export default function InventoryPricingCells() {
 
   return (
     <>
-      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+      <td className="px-1.5 py-2 text-right align-top">
         <input
           type="text"
           inputMode="decimal"
@@ -299,16 +299,16 @@ export default function InventoryPricingCells() {
           disabled={disabled || saving}
           onChange={(e) => setNetInput(e.currentTarget.value)}
           onBlur={recalcFromNetOrVat}
-          className={`${inputClass} min-w-[5.5rem]`}
+          className={inputClass}
           aria-label={`Кошт нета: ${formatInventoryProductTitle(row)}`}
         />
         {row.hasPriceOverride && (
-          <div className="mt-1 text-[10px] uppercase tracking-wide text-primary">
+          <div className="mt-0.5 text-[9px] uppercase tracking-wide text-primary">
             зменена
           </div>
         )}
       </td>
-      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+      <td className="px-1.5 py-2 text-right align-top">
         <select
           value={vatRate}
           disabled={disabled || saving}
@@ -317,45 +317,45 @@ export default function InventoryPricingCells() {
               normalizeCatalogVatRate(Number(e.currentTarget.value))
             )
           }
-          className="min-w-[4.5rem] rounded-md border border-gray-200 bg-white px-1.5 py-1 text-right text-sm text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 disabled:opacity-60"
+          className="w-full min-w-0 rounded-md border border-gray-200 bg-white px-0.5 py-0.5 text-right text-xs text-gray-800 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/20 disabled:opacity-60"
           aria-label={`ПДВ %: ${formatInventoryProductTitle(row)}`}
         >
           <option value={5}>5%</option>
           <option value={23}>23%</option>
         </select>
       </td>
-      <td className="whitespace-nowrap px-3 py-3 text-right align-top text-sm font-medium tabular-nums text-gray-700">
+      <td className="px-1.5 py-2 text-right align-top text-xs font-medium tabular-nums text-gray-700">
         {formatMoneyInput(grossUnitPrice)}
       </td>
-      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
-        <div className="relative inline-flex min-w-[4.5rem] items-center">
+      <td className="px-1.5 py-2 text-right align-top">
+        <div className="relative flex w-full items-center">
           <input
             type="text"
             inputMode="decimal"
             value={marginInput}
             disabled={disabled || saving}
             onChange={(e) => applyMarginChange(e.currentTarget.value)}
-            className={`${inputClass} pr-5`}
+            className={`${inputClass} pr-4`}
             aria-label={`Маржа: ${formatInventoryProductTitle(row)}`}
           />
-          <span className="pointer-events-none absolute right-2 text-xs text-gray-500">
+          <span className="pointer-events-none absolute right-1 text-[10px] text-gray-500">
             %
           </span>
         </div>
         {marginPreview && parsedSale !== null && netUnitPrice > 0 && (
-          <div className="mt-1 text-[10px] tabular-nums text-gray-500">
+          <div className="mt-0.5 text-[9px] tabular-nums text-gray-500">
             нет {formatMoneyInput(marginPreview.saleNet - netUnitPrice)}
           </div>
         )}
       </td>
-      <td className="whitespace-nowrap px-3 py-3 text-right align-top">
+      <td className="px-1.5 py-2 text-right align-top">
         <input
           type="text"
           inputMode="decimal"
           value={saleInput}
           disabled={disabled || saving}
           onChange={(e) => applySaleChange(e.currentTarget.value)}
-          className={`${inputClass} min-w-[5.5rem]`}
+          className={inputClass}
           aria-label={`Цана продажу: ${formatInventoryProductTitle(row)}`}
         />
       </td>
@@ -371,7 +371,7 @@ export function InventoryPricingSaveButton() {
       type="button"
       disabled={disabled || saving || !hasChanges}
       onClick={() => void save()}
-      className="inline-flex items-center justify-center rounded-lg border border-primary/30 bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-50"
+      className="inline-flex items-center justify-center rounded-md border border-primary/30 bg-primary/10 px-1.5 py-1 text-[10px] font-medium text-primary transition hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {saving ? '…' : 'Захаваць'}
     </button>

@@ -7,6 +7,7 @@ namespace backend.Models
         public List<ProductHistorySupplyEvent> Supplies { get; set; } = new();
         public List<ProductHistorySaleEvent> Sales { get; set; } = new();
         public List<ProductHistoryPaymentEvent> Payments { get; set; } = new();
+        public List<ProductHistoryBukinistkaOfferEvent> BukinistkaOffers { get; set; } = new();
     }
 
     public class ProductHistorySupplyEvent
@@ -42,5 +43,16 @@ namespace backend.Models
         public string ShopifyVariantId { get; set; } = string.Empty;
         public string VariantTitle { get; set; } = string.Empty;
         public int Quantity { get; set; }
+    }
+
+    public class ProductHistoryBukinistkaOfferEvent
+    {
+        public string DateUtc { get; set; } = string.Empty;
+        public int OfferId { get; set; }
+        public string ShopifyVariantId { get; set; } = string.Empty;
+        public string VariantTitle { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public decimal GrossUnitCost { get; set; }
+        public bool IsAssignment { get; set; }
     }
 }

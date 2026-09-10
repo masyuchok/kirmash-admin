@@ -600,27 +600,18 @@ export default function DocumentsClient() {
       )}
 
       {pendingRegeneratePeriod && (
-        <div
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
-          onClick={() => {
-            if (regeneratingId !== null) return;
-            setPendingRegeneratePeriod(null);
-          }}
-        >
-          <div
-            className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
             <div className="text-base font-semibold text-gray-900">
-              Пацвердзіце перегенерацыю
+              Пацвердзіце абнаўленне з Shopify
             </div>
             <p className="mt-2 text-sm text-gray-600">
-              Перагенераваць справаздачу за{' '}
+              Абнавіць заказы з Shopify за{' '}
               {formatPeriod(
                 pendingRegeneratePeriod.periodMonth,
                 pendingRegeneratePeriod.periodYear
               )}
-              ?
+              ? Ручныя фактуры і заказы застануцца.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
@@ -640,7 +631,7 @@ export default function DocumentsClient() {
                 {regeneratingId !== null ? (
                   <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-white" />
                 ) : (
-                  'Перагенераваць'
+                  'Абнавіць'
                 )}
               </button>
             </div>

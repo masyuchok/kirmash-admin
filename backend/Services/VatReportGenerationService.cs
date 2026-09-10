@@ -95,27 +95,67 @@ public class VatReportGenerationService
 
             VatReportLockGuard.EnsureNotLocked( report );
 
-            List<VatReportRow> rows = report.Type switch
+            List<VatReportRow> shopifyRows = report.Type switch
             {
                 VatReportType.Poland => await BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth ),
                 VatReportType.Foreign => await BuildForeignRowsAsync( report.PeriodYear, report.PeriodMonth ),
                 _ => throw new InvalidOperationException( "РќРµРІСЏРґРѕРјС‹ С‚С‹Рї СЃРїСЂР°РІР°Р·РґР°С‡С‹." )
             };
 
-            if (report.Rows.Count > 0)
+            // Keep manually added orders/invoices; only refresh Shopify-sourced rows.
+            List<VatReportRow> manualRows = report.Rows
+                .Where( IsManualReportRow )
+                .ToList();
+
+            List<VatReportRow> shopifyExisting = report.Rows
+                .Where( r => !IsManualReportRow( r ) )
+                .ToList();
+
+            // Preserve uploaded invoices when the same Shopify order is rebuilt.
+            Dictionary<string, VatReportRow> invoiceByOrderId = shopifyExisting
+                .Where( r =>
+                    !string.IsNullOrWhiteSpace( r.ShopifyOrderId )
+                    && r.InvoiceData is { Length: > 0 } )
+                .GroupBy( r => r.ShopifyOrderId.Trim(), StringComparer.OrdinalIgnoreCase )
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.First(),
+                    StringComparer.OrdinalIgnoreCase );
+
+            foreach (VatReportRow row in shopifyRows)
             {
-                _db.VatReportRows.RemoveRange( report.Rows );
+                string orderId = (row.ShopifyOrderId ?? string.Empty).Trim();
+                if (orderId.Length == 0
+                    || !invoiceByOrderId.TryGetValue( orderId, out VatReportRow? previous ))
+                {
+                    continue;
+                }
+
+                row.InvoiceFileName = previous.InvoiceFileName;
+                row.InvoiceContentType = previous.InvoiceContentType;
+                row.InvoiceData = previous.InvoiceData;
             }
 
-            decimal vatTotal = rows.Sum( r => r.VatAmount );
+            if (shopifyExisting.Count > 0)
+            {
+                _db.VatReportRows.RemoveRange( shopifyExisting );
+            }
+
+            foreach (VatReportRow row in shopifyRows)
+            {
+                report.Rows.Add( row );
+            }
+
+            List<VatReportRow> mergedRows = manualRows.Concat( shopifyRows ).ToList();
+            decimal vatTotal = mergedRows.Sum( r => r.VatAmount );
             report.Vat = VatReportHelpers.Round2( vatTotal );
             report.VatCredit = 0m;
             report.VatToPay = VatReportHelpers.Round2( vatTotal );
-            report.ShopifyOrderIds = rows
+            report.ShopifyOrderIds = mergedRows
                 .Select( r => r.ShopifyOrderId )
+                .Where( id => !string.IsNullOrWhiteSpace( id ) )
                 .Distinct( StringComparer.OrdinalIgnoreCase )
                 .ToArray();
-            report.Rows = rows;
 
             await _db.SaveChangesAsync();
             await ResolveFinanceSync().SyncPeriodAsync( report.PeriodYear, report.PeriodMonth );
@@ -136,7 +176,21 @@ public class VatReportGenerationService
                 IsLocked = report.IsLocked
             };
         }
-    public async Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId )
+
+    /// <summary>
+    /// Manual Poland/Abroad rows use empty id or the <c>manual-</c> prefix
+    /// (see VatReportMutationService add/move helpers).
+    /// </summary>
+    private static bool IsManualReportRow( VatReportRow row )
+    {
+        string id = (row.ShopifyOrderId ?? string.Empty).Trim();
+        return id.Length == 0
+            || id.StartsWith( "manual-", StringComparison.OrdinalIgnoreCase );
+    }
+    public async Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync(
+        int reportId,
+        int? year = null,
+        int? month = null )
         {
             VatReport? report = await _db.VatReports
                 .AsNoTracking()
@@ -146,10 +200,17 @@ public class VatReportGenerationService
                 throw new InvalidOperationException( "Справаздача не знойдзена." );
             }
 
-            Task<List<VatReportRow>> polandTask = BuildPolandRowsAsync( report.PeriodYear, report.PeriodMonth );
+            int periodYear = year ?? report.PeriodYear;
+            int periodMonth = month ?? report.PeriodMonth;
+            if (periodYear < 2000 || periodYear > 2100 || periodMonth < 1 || periodMonth > 12)
+            {
+                throw new InvalidOperationException( "Некарэктны год або месяц для спісу замоў." );
+            }
+
+            Task<List<VatReportRow>> polandTask = BuildPolandRowsAsync( periodYear, periodMonth );
             Task<List<VatReportRow>> foreignTask = BuildForeignRowsAsync(
-                report.PeriodYear,
-                report.PeriodMonth,
+                periodYear,
+                periodMonth,
                 resolveDeliveryInfo: false );
             await Task.WhenAll( polandTask, foreignTask );
 

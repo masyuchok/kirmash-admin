@@ -142,6 +142,259 @@ public class ShopifyOrderFetchService
         return soldByProduct;
     }
 
+    /// <summary>
+    /// All Shopify orders since <paramref name="sinceUtc"/> (any country), using shop + token.
+    /// Used by Bukinistka SyncOnSale → Odoo Wydanie sync.
+    /// </summary>
+    public async Task<List<ShopifyOrderDto>> FetchOrdersSinceWithCredentialsAsync(
+        string shop,
+        string accessToken,
+        DateTime sinceUtc )
+    {
+        shop = (shop ?? string.Empty).Trim();
+        accessToken = (accessToken ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
+        {
+            throw new InvalidOperationException( "Shopify Shop/AccessToken не наладжаныя." );
+        }
+
+        DateTime toUtc = DateTime.UtcNow;
+        if (sinceUtc >= toUtc)
+        {
+            return new List<ShopifyOrderDto>();
+        }
+
+        // Look back slightly for late writes; idempotency handles duplicates.
+        DateTime fromUtc = sinceUtc.AddHours( -2 );
+        string queryFilter =
+            $"status:any created_at:>={fromUtc:yyyy-MM-ddTHH:mm:ssZ} created_at:<={toUtc:yyyy-MM-ddTHH:mm:ssZ}";
+
+        Dictionary<string, ShopifyOrderDto> byOrderId = new( StringComparer.OrdinalIgnoreCase );
+        string? afterCursor = null;
+        bool hasNextPage;
+
+        do
+        {
+            using JsonDocument json = await _graphql.ExecuteAsync(
+                shop,
+                accessToken,
+                ShopifyGraphqlQueries.OrdersPage,
+                new { query = queryFilter, after = afterCursor }
+            );
+            JsonElement orders = json.RootElement.GetProperty( "data" ).GetProperty( "orders" );
+
+            foreach (JsonElement edge in orders.GetProperty( "edges" ).EnumerateArray())
+            {
+                JsonElement node = edge.GetProperty( "node" );
+                if (ShouldExcludeOrderFromReports( node ))
+                {
+                    continue;
+                }
+
+                string orderId = node.TryGetProperty( "id", out JsonElement idEl ) && idEl.ValueKind == JsonValueKind.String
+                    ? ShopifyIds.NormalizeOrderId( idEl.GetString() ?? string.Empty )
+                    : string.Empty;
+                if (string.IsNullOrWhiteSpace( orderId ))
+                {
+                    continue;
+                }
+
+                if (!TryParseCreatedAt( node, out DateTime createdAt, out _ ))
+                {
+                    continue;
+                }
+
+                if (createdAt < sinceUtc.AddHours( -2 ))
+                {
+                    continue;
+                }
+
+                List<ShopifyLineItemDto> items = ParseLineItems( node );
+                if (items.Count == 0)
+                {
+                    continue;
+                }
+
+                string orderNumber = node.TryGetProperty( "name", out JsonElement nameEl )
+                                     && nameEl.ValueKind == JsonValueKind.String
+                    ? (nameEl.GetString() ?? orderId)
+                    : orderId;
+
+                byOrderId[orderId] = new ShopifyOrderDto
+                {
+                    OrderId = orderId,
+                    OrderNumber = orderNumber,
+                    CreatedAtUtc = createdAt,
+                    Items = items,
+                };
+            }
+
+            JsonElement pageInfo = orders.GetProperty( "pageInfo" );
+            hasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean();
+            afterCursor = pageInfo.GetProperty( "endCursor" ).GetString();
+        } while (hasNextPage && !string.IsNullOrWhiteSpace( afterCursor ));
+
+        return byOrderId.Values
+            .OrderBy( x => x.CreatedAtUtc )
+            .ThenBy( x => x.OrderId, StringComparer.Ordinal )
+            .ToList();
+    }
+
+    /// <summary>
+    /// Returns Shopify order IDs (normalized) that are cancelled among the given set.
+    /// </summary>
+    public async Task<HashSet<string>> GetCancelledOrderIdsWithCredentialsAsync(
+        string shop,
+        string accessToken,
+        IReadOnlyList<string> orderIds )
+    {
+        HashSet<string> cancelled = new( StringComparer.OrdinalIgnoreCase );
+        if (orderIds.Count == 0)
+        {
+            return cancelled;
+        }
+
+        shop = (shop ?? string.Empty).Trim();
+        accessToken = (accessToken ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
+        {
+            throw new InvalidOperationException( "Shopify Shop/AccessToken не наладжаныя." );
+        }
+
+        HashSet<string> wanted = new(
+            orderIds
+                .Select( ShopifyIds.NormalizeOrderId )
+                .Where( x => !string.IsNullOrWhiteSpace( x ) ),
+            StringComparer.OrdinalIgnoreCase );
+
+        const int batchSize = 50;
+        List<string> wantedList = wanted.ToList();
+        for (int i = 0; i < wantedList.Count; i += batchSize)
+        {
+            List<string> batch = wantedList.Skip( i ).Take( batchSize ).ToList();
+            string[] gids = batch
+                .Select( id => $"gid://shopify/Order/{id}" )
+                .ToArray();
+
+            (bool success, JsonDocument? json, string? error) = await _graphql.TryExecuteAsync(
+                shop,
+                accessToken,
+                ShopifyGraphqlQueries.OrderCancellationNodes,
+                new { ids = gids }
+            );
+            if (!success || json is null)
+            {
+                _logger.LogWarning( "Shopify cancellation check failed: {Error}", error );
+                continue;
+            }
+
+            using (json)
+            {
+                if (!json.RootElement.TryGetProperty( "data", out JsonElement dataEl )
+                    || !dataEl.TryGetProperty( "nodes", out JsonElement nodesEl )
+                    || nodesEl.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement node in nodesEl.EnumerateArray())
+                {
+                    if (node.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    string orderId = node.TryGetProperty( "id", out JsonElement idEl )
+                                     && idEl.ValueKind == JsonValueKind.String
+                        ? ShopifyIds.NormalizeOrderId( idEl.GetString() ?? string.Empty )
+                        : string.Empty;
+                    if (string.IsNullOrWhiteSpace( orderId ) || !wanted.Contains( orderId ))
+                    {
+                        continue;
+                    }
+
+                    if (IsShopifyOrderCancelledNode( node ))
+                    {
+                        cancelled.Add( orderId );
+                    }
+                }
+            }
+        }
+
+        // Backup: search recently cancelled orders (covers cases where nodes miss cancelledAt).
+        if (cancelled.Count < wanted.Count)
+        {
+            DateTime since = DateTime.UtcNow.AddDays( -60 );
+            string queryFilter =
+                $"status:cancelled updated_at:>={since:yyyy-MM-ddTHH:mm:ssZ}";
+            string? afterCursor = null;
+            bool hasNextPage;
+            int pages = 0;
+            do
+            {
+                using JsonDocument json = await _graphql.ExecuteAsync(
+                    shop,
+                    accessToken,
+                    ShopifyGraphqlQueries.OrdersPage,
+                    new { query = queryFilter, after = afterCursor }
+                );
+                JsonElement orders = json.RootElement.GetProperty( "data" ).GetProperty( "orders" );
+                foreach (JsonElement edge in orders.GetProperty( "edges" ).EnumerateArray())
+                {
+                    JsonElement node = edge.GetProperty( "node" );
+                    string orderId = node.TryGetProperty( "id", out JsonElement idEl )
+                                     && idEl.ValueKind == JsonValueKind.String
+                        ? ShopifyIds.NormalizeOrderId( idEl.GetString() ?? string.Empty )
+                        : string.Empty;
+                    if (!string.IsNullOrWhiteSpace( orderId ) && wanted.Contains( orderId ))
+                    {
+                        cancelled.Add( orderId );
+                    }
+                }
+
+                JsonElement pageInfo = orders.GetProperty( "pageInfo" );
+                hasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean();
+                afterCursor = pageInfo.GetProperty( "endCursor" ).GetString();
+                pages++;
+            } while (hasNextPage
+                     && !string.IsNullOrWhiteSpace( afterCursor )
+                     && pages < 5
+                     && cancelled.Count < wanted.Count);
+        }
+
+        _logger.LogInformation(
+            "Shopify cancellation check: wanted={Wanted}, cancelled={Cancelled}",
+            wanted.Count,
+            cancelled.Count );
+
+        return cancelled;
+    }
+
+    private static bool IsShopifyOrderCancelledNode( JsonElement node )
+    {
+        if (node.TryGetProperty( "cancelledAt", out JsonElement cancelledAtEl ))
+        {
+            if (cancelledAtEl.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace( cancelledAtEl.GetString() ))
+            {
+                return true;
+            }
+        }
+
+        if (node.TryGetProperty( "displayFinancialStatus", out JsonElement finEl )
+            && finEl.ValueKind == JsonValueKind.String)
+        {
+            string? fin = finEl.GetString();
+            if (string.Equals( fin, "VOIDED", StringComparison.OrdinalIgnoreCase )
+                || string.Equals( fin, "CANCELLED", StringComparison.OrdinalIgnoreCase ))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public async Task<Dictionary<string, ForeignDeliveryInfo>> FetchForeignDeliveryInfoAsync( List<string> orderIds )
     {
         Dictionary<string, ForeignDeliveryInfo> result = new( StringComparer.OrdinalIgnoreCase );
@@ -997,11 +1250,21 @@ internal sealed class ProductVariantKeyComparer : IEqualityComparer<(string Prod
     public static ProductVariantKeyComparer Instance { get; } = new();
 
     public bool Equals( (string ProductId, string VariantId) x, (string ProductId, string VariantId) y ) =>
-        string.Equals( x.ProductId, y.ProductId, StringComparison.OrdinalIgnoreCase ) &&
-        string.Equals( x.VariantId, y.VariantId, StringComparison.OrdinalIgnoreCase );
+        string.Equals(
+            ShopifyIds.NormalizeProductId( x.ProductId ),
+            ShopifyIds.NormalizeProductId( y.ProductId ),
+            StringComparison.OrdinalIgnoreCase ) &&
+        string.Equals(
+            ShopifyIds.NormalizeVariantId( x.VariantId ),
+            ShopifyIds.NormalizeVariantId( y.VariantId ),
+            StringComparison.OrdinalIgnoreCase );
 
-    public int GetHashCode( (string ProductId, string VariantId) obj ) =>
-        HashCode.Combine(
-            StringComparer.OrdinalIgnoreCase.GetHashCode( obj.ProductId ),
-            StringComparer.OrdinalIgnoreCase.GetHashCode( obj.VariantId ) );
+    public int GetHashCode( (string ProductId, string VariantId) obj )
+    {
+        string productId = ShopifyIds.NormalizeProductId( obj.ProductId );
+        string variantId = ShopifyIds.NormalizeVariantId( obj.VariantId );
+        return HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode( productId ),
+            StringComparer.OrdinalIgnoreCase.GetHashCode( variantId ) );
+    }
 }

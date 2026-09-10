@@ -31,6 +31,50 @@ function formatVariantSuffix(event: { variantTitle: string }): string {
   return title ? ` · ${title}` : '';
 }
 
+function sumQuantities(items: { quantity: number }[]): number {
+  return items.reduce((sum, item) => sum + item.quantity, 0);
+}
+
+function formatMoney(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  return value.toLocaleString('be-BY', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function SectionHeading({
+  title,
+  total,
+  format,
+  showTotal,
+}: {
+  title: string;
+  total: number;
+  format: 'plus' | 'minus' | 'units';
+  showTotal: boolean;
+}) {
+  const totalLabel =
+    format === 'plus'
+      ? `+${total}`
+      : format === 'minus'
+        ? `−${total}`
+        : `${total} адз.`;
+
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+        {title}
+      </h3>
+      {showTotal ? (
+        <span className="tabular-nums text-xs font-semibold text-gray-700">
+          {totalLabel}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function groupSuppliesBySupplier(
   supplies: ProductHistorySupplyEvent[]
 ): { supplierName: string; events: ProductHistorySupplyEvent[] }[] {
@@ -54,6 +98,13 @@ function groupSuppliesBySupplier(
 function SaleSourceLabel({ sale }: { sale: ProductHistorySaleEvent }) {
   if (sale.source === 'cash') {
     return <span className="text-gray-600">Гатоўка</span>;
+  }
+  if (sale.source === 'bukinistka') {
+    return sale.orderNumber.trim() ? (
+      <span className="text-gray-600">Букіністка · {sale.orderNumber}</span>
+    ) : (
+      <span className="text-gray-600">Букіністка</span>
+    );
   }
   if (sale.source === 'shopify') {
     return sale.orderNumber.trim() ? (
@@ -85,6 +136,12 @@ export default function ProductHistoryModal({
   if (!open || !mounted) return null;
 
   const supplyGroups = history ? groupSuppliesBySupplier(history.supplies) : [];
+  const suppliesTotal = history ? sumQuantities(history.supplies) : 0;
+  const bukinistkaOffersTotal = history
+    ? sumQuantities(history.bukinistkaOffers)
+    : 0;
+  const salesTotal = history ? sumQuantities(history.sales) : 0;
+  const paymentsTotal = history ? sumQuantities(history.payments) : 0;
 
   return createPortal(
     <div
@@ -92,12 +149,8 @@ export default function ProductHistoryModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="product-history-title"
-      onClick={onClose}
     >
-      <div
-        className="flex max-h-[min(90vh,720px)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="flex max-h-[min(90vh,720px)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
         <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-5 py-4">
           <div>
             <h2
@@ -135,9 +188,12 @@ export default function ProductHistoryModal({
           {!loading && !error && history && (
             <div className="space-y-6">
               <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  Пастаўкі
-                </h3>
+                <SectionHeading
+                  title="Пастаўкі"
+                  total={suppliesTotal}
+                  format="plus"
+                  showTotal={supplyGroups.length > 0}
+                />
                 {supplyGroups.length === 0 ? (
                   <p className="mt-2 text-sm text-gray-500">
                     Паставак пакуль няма.
@@ -172,9 +228,61 @@ export default function ProductHistoryModal({
               </section>
 
               <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  Продажы
-                </h3>
+                <SectionHeading
+                  title="Прапановы ад Букіністкі"
+                  total={bukinistkaOffersTotal}
+                  format="plus"
+                  showTotal={Boolean(history.bukinistkaOffers.length)}
+                />
+                {history.bukinistkaOffers.length === 0 ? (
+                  <p className="mt-2 text-sm text-gray-500">
+                    Прапаноў ад Букіністкі пакуль няма.
+                  </p>
+                ) : (
+                  <ul className="mt-3 divide-y divide-gray-100 rounded-lg border border-gray-100">
+                    {history.bukinistkaOffers.map((offer) => (
+                      <li
+                        key={`${offer.offerId}-${offer.dateUtc}-${offer.quantity}`}
+                        className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2 text-sm"
+                      >
+                        <div className="space-y-0.5">
+                          <span className="text-gray-700">
+                            {formatDate(offer.dateUtc)}
+                            {formatVariantSuffix(offer)}
+                          </span>
+                          <div className="text-xs text-gray-600">
+                            {offer.isAssignment ? 'Назначэнне' : 'Прапанова'}
+                            {' · '}
+                            <Link
+                              href="/bukinistyka"
+                              className="text-primary hover:underline"
+                            >
+                              Букіністка #{offer.offerId}
+                            </Link>
+                            {offer.grossUnitCost > 0 ? (
+                              <>
+                                {' · '}
+                                {formatMoney(offer.grossUnitCost)} брута
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                        <span className="tabular-nums font-medium text-gray-900">
+                          +{offer.quantity}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section>
+                <SectionHeading
+                  title="Продажы"
+                  total={salesTotal}
+                  format="minus"
+                  showTotal={history.sales.length > 0}
+                />
                 {history.sales.length === 0 ? (
                   <p className="mt-2 text-sm text-gray-500">
                     Продажаў пакуль няма.
@@ -216,9 +324,12 @@ export default function ProductHistoryModal({
               </section>
 
               <section>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  Аплата пастаўшчыку
-                </h3>
+                <SectionHeading
+                  title="Аплата пастаўшчыку"
+                  total={paymentsTotal}
+                  format="units"
+                  showTotal={history.payments.length > 0}
+                />
                 {history.payments.length === 0 ? (
                   <p className="mt-2 text-sm text-gray-500">
                     Аплат пакуль няма.

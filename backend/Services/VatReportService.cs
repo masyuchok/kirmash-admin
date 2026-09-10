@@ -57,8 +57,11 @@ public class VatReportService
     public Task<List<VatReportListItem>> SetLockedAsync( int reportId, bool locked ) =>
         _locks.SetLockedAsync( reportId, locked );
 
-    public Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync( int reportId ) =>
-        _generation.GetSourceOrderOptionsAsync( reportId );
+    public Task<List<VatReportSourceOrderOption>> GetSourceOrderOptionsAsync(
+        int reportId,
+        int? year = null,
+        int? month = null ) =>
+        _generation.GetSourceOrderOptionsAsync( reportId, year, month );
 
     public Task MoveRowToForeignAsync( int rowId, string deliveryName, string deliveryAddress ) =>
         _mutations.MoveRowToForeignAsync( rowId, deliveryName, deliveryAddress );
@@ -79,6 +82,9 @@ public class VatReportService
         _mutations.AddRowAsync( reportId, request );
 
     public Task DeleteRowAsync( int rowId ) => _mutations.DeleteRowAsync( rowId );
+
+    public Task ReplaceManualRowItemsAsync( int rowId, VatReportManualRowItemsReplaceRequest request ) =>
+        _mutations.ReplaceManualRowItemsAsync( rowId, request );
 
     public Task<int> AddExpenseAsync( int reportId, VatReportExpenseCreateRequest request ) =>
         _mutations.AddExpenseAsync( reportId, request );

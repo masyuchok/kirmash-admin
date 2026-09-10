@@ -73,6 +73,18 @@ public static class ShopifyGraphqlQueries
         }
         """;
 
+    public const string OrderCancellationNodes = """
+        query OrderCancellationNodes($ids:[ID!]!) {
+          nodes(ids:$ids) {
+            ... on Order {
+              id
+              cancelledAt
+              displayFinancialStatus
+            }
+          }
+        }
+        """;
+
     public const string OrderLineItemNodes = """
         query OrderLineItemNodes($ids:[ID!]!) {
           nodes(ids:$ids) {

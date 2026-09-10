@@ -25,9 +25,14 @@ namespace backend.Data
         public DbSet<InventorySalesSyncState> InventorySalesSyncStates { get; set; } = default!;
         public DbSet<SupplierInventoryPriceOverride> SupplierInventoryPriceOverrides { get; set; } = default!;
         public DbSet<KirmaBukinistkaOffer> KirmaBukinistkaOffers { get; set; } = default!;
+        public DbSet<KirmaBukinistkaPendingOfferSaleDeduction> KirmaBukinistkaPendingOfferSaleDeductions { get; set; } = default!;
+        public DbSet<KirmaBukinistkaReceiptDraft> KirmaBukinistkaReceiptDrafts { get; set; } = default!;
+        public DbSet<KirmaBukinistkaReceiptDraftLine> KirmaBukinistkaReceiptDraftLines { get; set; } = default!;
         public DbSet<KirmaBukinistkaPosSale> KirmaBukinistkaPosSales { get; set; } = default!;
         public DbSet<KirmaBukinistkaPosSyncState> KirmaBukinistkaPosSyncStates { get; set; } = default!;
         public DbSet<KirmaBukinistkaOdooOwnStockBuffer> KirmaBukinistkaOdooOwnStockBuffers { get; set; } = default!;
+        public DbSet<KirmaBukinistkaShopifyDeliverySync> KirmaBukinistkaShopifyDeliverySyncs { get; set; } = default!;
+        public DbSet<KirmaBukinistkaShopifyDeliverySyncState> KirmaBukinistkaShopifyDeliverySyncStates { get; set; } = default!;
         public DbSet<FinancePerson> FinancePersons { get; set; } = default!;
         public DbSet<FinanceMovement> FinanceMovements { get; set; } = default!;
         public DbSet<FinanceRecurringExpense> FinanceRecurringExpenses { get; set; } = default!;
@@ -406,14 +411,80 @@ namespace backend.Data
                 entity.Property( x => x.Status )
                     .IsRequired()
                     .HasMaxLength( 32 );
+                entity.Property( x => x.Direction )
+                    .IsRequired()
+                    .HasMaxLength( 32 );
                 entity.Property( x => x.AcceptedListPrice )
                     .HasPrecision( 18, 2 );
+                entity.Property( x => x.SyncOnSale )
+                    .IsRequired();
+                entity.Property( x => x.IsAssignment )
+                    .IsRequired();
+                entity.Property( x => x.PeerPriceChangePending )
+                    .IsRequired();
                 entity.Property( x => x.CreatedByLogin )
                     .IsRequired()
                     .HasMaxLength( 256 );
                 entity.Property( x => x.CreatedAtUtc )
                     .IsRequired();
                 entity.HasIndex( x => x.CreatedAtUtc );
+                entity.HasIndex( x => new { x.Direction, x.Status, x.ShopifyProductId } );
+                entity.HasIndex( x => new { x.Direction, x.Status, x.OdooProductId } );
+                entity.HasIndex( x => x.PeerPriceChangePending );
+            } );
+
+            modelBuilder.Entity<KirmaBukinistkaPendingOfferSaleDeduction>( entity =>
+            {
+                entity.Property( x => x.Source )
+                    .IsRequired()
+                    .HasMaxLength( 32 );
+                entity.Property( x => x.SourceKey )
+                    .IsRequired()
+                    .HasMaxLength( 128 );
+                entity.Property( x => x.Quantity )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+                entity.HasIndex( x => new { x.Source, x.SourceKey, x.OfferId } )
+                    .IsUnique();
+                entity.HasOne( x => x.Offer )
+                    .WithMany()
+                    .HasForeignKey( x => x.OfferId )
+                    .OnDelete( DeleteBehavior.Cascade );
+            } );
+
+            modelBuilder.Entity<KirmaBukinistkaReceiptDraft>( entity =>
+            {
+                entity.Property( x => x.Status )
+                    .IsRequired()
+                    .HasMaxLength( 32 );
+                entity.Property( x => x.CreatedByLogin )
+                    .IsRequired()
+                    .HasMaxLength( 256 );
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+                entity.Property( x => x.UpdatedAtUtc )
+                    .IsRequired();
+                entity.Property( x => x.LastError )
+                    .HasMaxLength( 2048 );
+                entity.Property( x => x.OdooPickingName )
+                    .HasMaxLength( 128 );
+                entity.HasIndex( x => x.Status );
+                entity.HasMany( x => x.Lines )
+                    .WithOne( x => x.ReceiptDraft )
+                    .HasForeignKey( x => x.ReceiptDraftId )
+                    .OnDelete( DeleteBehavior.Cascade );
+            } );
+
+            modelBuilder.Entity<KirmaBukinistkaReceiptDraftLine>( entity =>
+            {
+                entity.Property( x => x.OdooProductName )
+                    .IsRequired()
+                    .HasMaxLength( 512 );
+                entity.Property( x => x.ListPrice )
+                    .HasPrecision( 18, 2 );
+                entity.HasIndex( x => new { x.ReceiptDraftId, x.OfferId } )
+                    .IsUnique();
             } );
 
             modelBuilder.Entity<KirmaBukinistkaPosSale>( entity =>
@@ -435,8 +506,15 @@ namespace backend.Data
                     .IsRequired();
                 entity.Property( x => x.IsOwnStock )
                     .IsRequired();
+                entity.Property( x => x.IsReversed )
+                    .IsRequired();
+                entity.Property( x => x.IsReturn )
+                    .IsRequired();
+                entity.Property( x => x.IsInvoiced )
+                    .IsRequired();
                 entity.HasIndex( x => x.SoldAtUtc );
                 entity.HasIndex( x => x.OdooProductId );
+                entity.HasIndex( x => x.IsInvoiced );
             } );
 
             modelBuilder.Entity<KirmaBukinistkaPosSyncState>( entity =>
@@ -455,6 +533,45 @@ namespace backend.Data
                     .IsRequired();
                 entity.HasIndex( x => x.OdooProductId )
                     .IsUnique();
+            } );
+
+            modelBuilder.Entity<KirmaBukinistkaShopifyDeliverySync>( entity =>
+            {
+                entity.Property( x => x.ShopifyOrderId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyOrderNumber )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyProductId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId )
+                    .IsRequired()
+                    .HasMaxLength( 64 );
+                entity.Property( x => x.OdooPickingName )
+                    .HasMaxLength( 128 );
+                entity.Property( x => x.IsCancelled )
+                    .IsRequired();
+                entity.Property( x => x.CancelledAtUtc );
+                entity.Property( x => x.SoldAtUtc )
+                    .IsRequired();
+                entity.Property( x => x.CreatedAtUtc )
+                    .IsRequired();
+                entity.HasIndex( x => new
+                    {
+                        x.ShopifyOrderId,
+                        x.ShopifyProductId,
+                        x.ShopifyVariantId,
+                        x.OfferId
+                    } )
+                    .IsUnique();
+                entity.HasIndex( x => x.SoldAtUtc );
+            } );
+
+            modelBuilder.Entity<KirmaBukinistkaShopifyDeliverySyncState>( entity =>
+            {
+                entity.Property( x => x.LastSyncedAtUtc );
             } );
 
             modelBuilder.Entity<FinancePerson>( entity =>

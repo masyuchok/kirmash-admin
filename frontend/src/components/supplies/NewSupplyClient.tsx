@@ -2,9 +2,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { FiArrowLeft, FiPlus, FiRotateCcw, FiX } from 'react-icons/fi';
+import { FiArrowLeft, FiPlus, FiRotateCcw, FiSend, FiX } from 'react-icons/fi';
+import ProposeToBukinistkaModal, {
+  type ProposeToBukinistkaDraft,
+} from '@/components/products/ProposeToBukinistkaModal';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import {
+  createKirmaBukinistkaOffer,
+  fetchKirmaProposeEligibility,
+} from '@/lib/api/bukinistka-offers';
 import { fetchSupplierOptions } from '@/lib/api/suppliers';
 import { fetchProductsWithSuppliers } from '@/lib/api/products';
 import { saveSupply } from '@/lib/api/supply-save';
@@ -24,6 +31,32 @@ import {
 } from '@/lib/supply-draft';
 import { makeSupplyLineKey, parseSupplyLineKey } from '@/lib/supply-line-key';
 import type { ProductWithSuppliers } from '@/types/product';
+
+function resolveLastSupplierPriceForProduct(
+  product: ProductWithSuppliers,
+  supplierIdNum: number,
+  supplierNameValue: string
+): { supplierPrice?: number; salePrice?: number } {
+  const prices = product.supplierPrices ?? [];
+  let match =
+    Number.isFinite(supplierIdNum) && supplierIdNum > 0
+      ? prices.find((price) => price.supplierId === supplierIdNum)
+      : undefined;
+  if (!match && supplierNameValue.trim()) {
+    const lower = supplierNameValue.trim().toLowerCase();
+    match = prices.find(
+      (price) => price.supplierName.trim().toLowerCase() === lower
+    );
+  }
+  if (!match && prices.length > 0) {
+    match = prices[0];
+  }
+  if (!match) return {};
+  return {
+    supplierPrice: match.supplierPrice > 0 ? match.supplierPrice : undefined,
+    salePrice: match.salePrice > 0 ? match.salePrice : undefined,
+  };
+}
 
 type Props = {
   initialSupplierId?: string;
@@ -160,6 +193,12 @@ export default function NewSupplyClient({
   const [supplierNetBalances, setSupplierNetBalances] = useState<
     Record<string, number>
   >({});
+  const [proposeOpen, setProposeOpen] = useState(false);
+  const [proposeDraft, setProposeDraft] =
+    useState<ProposeToBukinistkaDraft | null>(null);
+  const [proposeRow, setProposeRow] = useState<SupplyProductDraft | null>(null);
+  const [proposeSubmitting, setProposeSubmitting] = useState(false);
+  const [proposeError, setProposeError] = useState<string | null>(null);
 
   const handleSaveRef = useRef<() => Promise<void>>(async () => {});
   const handleResetToBaselineRef = useRef<() => void>(() => {});
@@ -480,10 +519,16 @@ export default function NewSupplyClient({
           const prevMap = new Map(prev.map((row) => [row.lineKey, row]));
           const next = [...prev];
           for (const product of selected) {
+            const lastPrice = resolveLastSupplierPriceForProduct(
+              product,
+              Number(currentSupplierId),
+              currentSupplierName
+            );
             const lines = createDraftLinesForProduct(
               product,
               selectedProductQuantities,
-              resolveDefaultVatRatePercent(product.productType)
+              resolveDefaultVatRatePercent(product.productType),
+              lastPrice
             );
             for (const line of lines) {
               const shouldAdd =
@@ -507,7 +552,14 @@ export default function NewSupplyClient({
     return () => {
       cancelled = true;
     };
-  }, [selectedProductIds, selectedProductQuantities, supplyId, initialLoading]);
+  }, [
+    selectedProductIds,
+    selectedProductQuantities,
+    supplyId,
+    initialLoading,
+    currentSupplierId,
+    currentSupplierName,
+  ]);
 
   const updateDraftField = (
     lineKey: string,
@@ -820,20 +872,13 @@ export default function NewSupplyClient({
       removeDraftSessionIfPresent(supplyId);
       if (!supplyId) removeDraftSessionIfPresent(undefined);
 
-      const updatedCount = result.inventoryUpdates.length;
       if (result.warning) {
         setSaveOk(
-          updatedCount > 0
-            ? `Змены захаваныя. Shopify часткова абноўлены для ${updatedCount} тав.`
-            : 'Змены захаваныя ў БД, але без сінхранізацыі астаткаў у Shopify.'
+          'Змены захаваныя ў БД, але без сінхранізацыі астаткаў у Shopify.'
         );
         setSaveError(`Сінхранізацыя з Shopify: ${result.warning}`);
       } else {
-        setSaveOk(
-          updatedCount > 0
-            ? `Змены захаваныя. Астаткі ў Shopify абноўлены для ${updatedCount} тав.`
-            : 'Змены захаваныя.'
-        );
+        setSaveOk('Змены захаваныя.');
       }
       const savedDrafts = cloneDrafts(productDrafts);
 
@@ -951,6 +996,140 @@ export default function NewSupplyClient({
     () => new Map(productCatalog.map((p) => [p.shopifyProductId, p])),
     [productCatalog]
   );
+
+  const resolveProposeGrossUnitCost = (row: SupplyProductDraft): number => {
+    const fromRow = parseDecimal(row.supplierPrice);
+    if (fromRow != null && fromRow > 0) {
+      return round2(fromRow);
+    }
+
+    const meta = productMetaMap.get(row.productId);
+    if (meta) {
+      const last = resolveLastSupplierPriceForProduct(
+        meta,
+        Number(currentSupplierId),
+        supplierName
+      );
+      if (last.supplierPrice != null && last.supplierPrice > 0) {
+        return round2(last.supplierPrice);
+      }
+    }
+
+    return fromRow != null && fromRow >= 0 ? round2(fromRow) : 0;
+  };
+
+  const closePropose = () => {
+    if (proposeSubmitting) return;
+    setProposeOpen(false);
+    setProposeDraft(null);
+    setProposeRow(null);
+    setProposeError(null);
+  };
+
+  const openPropose = async (row: SupplyProductDraft) => {
+    const qty = Number.parseInt(row.quantity, 10);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+
+    let catalog = productCatalog;
+    let gross = resolveProposeGrossUnitCost(row);
+    // If the line has no price yet, refresh catalog so we can use the last
+    // non-zero supplier price from earlier supplies.
+    if (gross <= 0) {
+      try {
+        const products = await fetchProductsWithSuppliers();
+        catalog = products;
+        setProductCatalog(products);
+        const metaFresh = products.find(
+          (p) => p.shopifyProductId === row.productId
+        );
+        if (metaFresh) {
+          const last = resolveLastSupplierPriceForProduct(
+            metaFresh,
+            Number(currentSupplierId),
+            supplierName
+          );
+          if (last.supplierPrice != null && last.supplierPrice > 0) {
+            gross = round2(last.supplierPrice);
+          }
+        }
+      } catch {
+        // Keep whatever we already resolved from the in-memory catalog.
+      }
+    }
+
+    const meta =
+      catalog.find((p) => p.shopifyProductId === row.productId) ??
+      productMetaMap.get(row.productId);
+    const author = meta?.productAuthor?.trim() ?? '';
+    const productLabel = row.variantName.trim()
+      ? `${formatProductNameWithAuthor(row.productName, author)} · ${row.variantName}`
+      : displayDraftLabel(row, author);
+
+    setProposeRow(row);
+    setProposeDraft({
+      productLabel,
+      quantity: qty,
+      grossUnitCost: gross,
+    });
+    setProposeError(null);
+    setProposeOpen(true);
+    try {
+      const eligibility = await fetchKirmaProposeEligibility(
+        row.productId,
+        row.variantId || undefined
+      );
+      if (!eligibility.canPropose) {
+        // Soft warning only — still allow sending another offer.
+        setProposeError(
+          eligibility.blockReason ||
+            'Папярэдняя прапанова яшчэ актыўная; можна даслаць яшчэ адну.'
+        );
+      }
+    } catch {
+      // Eligibility check is advisory; do not block propose.
+    }
+  };
+
+  const submitPropose = async (
+    quantity: number,
+    grossUnitCost: number,
+    syncOnSale: boolean
+  ) => {
+    if (!proposeRow) return;
+    setProposeSubmitting(true);
+    setProposeError(null);
+    try {
+      const meta = productMetaMap.get(proposeRow.productId);
+      const author = meta?.productAuthor?.trim() ?? '';
+      const productName = proposeRow.variantName.trim()
+        ? `${formatProductNameWithAuthor(proposeRow.productName, author)} · ${proposeRow.variantName}`
+        : displayDraftLabel(proposeRow, author);
+
+      await createKirmaBukinistkaOffer({
+        shopifyProductId: proposeRow.productId,
+        shopifyVariantId: proposeRow.variantId || undefined,
+        productName,
+        productAuthor: author || undefined,
+        mainImageUrl: meta?.mainImageUrl ?? null,
+        productAdminUrl: meta?.productAdminUrl || undefined,
+        supplierName: supplierName.trim() || null,
+        quantity,
+        grossUnitCost,
+        syncOnSale,
+      });
+      setProposeOpen(false);
+      setProposeDraft(null);
+      setProposeRow(null);
+      setSaveError(null);
+      setSaveOk('Прапанова дасланая ў Букіністыку.');
+    } catch (err: unknown) {
+      setProposeError(
+        err instanceof Error ? err.message : 'Не ўдалося даслаць прапанову.'
+      );
+    } finally {
+      setProposeSubmitting(false);
+    }
+  };
 
   const currentSupplierIdNum = Number(currentSupplierId);
 
@@ -1321,15 +1500,33 @@ export default function NewSupplyClient({
                         </label>
                       </td>
                       <td className="px-4 py-3.5 text-right">
-                        <button
-                          type="button"
-                          onClick={() => removeDraft(row.lineKey)}
-                          className="inline-flex size-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
-                          aria-label={`Выдаліць ${displayDraftLabel(row, author)}`}
-                          title="Выдаліць тавар з пастаўкі"
-                        >
-                          <FiX className="size-4" />
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void openPropose(row);
+                            }}
+                            disabled={
+                              saving ||
+                              !Number.isFinite(Number(row.quantity)) ||
+                              Number(row.quantity) <= 0
+                            }
+                            className="inline-flex size-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition hover:border-primary/30 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:bg-white disabled:hover:text-gray-700"
+                            aria-label="Прапанаваць у Букіністыку"
+                            title="Прапанаваць у Букіністыку"
+                          >
+                            <FiSend className="size-3.5" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeDraft(row.lineKey)}
+                            className="inline-flex size-8 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-700"
+                            aria-label={`Выдаліць ${displayDraftLabel(row, author)}`}
+                            title="Выдаліць тавар з пастаўкі"
+                          >
+                            <FiX className="size-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1339,6 +1536,17 @@ export default function NewSupplyClient({
           </table>
         </div>
       </div>
+
+      <ProposeToBukinistkaModal
+        open={proposeOpen}
+        draft={proposeDraft}
+        submitting={proposeSubmitting}
+        error={proposeError}
+        onClose={closePropose}
+        onSubmit={(quantity, grossUnitCost, syncOnSale) => {
+          void submitPropose(quantity, grossUnitCost, syncOnSale);
+        }}
+      />
 
       {deleteConfirmOpen && (
         <div

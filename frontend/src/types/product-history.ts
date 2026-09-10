@@ -30,12 +30,23 @@ export type ProductHistoryPaymentEvent = {
   quantity: number;
 };
 
+export type ProductHistoryBukinistkaOfferEvent = {
+  dateUtc: string;
+  offerId: number;
+  shopifyVariantId: string;
+  variantTitle: string;
+  quantity: number;
+  grossUnitCost: number;
+  isAssignment: boolean;
+};
+
 export type ProductHistory = {
   shopifyProductId: string;
   productName: string;
   supplies: ProductHistorySupplyEvent[];
   sales: ProductHistorySaleEvent[];
   payments: ProductHistoryPaymentEvent[];
+  bukinistkaOffers: ProductHistoryBukinistkaOfferEvent[];
 };
 
 export type ProductHistoryQuery = {

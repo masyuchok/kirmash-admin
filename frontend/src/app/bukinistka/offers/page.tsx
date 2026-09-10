@@ -1,10 +1,5 @@
-import BukinistkaOffersClient from '@/components/bukinistka/BukinistkaOffersClient';
-import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 
-export const metadata: Metadata = {
-  title: 'Прапановы ад Кирмаша | Bukinistka',
-};
-
-export default function BukinistkaOffersPage() {
-  return <BukinistkaOffersClient />;
+export default function BukinistkaOffersRedirectPage() {
+  redirect('/bukinistka/kirma/offers');
 }

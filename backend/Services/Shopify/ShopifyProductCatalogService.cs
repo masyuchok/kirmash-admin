@@ -242,7 +242,8 @@ public class ShopifyProductCatalogService
                     VariantId = variantId,
                     VariantName = variantName,
                     Barcode = variantBarcode,
-                    QuantityInStock = variantQuantity
+                    QuantityInStock = variantQuantity,
+                    SalePrice = variantPrice ?? 0m
                 } );
             }
 
@@ -259,7 +260,8 @@ public class ShopifyProductCatalogService
                     VariantId = defaultVariantId,
                     VariantName = "Default Title",
                     Barcode = defaultVariantBarcode ?? string.Empty,
-                    QuantityInStock = defaultVariantQuantity
+                    QuantityInStock = defaultVariantQuantity,
+                    SalePrice = defaultVariantPrice ?? 0m
                 } );
             }
             else if (!hasSalePrice && defaultVariantPrice is decimal fallbackPrice)

@@ -9,22 +9,25 @@ public class SupplyService
 {
     private readonly AppDbContext _db;
     private readonly IHttpContextAccessor _httpContextAccessor;
-    private readonly ShopifyInventoryService _shopifyInventory;
     private readonly ShopifyProductCatalogService _shopifyCatalog;
     private readonly SupplierInventoryService _inventoryService;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<SupplyService> _logger;
 
     public SupplyService(
         AppDbContext db,
         IHttpContextAccessor httpContextAccessor,
-        ShopifyInventoryService shopifyInventory,
         ShopifyProductCatalogService shopifyCatalog,
-        SupplierInventoryService inventoryService )
+        SupplierInventoryService inventoryService,
+        IServiceScopeFactory scopeFactory,
+        ILogger<SupplyService> logger )
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
-        _shopifyInventory = shopifyInventory;
         _shopifyCatalog = shopifyCatalog;
         _inventoryService = inventoryService;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
     }
 
         public async Task<List<Supply>> GetAllAsync()
@@ -228,28 +231,6 @@ public class SupplyService
                 }
             }
 
-        List<SupplyInventoryUpdateResult> updates = new();
-        if (ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
-        {
-            try
-            {
-                updates = await _shopifyInventory.ApplySupplySyncAsync(
-                    session.Shop,
-                    session.AccessToken,
-                    deltas,
-                    syncedSalePrices
-                );
-            }
-            catch (Exception ex)
-            {
-                syncWarning = ex.Message;
-            }
-        }
-        else
-        {
-            syncWarning = "Няма Shopify-кантэксту для абнаўлення астаткаў.";
-        }
-
             foreach (SupplyProductSaveItem item in requestProducts)
             {
                 if (string.IsNullOrWhiteSpace( item.ShopifyProductId ))
@@ -273,12 +254,46 @@ public class SupplyService
 
             await _db.SaveChangesAsync();
             await tx.CommitAsync();
-        return new SupplySaveResult
-        {
-            SupplyId = supply.Id,
-            Warning = syncWarning,
-            InventoryUpdates = updates
-        };
+
+            // Shopify sync after DB commit, off the request path — avoids 504 gateway timeouts
+            // under REST rate limits when a supply has many products.
+            List<SupplyInventoryUpdateResult> updates = new();
+            bool needsShopifySync = deltas.Count > 0 || syncedSalePrices.Count > 0;
+            if (needsShopifySync && ShopifySessionReader.TryGet( _httpContextAccessor, out ShopifySession session ))
+            {
+                string shop = session.Shop;
+                string accessToken = session.AccessToken;
+                Dictionary<string, int> deltasCopy = new( deltas, StringComparer.OrdinalIgnoreCase );
+                Dictionary<string, decimal> pricesCopy = new( syncedSalePrices, StringComparer.OrdinalIgnoreCase );
+                int supplyId = supply.Id;
+
+                _ = Task.Run( async () =>
+                {
+                    try
+                    {
+                        await using AsyncServiceScope scope = _scopeFactory.CreateAsyncScope();
+                        ShopifyInventoryService inventory =
+                            scope.ServiceProvider.GetRequiredService<ShopifyInventoryService>();
+                        await inventory.ApplySupplySyncAsync( shop, accessToken, deltasCopy, pricesCopy );
+                        _logger.LogInformation( "Shopify supply sync finished for supply {SupplyId}", supplyId );
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError( ex, "Shopify supply sync failed for supply {SupplyId}", supplyId );
+                    }
+                } );
+            }
+            else if (needsShopifySync)
+            {
+                syncWarning = "Няма Shopify-кантэксту для абнаўлення астаткаў.";
+            }
+
+            return new SupplySaveResult
+            {
+                SupplyId = supply.Id,
+                Warning = syncWarning,
+                InventoryUpdates = updates
+            };
     }
 
     private static string BuildShopifySyncKey( string shopifyProductId, string? shopifyVariantId )

@@ -6,10 +6,9 @@ import { fetchBukinistkaPendingOffersCount } from '@/lib/api/bukinistka-offers';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { FiHome, FiInbox, FiLogOut, FiShoppingBag } from 'react-icons/fi';
+import { FiBookOpen, FiLogOut, FiShoppingBag } from 'react-icons/fi';
 
 const nav = [
-  { href: '/bukinistka', label: 'Галоўная', icon: FiHome, exact: true },
   {
     href: '/bukinistka/products',
     label: 'Прадукты',
@@ -17,9 +16,9 @@ const nav = [
     exact: false,
   },
   {
-    href: '/bukinistka/offers',
-    label: 'Прапановы ад Кирмаша',
-    icon: FiInbox,
+    href: '/bukinistka/kirma',
+    label: 'Kirma.sh',
+    icon: FiBookOpen,
     exact: false,
     badgeKey: 'pendingOffers' as const,
   },

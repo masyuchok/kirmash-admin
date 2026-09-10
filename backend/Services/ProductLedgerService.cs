@@ -15,6 +15,7 @@ public class ProductLedgerService
     private static readonly SemaphoreSlim SoldByLineCacheLock = new( 1, 1 );
     private static ProductSoldAllocation? _soldByLineCache;
     private static DateTime _soldByLineCachedAtUtc;
+    private static bool _soldByLineCacheWasBuiltWithCatalog;
 
     private readonly AppDbContext _db;
     private readonly ShopifyVariantLookupService _variantLookup;
@@ -35,13 +36,15 @@ public class ProductLedgerService
 
     /// <summary>
     /// Sold quantities for inventory: reported months from VAT report rows,
-    /// unreported months from <see cref="InventoryProductSales"/> cache (populated via
-    /// <see cref="InventorySalesCacheService.EnsureFreshAsync"/>).
+    /// unreported months from <see cref="InventoryProductSales"/> cache,
+    /// plus Kirma-attributed Bukinistka POS sales (consignment).
     /// Does not repair empty report rows or call Shopify for unresolved report lines (fast path).
     /// </summary>
     public async Task<ProductSoldAllocation> GetSoldByLineAsync()
     {
+        bool catalogWarm = _variantLookup.IsCatalogCacheWarm;
         if (_soldByLineCache is not null &&
+            (_soldByLineCacheWasBuiltWithCatalog || !catalogWarm) &&
             DateTime.UtcNow - _soldByLineCachedAtUtc < SoldByLineCacheTtl)
         {
             return _soldByLineCache;
@@ -50,7 +53,9 @@ public class ProductLedgerService
         await SoldByLineCacheLock.WaitAsync();
         try
         {
+            catalogWarm = _variantLookup.IsCatalogCacheWarm;
             if (_soldByLineCache is not null &&
+                (_soldByLineCacheWasBuiltWithCatalog || !catalogWarm) &&
                 DateTime.UtcNow - _soldByLineCachedAtUtc < SoldByLineCacheTtl)
             {
                 return _soldByLineCache;
@@ -67,18 +72,27 @@ public class ProductLedgerService
             List<ProductLedgerSaleLine> reportLinesForAllocation =
                 await GetReportSaleLinesAsync( variantContext, repairUnresolved: false );
 
-            foreach (ProductLedgerSaleLine line in reportLinesForAllocation)
-            {
-                AddSaleLineToAllocation( line, variantContext, allocation );
-            }
+            List<ProductLedgerSaleLine> shopifyLinesForAllocation =
+                await GetShopifySaleLinesFromCacheAsync( variantContext );
 
-            foreach (ProductLedgerSaleLine line in await GetShopifySaleLinesFromCacheAsync( variantContext ))
+            List<ProductLedgerSaleLine> bukinistkaLinesForAllocation =
+                await GetBukinistkaPosSaleLinesAsync( variantContext );
+
+            List<ProductLedgerSaleLine> allLines = reportLinesForAllocation
+                .Concat( shopifyLinesForAllocation )
+                .Concat( bukinistkaLinesForAllocation )
+                .ToList();
+
+            await AssignLegacySaleVariantsGloballyAsync( allLines, variantContext );
+
+            foreach (ProductLedgerSaleLine line in allLines)
             {
                 AddSaleLineToAllocation( line, variantContext, allocation );
             }
 
             _soldByLineCache = allocation;
             _soldByLineCachedAtUtc = DateTime.UtcNow;
+            _soldByLineCacheWasBuiltWithCatalog = catalogWarm;
             return allocation;
         }
         finally
@@ -137,10 +151,8 @@ public class ProductLedgerService
                 normalizedCandidateIds,
                 productName );
 
-            await ApplyShopifyRefundAdjustmentsAsync(
-                lines,
-                variantContext,
-                reportedPeriods );
+            await ApplyShopifyRefundAdjustmentsAsync( lines, variantContext );
+            DeduplicateShopifyOrderSaleLines( lines );
 
             List<InventoryProductSale> cachedShopifySales = await _db.InventoryProductSales
                 .AsNoTracking()
@@ -179,6 +191,14 @@ public class ProductLedgerService
 
                 shopifyLine.ProductId = normalizedProductId;
                 lines.Add( shopifyLine );
+            }
+
+            foreach (ProductLedgerSaleLine bukinistkaLine in await GetBukinistkaPosSaleLinesAsync(
+                         variantContext,
+                         normalizedCandidateIds ))
+            {
+                bukinistkaLine.ProductId = normalizedProductId;
+                lines.Add( bukinistkaLine );
             }
 
             foreach (ProductLedgerSaleLine line in lines)
@@ -245,10 +265,8 @@ public class ProductLedgerService
         }
 
         HashSet<(int Year, int Month)> reportedPeriods = await GetReportedPeriodsAsync();
-        await ApplyShopifyRefundAdjustmentsAsync(
-            reportLines,
-            variantContext,
-            reportedPeriods );
+        await ApplyShopifyRefundAdjustmentsAsync( reportLines, variantContext );
+        DeduplicateShopifyOrderSaleLines( reportLines );
 
         List<InventoryProductSale> cachedShopifySales = await _db.InventoryProductSales
             .AsNoTracking()
@@ -287,6 +305,23 @@ public class ProductLedgerService
 
             shopifyLine.ProductId = normalizedProductId;
             reportLines.Add( shopifyLine );
+        }
+
+        foreach (ProductLedgerSaleLine bukinistkaLine in await GetBukinistkaPosSaleLinesAsync(
+                     variantContext,
+                     normalizedCandidateIds ))
+        {
+            if (!SaleLineMatchesProduct(
+                    bukinistkaLine,
+                    normalizedCandidateIds,
+                    productIsbn,
+                    matchByProductIdOnly ))
+            {
+                continue;
+            }
+
+            bukinistkaLine.ProductId = normalizedProductId;
+            reportLines.Add( bukinistkaLine );
         }
 
         await AssignLegacySaleVariantsBySupplierFifoAsync(
@@ -1317,7 +1352,7 @@ public class ProductLedgerService
     }
 
     private static string BuildSaleLineDedupKey( ProductLedgerSaleLine line ) =>
-        $"{line.ReportId}::{line.OrderNumber}::{line.ProductId}::{line.VariantId}::{line.Quantity}::{line.DateUtc:O}";
+        $"{line.Source}::{line.ReportId}::{line.OrderNumber}::{line.ShopifyOrderId}::{line.ProductId}::{line.VariantId}::{line.Quantity}::{line.DateUtc:O}";
 
     private async Task<List<ProductLedgerSaleLine>> GetShopifySaleLinesFromCacheAsync( LedgerVariantContext variantContext )
     {
@@ -1349,6 +1384,65 @@ public class ProductLedgerService
                 Quantity = row.SoldQuantity,
                 Source = "shopify",
                 DateUtc = new DateTime( row.PeriodYear, row.PeriodMonth, 1, 0, 0, 0, DateTimeKind.Utc )
+            } );
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Kirma consignment sold at Bukinistka POS (Shopify already −qty). Own-stock / returns excluded.
+    /// </summary>
+    private async Task<List<ProductLedgerSaleLine>> GetBukinistkaPosSaleLinesAsync(
+        LedgerVariantContext variantContext,
+        IReadOnlySet<string>? normalizedProductIdFilter = null )
+    {
+        List<KirmaBukinistkaPosSale> rows = await _db.KirmaBukinistkaPosSales
+            .AsNoTracking()
+            .Where( row =>
+                !row.IsOwnStock &&
+                !row.IsReturn &&
+                !row.IsReversed &&
+                row.Quantity > 0 &&
+                row.ShopifyProductId != "" )
+            .ToListAsync();
+
+        List<ProductLedgerSaleLine> lines = new();
+        foreach (KirmaBukinistkaPosSale row in rows)
+        {
+            string productId = ShopifyIds.NormalizeProductId( row.ShopifyProductId );
+            if (string.IsNullOrWhiteSpace( productId ))
+            {
+                continue;
+            }
+
+            if (normalizedProductIdFilter is not null &&
+                !normalizedProductIdFilter.Contains( productId ))
+            {
+                continue;
+            }
+
+            string variantId = ResolveEffectiveVariantId(
+                row.ShopifyProductId,
+                row.ShopifyVariantId,
+                string.Empty,
+                variantContext.VariantIdByTitle,
+                variantContext.DefaultVariantByProduct,
+                variantContext.LegacySaleVariantByProduct );
+
+            DateTime soldAt = row.SoldAtUtc.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind( row.SoldAtUtc, DateTimeKind.Utc )
+                : row.SoldAtUtc.ToUniversalTime();
+
+            lines.Add( new ProductLedgerSaleLine
+            {
+                ProductId = productId,
+                VariantId = variantId,
+                Quantity = row.Quantity,
+                Source = "bukinistka",
+                DateUtc = soldAt,
+                OrderNumber = (row.OdooPosOrderName ?? string.Empty).Trim(),
+                ShopifyOrderId = $"bukinistka-pos:{row.OdooPosOrderLineId}"
             } );
         }
 
@@ -1752,22 +1846,17 @@ public class ProductLedgerService
     }
 
     /// <summary>
-    /// Report rows keep original sale qty; Shopify currentQuantity excludes refunds/returns.
-    /// When <paramref name="reportedPeriodsToSkip"/> is set, only order lines outside those
-    /// report months are adjusted (product history: reported months stay as in VAT reports).
+    /// Align order-sourced sale lines with live Shopify quantities (refunds / removed line items).
+    /// Applies to VAT-report rows as well — otherwise cancelled lines stay counted forever.
     /// </summary>
     private async Task ApplyShopifyRefundAdjustmentsAsync(
         List<ProductLedgerSaleLine> lines,
-        LedgerVariantContext variantContext,
-        HashSet<(int Year, int Month)>? reportedPeriodsToSkip = null )
+        LedgerVariantContext variantContext )
     {
         List<ProductLedgerSaleLine> orderLines = lines
             .Where( line =>
                 string.Equals( line.Source, "order", StringComparison.OrdinalIgnoreCase ) &&
-                !string.IsNullOrWhiteSpace( line.ShopifyOrderId ) &&
-                !line.ReportId.HasValue &&
-                (reportedPeriodsToSkip is null ||
-                 !reportedPeriodsToSkip.Contains( (line.DateUtc.Year, line.DateUtc.Month) )) )
+                !string.IsNullOrWhiteSpace( line.ShopifyOrderId ) )
             .ToList();
         if (orderLines.Count == 0)
         {
@@ -1802,20 +1891,56 @@ public class ProductLedgerService
                 continue;
             }
 
-            bool productOnOrder = order.Items.Any( item =>
-                ProductIdMatches( line.ProductId, item.ShopifyProductId ) );
-            int netQty = ResolveNetSoldQuantityOnOrder( line, order, variantContext );
-            if (netQty > 0)
-            {
-                line.Quantity = netQty;
-            }
-            else if (productOnOrder)
-            {
-                line.Quantity = netQty;
-            }
+            // Zero when fully refunded / line removed from Shopify (incl. "Removed" items).
+            line.Quantity = ResolveNetSoldQuantityOnOrder( line, order, variantContext );
         }
 
         lines.RemoveAll( line => line.Quantity <= 0 );
+    }
+
+    /// <summary>
+    /// Same Shopify order+product+variant can appear in multiple VAT reports (e.g. regenerated
+    /// month + manually added into another). Count the sale once.
+    /// </summary>
+    private static void DeduplicateShopifyOrderSaleLines( List<ProductLedgerSaleLine> lines )
+    {
+        List<ProductLedgerSaleLine> orderLines = lines
+            .Where( line =>
+                string.Equals( line.Source, "order", StringComparison.OrdinalIgnoreCase ) &&
+                !string.IsNullOrWhiteSpace( line.ShopifyOrderId ) )
+            .ToList();
+        if (orderLines.Count <= 1)
+        {
+            return;
+        }
+
+        Dictionary<string, ProductLedgerSaleLine> bestByKey = new( StringComparer.OrdinalIgnoreCase );
+        foreach (ProductLedgerSaleLine line in orderLines)
+        {
+            string key =
+                $"{ShopifyIds.NormalizeOrderId( line.ShopifyOrderId )}::{ShopifyIds.NormalizeProductId( line.ProductId )}::{ShopifyIds.NormalizeVariantId( line.VariantId )}";
+            if (!bestByKey.TryGetValue( key, out ProductLedgerSaleLine? existing ))
+            {
+                bestByKey[key] = line;
+                continue;
+            }
+
+            // Prefer a line that still links to a report (for history UI).
+            if (!existing.ReportId.HasValue && line.ReportId.HasValue)
+            {
+                bestByKey[key] = line;
+                existing.Quantity = 0;
+                continue;
+            }
+
+            existing.Quantity = Math.Max( existing.Quantity, line.Quantity );
+            line.Quantity = 0;
+        }
+
+        lines.RemoveAll( line =>
+            string.Equals( line.Source, "order", StringComparison.OrdinalIgnoreCase ) &&
+            !string.IsNullOrWhiteSpace( line.ShopifyOrderId ) &&
+            line.Quantity <= 0 );
     }
 
     private static int ResolveNetSoldQuantityOnOrder(
@@ -2022,6 +2147,143 @@ public class ProductLedgerService
         }
 
         return string.Empty;
+    }
+
+    /// <summary>
+    /// Global variant assignment for all sale lines at once, used by the fast sold-by-line cache path.
+    /// Mirrors AssignLegacySaleVariantsBySupplierFifoAsync but loads all supply products in one query.
+    /// </summary>
+    private async Task AssignLegacySaleVariantsGloballyAsync(
+        List<ProductLedgerSaleLine> saleLines,
+        LedgerVariantContext variantContext )
+    {
+        bool hasLegacy = saleLines.Any( line =>
+        {
+            if (string.IsNullOrWhiteSpace( line.ProductId ) || !string.IsNullOrWhiteSpace( line.VariantId ))
+            {
+                return false;
+            }
+
+            string variantTitle = ResolveLineVariantTitle(
+                line.ProductId,
+                line.VariantId,
+                line.VariantTitle,
+                variantContext );
+            return VariantLegacyDefaults.IsLegacyUnnamedSaleLine(
+                line.ProductId,
+                line.VariantId,
+                variantTitle,
+                variantContext.VariantIdByTitle );
+        } );
+        if (!hasLegacy)
+        {
+            return;
+        }
+
+        List<SupplyProduct> supplyProducts = await _db.SupplyProducts
+            .AsNoTracking()
+            .Include( sp => sp.Supply )
+            .OrderBy( sp => sp.Supply.Date )
+            .ThenBy( sp => sp.SupplyId )
+            .ThenBy( sp => sp.Id )
+            .ToListAsync();
+
+        List<MutableSupplyBatch> batches = new();
+        foreach (SupplyProduct supplyProduct in supplyProducts)
+        {
+            string productId = ShopifyIds.NormalizeProductId( supplyProduct.ShopifyProductId );
+            string variantId = VariantLegacyDefaults.ResolveVariantId(
+                supplyProduct.ShopifyProductId,
+                supplyProduct.ShopifyVariantId,
+                variantContext.DefaultVariantByProduct,
+                variantContext.VariantIdByTitle,
+                variantContext.LegacySaleVariantByProduct );
+            if (string.IsNullOrWhiteSpace( productId ) ||
+                string.IsNullOrWhiteSpace( variantId ) ||
+                supplyProduct.Quantity <= 0)
+            {
+                continue;
+            }
+
+            batches.Add( new MutableSupplyBatch
+            {
+                ProductId = productId,
+                VariantId = variantId,
+                RemainingCapacity = supplyProduct.Quantity
+            } );
+        }
+
+        if (batches.Count == 0)
+        {
+            return;
+        }
+
+        List<ProductLedgerSaleLine> orderedSales = saleLines
+            .Where( line => !string.IsNullOrWhiteSpace( line.ProductId ) )
+            .OrderBy( line => line.DateUtc )
+            .ThenBy( line => line.OrderNumber, StringComparer.OrdinalIgnoreCase )
+            .ToList();
+
+        foreach (ProductLedgerSaleLine sale in orderedSales)
+        {
+            int remaining = sale.Quantity;
+            if (remaining <= 0)
+            {
+                continue;
+            }
+
+            string variantTitle = ResolveLineVariantTitle(
+                sale.ProductId,
+                sale.VariantId,
+                sale.VariantTitle,
+                variantContext );
+            if (string.IsNullOrWhiteSpace( sale.VariantId ) && !string.IsNullOrWhiteSpace( variantTitle ))
+            {
+                sale.VariantId = TryResolveVariantIdByTitle(
+                    sale.ProductId,
+                    variantTitle,
+                    variantContext.VariantIdByTitle );
+            }
+
+            bool legacy = string.IsNullOrWhiteSpace( sale.VariantId ) &&
+                VariantLegacyDefaults.IsLegacyUnnamedSaleLine(
+                    sale.ProductId,
+                    sale.VariantId,
+                    variantTitle,
+                    variantContext.VariantIdByTitle );
+            if (!legacy)
+            {
+                continue;
+            }
+
+            foreach (MutableSupplyBatch batch in batches.Where( batch =>
+                string.Equals( batch.ProductId, sale.ProductId, StringComparison.OrdinalIgnoreCase ) ))
+            {
+                if (remaining <= 0)
+                {
+                    break;
+                }
+
+                if (batch.RemainingCapacity <= 0)
+                {
+                    continue;
+                }
+
+                int take = Math.Min( remaining, batch.RemainingCapacity );
+                if (string.IsNullOrWhiteSpace( sale.VariantId ))
+                {
+                    sale.VariantId = batch.VariantId;
+                    sale.VariantTitle = ResolveLineVariantTitle(
+                        sale.ProductId,
+                        sale.VariantId,
+                        sale.VariantTitle,
+                        variantContext );
+                }
+
+                batch.RemainingCapacity -= take;
+                remaining -= take;
+            }
+        }
     }
 
     /// <summary>
