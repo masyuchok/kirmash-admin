@@ -258,7 +258,9 @@ public sealed class BukinistkaPosShopifySyncService
                     CreatedAtUtc = now,
                 } );
 
-                string shopifyKey = offer.ShopifyProductId;
+                string shopifyKey = BuildShopifyInventoryKey(
+                    offer.ShopifyProductId,
+                    offer.ShopifyVariantId );
                 shopifyDeltas[shopifyKey] = shopifyDeltas.GetValueOrDefault( shopifyKey ) - take;
 
                 bucket.Remaining -= take;
@@ -377,8 +379,11 @@ public sealed class BukinistkaPosShopifySyncService
                 }
                 else if (!string.IsNullOrWhiteSpace( sale.ShopifyProductId ))
                 {
-                    shopifyDeltas[sale.ShopifyProductId] =
-                        shopifyDeltas.GetValueOrDefault( sale.ShopifyProductId ) + take;
+                    string shopifyKey = BuildShopifyInventoryKey(
+                        sale.ShopifyProductId,
+                        sale.ShopifyVariantId );
+                    shopifyDeltas[shopifyKey] =
+                        shopifyDeltas.GetValueOrDefault( shopifyKey ) + take;
                 }
 
                 sale.Quantity -= take;
@@ -543,6 +548,13 @@ public sealed class BukinistkaPosShopifySyncService
         }
 
         return $"Odoo #{odooProductId}";
+    }
+
+    private static string BuildShopifyInventoryKey( string productId, string? variantId )
+    {
+        string product = (productId ?? string.Empty).Trim();
+        string variant = (variantId ?? string.Empty).Trim();
+        return string.IsNullOrWhiteSpace( variant ) ? product : $"{product}::{variant}";
     }
 
     private sealed class OfferBucket

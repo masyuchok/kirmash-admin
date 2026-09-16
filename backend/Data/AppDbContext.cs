@@ -39,6 +39,9 @@ namespace backend.Data
         public DbSet<FinanceRecurringApplication> FinanceRecurringApplications { get; set; } = default!;
         public DbSet<VatAutoFinanceSettings> VatAutoFinanceSettings { get; set; } = default!;
         public DbSet<VatPeriodFinancePayment> VatPeriodFinancePayments { get; set; } = default!;
+        public DbSet<Kirmash> Kirmashes { get; set; } = default!;
+        public DbSet<KirmashLine> KirmashLines { get; set; } = default!;
+        public DbSet<KirmashPriceTag> KirmashPriceTags { get; set; } = default!;
 
         protected override void OnModelCreating( ModelBuilder modelBuilder )
         {
@@ -676,6 +679,48 @@ namespace backend.Data
 
                 entity.HasIndex( x => new { x.PeriodYear, x.PeriodMonth } )
                     .IsUnique();
+            } );
+
+            modelBuilder.Entity<Kirmash>( entity =>
+            {
+                entity.ToTable( "Kirmashes" );
+                entity.Property( x => x.Title ).IsRequired().HasMaxLength( 256 );
+                entity.Property( x => x.Description ).IsRequired();
+                entity.Property( x => x.Status ).IsRequired().HasMaxLength( 32 );
+                entity.Property( x => x.CreatedAtUtc ).IsRequired();
+                entity.Property( x => x.UpdatedAtUtc ).IsRequired();
+            } );
+
+            modelBuilder.Entity<KirmashLine>( entity =>
+            {
+                entity.ToTable( "KirmashLines" );
+                entity.HasOne( x => x.Kirmash )
+                    .WithMany( x => x.Lines )
+                    .HasForeignKey( x => x.KirmashId )
+                    .OnDelete( DeleteBehavior.Cascade );
+                entity.Property( x => x.ShopifyProductId ).IsRequired().HasMaxLength( 64 );
+                entity.Property( x => x.ShopifyVariantId ).IsRequired().HasMaxLength( 64 );
+                entity.Property( x => x.Title ).IsRequired().HasMaxLength( 512 );
+                entity.Property( x => x.UnitPrice ).HasColumnType( "numeric(12,2)" );
+                entity.HasIndex( x => x.KirmashId );
+            } );
+
+            modelBuilder.Entity<KirmashPriceTag>( entity =>
+            {
+                entity.ToTable( "KirmashPriceTags" );
+                entity.HasOne( x => x.Kirmash )
+                    .WithMany( x => x.PriceTags )
+                    .HasForeignKey( x => x.KirmashId )
+                    .OnDelete( DeleteBehavior.Cascade );
+                entity.HasOne( x => x.KirmashLine )
+                    .WithMany( x => x.PriceTags )
+                    .HasForeignKey( x => x.KirmashLineId )
+                    .OnDelete( DeleteBehavior.Cascade );
+                entity.Property( x => x.Title ).IsRequired().HasMaxLength( 512 );
+                entity.Property( x => x.UnitPrice ).HasColumnType( "numeric(12,2)" );
+                entity.Property( x => x.CheckoutUrl ).IsRequired().HasMaxLength( 2048 );
+                entity.HasIndex( x => x.KirmashId );
+                entity.HasIndex( x => x.KirmashLineId );
             } );
         }
     }

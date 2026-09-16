@@ -87,18 +87,31 @@ public class ShopifyInventoryService
                 continue;
             }
 
-            string normalized = ShopifyIds.NormalizeProductId( rawProductId );
-            long? productId = ShopifyIds.TryParseNumericProductId( normalized );
-            if (!productId.HasValue)
+            if (!TryParseSyncKey( rawProductId, out long productId, out long? variantId ))
             {
-                throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
+                // Fallback: plain product GID / numeric id without "::".
+                string normalized = ShopifyIds.NormalizeProductId( rawProductId );
+                long? parsedProductId = ShopifyIds.TryParseNumericProductId( normalized );
+                if (!parsedProductId.HasValue)
+                {
+                    throw new InvalidOperationException( "Некарэктны Shopify ID прадукту." );
+                }
+
+                productId = parsedProductId.Value;
+                variantId = null;
             }
 
-            long inventoryItemId = await GetInventoryItemIdByProductAsync(
-                client,
-                shop,
-                productId.Value,
-                accessToken );
+            long inventoryItemId = variantId.HasValue
+                ? await GetInventoryItemIdByVariantAsync(
+                    client,
+                    shop,
+                    variantId.Value,
+                    accessToken )
+                : await GetInventoryItemIdByProductAsync(
+                    client,
+                    shop,
+                    productId,
+                    accessToken );
             (int current, int next) = await ApplyInventoryDeltaAtLocationAsync(
                 client,
                 shop,
@@ -106,7 +119,10 @@ public class ShopifyInventoryService
                 inventoryItemId,
                 locationId,
                 delta );
-            results[normalized] = (current, next);
+            string resultKey = variantId.HasValue
+                ? BuildLinePriceKey( productId.ToString(), variantId.Value.ToString() )
+                : ShopifyIds.NormalizeProductId( productId.ToString() );
+            results[resultKey] = (current, next);
         }
 
         return results;

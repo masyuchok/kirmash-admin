@@ -12,6 +12,7 @@ import {
   FiDollarSign,
   FiFileText,
   FiLogOut,
+  FiMapPin,
   FiPackage,
   FiSettings,
   FiShoppingBag,
@@ -26,6 +27,7 @@ const nav = [
   { href: '/products', label: 'Прадукты', icon: FiShoppingBag },
   { href: '/sales', label: 'Продажы', icon: FiTrendingUp },
   { href: '/documents', label: 'Дакументы', icon: FiFileText },
+  { href: '/kirmashes', label: 'Кірмашы', icon: FiMapPin },
   { href: '/finances', label: 'Фінансы', icon: FiDollarSign },
   {
     href: '/bukinistyka',

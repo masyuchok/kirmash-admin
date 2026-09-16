@@ -14,6 +14,7 @@ export type BukinistkaProduct = {
   standardPrice: number;
   uomName: string | null;
   supplierName: string | null;
+  authorName: string | null;
   odooUrl: string;
   canProposeToKirma: boolean;
   proposeBlockReason: string | null;
@@ -53,6 +54,14 @@ function mapProduct(row: Record<string, unknown>): BukinistkaProduct {
         : typeof row.supplier_name === 'string'
           ? row.supplier_name
           : null,
+    authorName:
+      typeof row.authorName === 'string'
+        ? row.authorName
+        : typeof row.author_name === 'string'
+          ? row.author_name
+          : typeof row.AuthorName === 'string'
+            ? row.AuthorName
+            : null,
     odooUrl:
       typeof row.odooUrl === 'string'
         ? row.odooUrl

@@ -10,11 +10,13 @@ import {
   fetchBukinistkaProducts,
   type BukinistkaProduct,
 } from '@/lib/api/bukinistka-products';
+import { exportBukinistkaProductsToExcel } from '@/lib/bukinistka/productsExport';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FiChevronDown,
   FiChevronUp,
+  FiDownload,
   FiSearch,
   FiSend,
   FiTag,
@@ -23,6 +25,7 @@ import {
 
 type SortKey = 'standardPrice' | 'listPrice' | 'quantityInStock';
 type SortDir = 'asc' | 'desc';
+type StockFilter = 'all' | 'in_stock' | 'out_of_stock';
 
 const EMPTY_SUPPLIER = '__none__';
 
@@ -104,6 +107,7 @@ export default function BukinistkaProductsClient() {
   const [sortKey, setSortKey] = useState<SortKey>('quantityInStock');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
+  const [stockFilter, setStockFilter] = useState<StockFilter>('all');
   const [proposeRow, setProposeRow] = useState<BukinistkaProduct | null>(null);
   const [proposeDraft, setProposeDraft] =
     useState<ProposeToBukinistkaDraft | null>(null);
@@ -113,6 +117,7 @@ export default function BukinistkaProductsClient() {
   const [proposeSubmitting, setProposeSubmitting] = useState(false);
   const [proposeError, setProposeError] = useState<string | null>(null);
   const [proposeOk, setProposeOk] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const supplierMenu = usePortalMenu({
     menuWidth: 280,
     estimatedMenuHeight: 320,
@@ -193,6 +198,12 @@ export default function BukinistkaProductsClient() {
       );
     }
 
+    if (stockFilter === 'in_stock') {
+      list = list.filter((row) => row.quantityInStock > 0);
+    } else if (stockFilter === 'out_of_stock') {
+      list = list.filter((row) => row.quantityInStock <= 0);
+    }
+
     if (search && !serverSearch) {
       list = list.filter((row) => {
         const haystack = [
@@ -200,6 +211,7 @@ export default function BukinistkaProductsClient() {
           row.defaultCode ?? '',
           row.barcode ?? '',
           row.supplierName ?? '',
+          row.authorName ?? '',
         ]
           .join(' ')
           .toLowerCase();
@@ -214,7 +226,7 @@ export default function BukinistkaProductsClient() {
       if (diff !== 0) return diff;
       return a.name.localeCompare(b.name, 'be', { sensitivity: 'base' });
     });
-  }, [rows, searchQuery, sortKey, sortDir, selectedSuppliers]);
+  }, [rows, searchQuery, sortKey, sortDir, selectedSuppliers, stockFilter]);
 
   const handleSort = (column: SortKey) => {
     if (sortKey === column) {
@@ -307,6 +319,44 @@ export default function BukinistkaProductsClient() {
   };
 
   const supplierFilterActive = selectedSuppliers.length > 0;
+  const stockFilterActive = stockFilter !== 'all';
+  const anyFilterActive =
+    supplierFilterActive || stockFilterActive || searchQuery.trim().length > 0;
+
+  useEffect(() => {
+    if (!exportNotice) return undefined;
+    const timer = window.setTimeout(() => setExportNotice(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [exportNotice]);
+
+  const handleExportExcel = () => {
+    if (visibleRows.length === 0) {
+      setExportNotice('Няма прадуктаў для экспарту па бягучых фільтрах.');
+      return;
+    }
+
+    const labelParts: string[] = [];
+    if (selectedSuppliers.length === 1) {
+      labelParts.push(supplierLabel(selectedSuppliers[0]));
+    } else if (selectedSuppliers.length > 1) {
+      labelParts.push(`${selectedSuppliers.length}-выдаўцы`);
+    }
+    if (stockFilter === 'in_stock') labelParts.push('у-наяўнасці');
+    if (stockFilter === 'out_of_stock') labelParts.push('няма');
+    if (labelParts.length === 0 && searchQuery.trim()) {
+      labelParts.push(searchQuery.trim());
+    }
+
+    const result = exportBukinistkaProductsToExcel(visibleRows, {
+      publisherFilterLabel: labelParts.join('-') || undefined,
+    });
+    setExportNotice(`Экспартавана радкоў: ${result.exported}.`);
+  };
+
+  const clearFilters = () => {
+    setSelectedSuppliers([]);
+    setStockFilter('all');
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
@@ -325,31 +375,67 @@ export default function BukinistkaProductsClient() {
         </p>
       ) : null}
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <label className="relative block w-full max-w-md">
-          <span className="sr-only">Пошук па назве, штрыхкодзе і выдаўцу</span>
-          <FiSearch
-            className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-gray-400"
-            aria-hidden
-          />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Пошук па назве, штрыхкодзе, выдаўцу..."
-            className="h-10 w-full rounded-xl border border-gray-200 bg-white py-2 pl-10 pr-10 text-sm text-gray-900 shadow-sm outline-none transition placeholder:text-gray-400 focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
-              aria-label="Ачысціць пошук"
+      {exportNotice ? (
+        <p className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {exportNotice}
+        </p>
+      ) : null}
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="flex w-full flex-col gap-3 sm:max-w-2xl sm:flex-row sm:items-center">
+          <label className="relative block w-full max-w-md">
+            <span className="sr-only">
+              Пошук па назве, штрыхкодзе і выдаўцу
+            </span>
+            <FiSearch
+              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-gray-400"
+              aria-hidden
+            />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Пошук па назве, штрыхкодзе, выдаўцу..."
+              className="h-10 w-full rounded-xl border border-gray-200 bg-white py-2 pl-10 pr-10 text-sm text-gray-900 shadow-sm outline-none transition placeholder:text-gray-400 focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                aria-label="Ачысціць пошук"
+              >
+                <FiX className="size-4" aria-hidden />
+              </button>
+            )}
+          </label>
+          <label className="block shrink-0">
+            <span className="sr-only">Фільтр па наяўнасці</span>
+            <select
+              value={stockFilter}
+              onChange={(e) => setStockFilter(e.target.value as StockFilter)}
+              className={`h-10 rounded-xl border bg-white px-3 text-sm shadow-sm outline-none transition focus:border-amber-400 focus:ring-2 focus:ring-amber-100 ${
+                stockFilterActive
+                  ? 'border-amber-300 text-amber-900'
+                  : 'border-gray-200 text-gray-800'
+              }`}
+              aria-label="Фільтр па наяўнасці"
             >
-              <FiX className="size-4" aria-hidden />
-            </button>
-          )}
-        </label>
+              <option value="all">Усе</option>
+              <option value="in_stock">У наяўнасці</option>
+              <option value="out_of_stock">Няма ў наяўнасці</option>
+            </select>
+          </label>
+        </div>
+        <button
+          type="button"
+          onClick={handleExportExcel}
+          disabled={loading || visibleRows.length === 0}
+          className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 text-sm font-medium text-gray-800 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <FiDownload className="size-4" aria-hidden />
+          Экспарт Excel
+        </button>
       </div>
 
       {error && (
@@ -369,7 +455,7 @@ export default function BukinistkaProductsClient() {
             <span className="font-medium text-gray-800">
               {visibleRows.length}
             </span>
-            {searchQuery.trim() || supplierFilterActive
+            {anyFilterActive
               ? searchQuery.trim().length >= 2
                 ? searchLoading
                   ? ' (пошук…)'
@@ -390,13 +476,13 @@ export default function BukinistkaProductsClient() {
                 штрыхкод у пошук, каб знайсці іншыя.
               </p>
             ) : null}
-            {supplierFilterActive ? (
+            {supplierFilterActive || stockFilterActive ? (
               <button
                 type="button"
-                onClick={() => setSelectedSuppliers([])}
+                onClick={clearFilters}
                 className="ml-3 text-amber-800 underline-offset-2 hover:underline"
               >
-                Скінуць фільтр выдаўца
+                Скінуць фільтры
               </button>
             ) : null}
           </div>

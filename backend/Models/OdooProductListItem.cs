@@ -11,6 +11,8 @@ public sealed class OdooProductListItem
     public decimal StandardPrice { get; set; }
     public string? UomName { get; set; }
     public string? SupplierName { get; set; }
+    /// <summary>Author(s) from Odoo Studio field x_studio_autor_1.</summary>
+    public string? AuthorName { get; set; }
     public string OdooUrl { get; set; } = string.Empty;
     public bool CanProposeToKirma { get; set; } = true;
     public string? ProposeBlockReason { get; set; }

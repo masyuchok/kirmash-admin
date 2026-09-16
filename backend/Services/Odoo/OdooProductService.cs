@@ -112,6 +112,8 @@ public sealed class OdooProductService
 
         Dictionary<int, string> publishersByTemplateId =
             await LoadPublisherNamesByTemplateIdAsync( session, productRows, cancellationToken );
+        Dictionary<int, string> authorsByTemplateId =
+            await LoadAuthorNamesByTemplateIdAsync( session, productRows, cancellationToken );
         Dictionary<(int ProductId, int TemplateId), string> suppliersByKey =
             await LoadSupplierNamesAsync( session, productRows, cancellationToken );
 
@@ -135,6 +137,14 @@ public sealed class OdooProductService
                     publisherOrSupplier = byTemplate;
                 }
 
+                string? authorName = null;
+                if (row.TemplateId > 0
+                    && authorsByTemplateId.TryGetValue( row.TemplateId, out string? author )
+                    && !string.IsNullOrWhiteSpace( author ))
+                {
+                    authorName = author;
+                }
+
                 return new OdooProductListItem
                 {
                     Id = row.Id,
@@ -146,6 +156,7 @@ public sealed class OdooProductService
                     StandardPrice = row.StandardPrice,
                     UomName = row.UomName,
                     SupplierName = publisherOrSupplier,
+                    AuthorName = authorName,
                     OdooUrl = BuildProductUrl( odooBaseUrl, row.Id ),
                 };
             } )
@@ -2205,6 +2216,206 @@ public sealed class OdooProductService
                 result[templateId] = publisher.Trim();
             }
         }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Author(s) from Odoo Studio field x_studio_autor_1 (char / many2one / many2many).
+    /// </summary>
+    private async Task<Dictionary<int, string>> LoadAuthorNamesByTemplateIdAsync(
+        OdooSession session,
+        List<ProductRow> products,
+        CancellationToken cancellationToken )
+    {
+        Dictionary<int, string> result = new();
+        int[] templateIds = products
+            .Select( p => p.TemplateId )
+            .Where( id => id > 0 )
+            .Distinct()
+            .ToArray();
+        if (templateIds.Length == 0)
+        {
+            return result;
+        }
+
+        Dictionary<int, List<int>> pendingAuthorIdsByTemplate = new();
+        HashSet<int> allAuthorIds = new();
+
+        const int chunkSize = 500;
+        for (int offset = 0; offset < templateIds.Length; offset += chunkSize)
+        {
+            int[] chunk = templateIds.Skip( offset ).Take( chunkSize ).ToArray();
+            object[] domain =
+            [
+                new object[] { "id", "in", chunk }
+            ];
+
+            Dictionary<string, object?> kwargs = new()
+            {
+                ["fields"] = new[] { "id", "x_studio_autor_1" },
+                ["limit"] = chunk.Length,
+            };
+
+            JsonElement rows;
+            try
+            {
+                rows = await _client.CallKwAsync(
+                    session,
+                    "product.template",
+                    "search_read",
+                    [domain],
+                    kwargs,
+                    cancellationToken );
+            }
+            catch
+            {
+                // Studio field may be missing on some DBs; keep list usable.
+                return result;
+            }
+
+            if (rows.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement row in rows.EnumerateArray())
+            {
+                int templateId = ReadInt( row, "id" );
+                if (templateId <= 0)
+                {
+                    continue;
+                }
+
+                string? direct = ReadOptionalString( row, "x_studio_autor_1" );
+                if (string.IsNullOrWhiteSpace( direct ))
+                {
+                    direct = ReadMany2OneName( row, "x_studio_autor_1" );
+                }
+
+                if (!string.IsNullOrWhiteSpace( direct ))
+                {
+                    result[templateId] = direct.Trim();
+                    continue;
+                }
+
+                List<int> authorIds = ReadRelationIds( row, "x_studio_autor_1" );
+                if (authorIds.Count == 0)
+                {
+                    continue;
+                }
+
+                pendingAuthorIdsByTemplate[templateId] = authorIds;
+                foreach (int authorId in authorIds)
+                {
+                    allAuthorIds.Add( authorId );
+                }
+            }
+        }
+
+        if (allAuthorIds.Count == 0)
+        {
+            return result;
+        }
+
+        Dictionary<int, string> namesById = await ResolveAuthorNameMapByIdsAsync(
+            session,
+            allAuthorIds.ToArray(),
+            cancellationToken );
+
+        foreach ((int templateId, List<int> authorIds) in pendingAuthorIdsByTemplate)
+        {
+            List<string> names = new();
+            foreach (int authorId in authorIds)
+            {
+                if (namesById.TryGetValue( authorId, out string? name )
+                    && !string.IsNullOrWhiteSpace( name ))
+                {
+                    names.Add( name.Trim() );
+                }
+            }
+
+            if (names.Count > 0)
+            {
+                result[templateId] = string.Join( ", ", names.Distinct( StringComparer.OrdinalIgnoreCase ) );
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<Dictionary<int, string>> ResolveAuthorNameMapByIdsAsync(
+        OdooSession session,
+        IReadOnlyList<int> attributeIds,
+        CancellationToken cancellationToken )
+    {
+        Dictionary<int, string> result = new();
+        int[] ids = attributeIds.Where( id => id > 0 ).Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return result;
+        }
+
+        async Task MergeFromModelAsync( string model, string nameField = "name" )
+        {
+            if (result.Count >= ids.Length)
+            {
+                return;
+            }
+
+            int[] missing = ids.Where( id => !result.ContainsKey( id ) ).ToArray();
+            if (missing.Length == 0)
+            {
+                return;
+            }
+
+            object[] domain =
+            [
+                new object[] { "id", "in", missing }
+            ];
+
+            Dictionary<string, object?> kwargs = new()
+            {
+                ["fields"] = new[] { "id", nameField },
+                ["limit"] = missing.Length,
+            };
+
+            JsonElement rows;
+            try
+            {
+                rows = await _client.CallKwAsync(
+                    session,
+                    model,
+                    "search_read",
+                    [domain],
+                    kwargs,
+                    cancellationToken );
+            }
+            catch
+            {
+                return;
+            }
+
+            if (rows.ValueKind != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            foreach (JsonElement row in rows.EnumerateArray())
+            {
+                int id = ReadInt( row, "id" );
+                string? name = ReadOptionalString( row, nameField );
+                if (id > 0 && !string.IsNullOrWhiteSpace( name ))
+                {
+                    result[id] = name.Trim();
+                }
+            }
+        }
+
+        await MergeFromModelAsync( "product.attribute.value" );
+        await MergeFromModelAsync( "product.attribute" );
+        await MergeFromModelAsync( "res.partner" );
+        await MergeFromModelAsync( "x_autor", "x_name" );
 
         return result;
     }
