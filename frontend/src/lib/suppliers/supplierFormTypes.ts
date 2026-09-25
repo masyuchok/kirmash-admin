@@ -4,6 +4,7 @@ export type SupplierFormValues = {
   name: string;
   contactName: string;
   website: string;
+  priceListUrl: string;
   country: string;
   city: string;
   currency: string;
@@ -20,6 +21,7 @@ export function defaultEmptySupplierForm(): SupplierFormValues {
     name: '',
     contactName: '',
     website: '',
+    priceListUrl: '',
     country: '',
     city: '',
     currency: 'PLN',
@@ -44,6 +46,7 @@ export function mapListSupplierToFormValues(s: Supplier): SupplierFormValues {
     ...base,
     name: s.name ?? '',
     website: s.website ?? '',
+    priceListUrl: s.priceListUrl ?? '',
     country: s.country ?? '',
     city: s.city ?? '',
     tgContact: s.telegram ?? '',
@@ -60,13 +63,17 @@ export function mapApiDetailToFormValues(
     id: number;
     telegram?: string;
     isVatPayer?: boolean;
+    PriceListUrl?: string;
+    Website?: string;
   }
 ): SupplierFormValues {
   const base = defaultEmptySupplierForm();
   return {
     name: detail.name ?? base.name,
     contactName: detail.contactName ?? base.contactName,
-    website: detail.website ?? base.website,
+    website: detail.website ?? detail.Website ?? base.website,
+    priceListUrl:
+      detail.priceListUrl ?? detail.PriceListUrl ?? base.priceListUrl,
     country: detail.country ?? base.country,
     city: detail.city ?? base.city,
     currency: detail.currency ?? base.currency,

@@ -23,31 +23,116 @@ public class ShopifyProductCatalogService
 
         do
         {
-            using JsonDocument json = await _graphql.ExecuteAsync(
+            ShopifyCatalogPage page = await FetchProductsPageAsync(
                 shop,
                 accessToken,
-                ShopifyGraphqlQueries.ProductsPage,
-                new { after = afterCursor }
-            );
-            JsonElement products = json.RootElement.GetProperty( "data" ).GetProperty( "products" );
-            JsonElement edges = products.GetProperty( "edges" );
-
-            foreach (JsonElement edge in edges.EnumerateArray())
-            {
-                ShopifyCatalogProduct? product = ParseProductNode( edge.GetProperty( "node" ) );
-                if (product is not null)
-                {
-                    result.Add( product );
-                }
-            }
-
-            JsonElement pageInfo = products.GetProperty( "pageInfo" );
-            hasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean();
-            afterCursor = pageInfo.GetProperty( "endCursor" ).GetString();
+                first: 250,
+                afterCursor,
+                query: null );
+            result.AddRange( page.Products );
+            hasNextPage = page.HasNextPage;
+            afterCursor = page.EndCursor;
         } while (hasNextPage && !string.IsNullOrWhiteSpace( afterCursor ));
 
         return result
             .OrderBy( p => p.Title, StringComparer.OrdinalIgnoreCase )
+            .ToList();
+    }
+
+    public async Task<ShopifyCatalogPage> FetchProductsPageAsync(
+        string shop,
+        string accessToken,
+        int first,
+        string? afterCursor,
+        string? query )
+    {
+        int pageSize = Math.Clamp( first, 1, 100 );
+        using JsonDocument json = await _graphql.ExecuteAsync(
+            shop,
+            accessToken,
+            ShopifyGraphqlQueries.ProductsCatalogPage,
+            new
+            {
+                first = pageSize,
+                after = afterCursor,
+                query = string.IsNullOrWhiteSpace( query ) ? null : query.Trim(),
+            } );
+
+        JsonElement products = json.RootElement.GetProperty( "data" ).GetProperty( "products" );
+        JsonElement edges = products.GetProperty( "edges" );
+        List<ShopifyCatalogProduct> list = new();
+        foreach (JsonElement edge in edges.EnumerateArray())
+        {
+            ShopifyCatalogProduct? product = ParseProductNode( edge.GetProperty( "node" ) );
+            if (product is not null)
+            {
+                list.Add( product );
+            }
+        }
+
+        JsonElement pageInfo = products.GetProperty( "pageInfo" );
+        return new ShopifyCatalogPage
+        {
+            Products = list,
+            HasNextPage = pageInfo.GetProperty( "hasNextPage" ).GetBoolean(),
+            EndCursor = pageInfo.GetProperty( "endCursor" ).GetString(),
+        };
+    }
+
+    public async Task<IReadOnlyList<string>> FetchProductTypesAsync( string shop, string accessToken )
+    {
+        using JsonDocument json = await _graphql.ExecuteAsync(
+            shop,
+            accessToken,
+            ShopifyGraphqlQueries.ProductTypes,
+            variables: null );
+
+        List<string> types = new();
+        if (!json.RootElement.TryGetProperty( "data", out JsonElement data )
+            || !data.TryGetProperty( "productTypes", out JsonElement productTypes ))
+        {
+            return types;
+        }
+
+        if (productTypes.TryGetProperty( "nodes", out JsonElement nodes )
+            && nodes.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement node in nodes.EnumerateArray())
+            {
+                if (node.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                string value = (node.GetString() ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace( value ))
+                {
+                    types.Add( value );
+                }
+            }
+        }
+        else if (productTypes.TryGetProperty( "edges", out JsonElement edges )
+                 && edges.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement edge in edges.EnumerateArray())
+            {
+                if (!edge.TryGetProperty( "node", out JsonElement node )
+                    || node.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                string value = (node.GetString() ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace( value ))
+                {
+                    types.Add( value );
+                }
+            }
+        }
+
+        return types
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .OrderBy( t => t, StringComparer.OrdinalIgnoreCase )
             .ToList();
     }
 

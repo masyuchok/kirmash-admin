@@ -345,6 +345,79 @@ public sealed class KirmaBukinistkaOfferService
         await _db.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Kirma closes an already accepted Buk→Kirma offer whose Shopify product/variant
+    /// no longer exists (deleted card). No inventory is touched — there is nothing
+    /// left in Shopify to adjust. Refuses when the Shopify product is still alive,
+    /// because then stock would have to be reversed manually first.
+    /// </summary>
+    public async Task CloseOrphanedReceivedAsync( int id, CancellationToken cancellationToken = default )
+    {
+        RequireKirmaSession();
+        KirmaBukinistkaOffer? row = await _db.KirmaBukinistkaOffers
+            .FirstOrDefaultAsync( x => x.Id == id, cancellationToken );
+        if (row is null)
+        {
+            throw new InvalidOperationException( "Прапанова не знойдзена." );
+        }
+
+        if (!string.Equals(
+                NormalizeDirection( row.Direction ),
+                KirmaBukinistkaOfferDirections.BukinistkaToKirma,
+                StringComparison.OrdinalIgnoreCase ))
+        {
+            throw new InvalidOperationException( "Гэтая прапанова не ад Букіністкі." );
+        }
+
+        string status = NormalizeStatus( row.Status );
+        if (!string.Equals( status, KirmaBukinistkaOfferStatuses.Accepted, StringComparison.OrdinalIgnoreCase ))
+        {
+            throw new InvalidOperationException( "Закрыць можна толькі прынятую прапанову." );
+        }
+
+        string shop = (_config["Shopify:Shop"] ?? string.Empty).Trim();
+        string accessToken = (_config["Shopify:AccessToken"] ?? string.Empty).Trim();
+        if (ShopifySessionReader.TryGet( _http, out ShopifySession session ))
+        {
+            if (!string.IsNullOrWhiteSpace( session.Shop )) shop = session.Shop.Trim();
+            if (!string.IsNullOrWhiteSpace( session.AccessToken )) accessToken = session.AccessToken.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace( shop ) || string.IsNullOrWhiteSpace( accessToken ))
+        {
+            throw new InvalidOperationException( "Shopify Shop/AccessToken не наладжаныя." );
+        }
+
+        if (!string.IsNullOrWhiteSpace( row.ShopifyProductId ))
+        {
+            string product = ShopifyIds.NormalizeProductId( row.ShopifyProductId.Trim() );
+            string variant = string.IsNullOrWhiteSpace( row.ShopifyVariantId )
+                ? string.Empty
+                : ShopifyIds.NormalizeVariantId( row.ShopifyVariantId.Trim() );
+            string key = string.IsNullOrWhiteSpace( variant ) ? product : $"{product}::{variant}";
+
+            bool alive = await _shopifyInventory.ProductKeyExistsAsync( shop, accessToken, key );
+            if (alive)
+            {
+                throw new InvalidOperationException(
+                    "Shopify-картка гэтай прапановы яшчэ існуе. Закрыць можна толькі прапанову, " +
+                    "чыя картка Shopify выдаленая." );
+            }
+        }
+
+        bool hasSales = await _db.KirmaBukinistkaPosSales
+            .AsNoTracking()
+            .AnyAsync( x => x.OfferId == row.Id && !x.IsReversed && !x.IsReturn && x.Quantity > 0, cancellationToken );
+        if (hasSales)
+        {
+            throw new InvalidOperationException(
+                "Па гэтай прапанове ўжо ёсць запісаныя продажы. Закрыць нельга." );
+        }
+
+        row.Status = KirmaBukinistkaOfferStatuses.Rejected;
+        await _db.SaveChangesAsync( cancellationToken );
+    }
+
     public async Task CancelSentByBukinistkaAsync( int id, HttpRequest request )
     {
         if (BukinistkaJwtAuthentication.TryValidateCookie( request, _config ) is null)

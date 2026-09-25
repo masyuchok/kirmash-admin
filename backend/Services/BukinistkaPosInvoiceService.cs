@@ -95,6 +95,25 @@ public sealed class BukinistkaPosInvoiceService
             .Where( o => offerIds.Contains( o.Id ) )
             .ToDictionaryAsync( o => o.Id, cancellationToken );
 
+        foreach (KirmaBukinistkaPosSale sale in sales)
+        {
+            if (!sale.OfferId.HasValue
+                || !offersById.TryGetValue( sale.OfferId.Value, out KirmaBukinistkaOffer? offer ))
+            {
+                continue;
+            }
+
+            if (string.Equals(
+                    offer.Direction,
+                    KirmaBukinistkaOfferDirections.BukinistkaToKirma,
+                    StringComparison.OrdinalIgnoreCase )
+                && !offer.IsAssignment)
+            {
+                throw new InvalidOperationException(
+                    $"Продаж «{sale.ProductName}» належыць Букіністцы і не можа быць у фактуры Kirma." );
+            }
+        }
+
         List<VatReportForeignRowItemCreateRequest> items = new();
         foreach (KirmaBukinistkaPosSale sale in sales.OrderBy( s => s.SoldAtUtc ).ThenBy( s => s.Id ))
         {

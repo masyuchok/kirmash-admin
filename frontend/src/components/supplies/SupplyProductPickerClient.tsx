@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { FiExternalLink, FiRefreshCw, FiSearch, FiX } from 'react-icons/fi';
 import { useTopbar } from '@/components/topbar/TopbarContext';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
-import { fetchProductsWithSuppliers } from '@/lib/api/products';
+import BookAiLookupModal from '@/components/supplies/BookAiLookupModal';
+import { fetchProductsCatalogPage } from '@/lib/api/products';
 import { fetchSupplierProductBalances } from '@/lib/api/supplies';
 import {
   formatProductNameWithAuthor,
@@ -74,14 +75,21 @@ export default function SupplyProductPickerClient({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [typeOptions, setTypeOptions] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>(selectedProductIds);
   const [draftQuantities, setDraftQuantities] = useState<
     Record<string, string>
   >(selectedProductQuantities);
-  const [page, setPage] = useState(1);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
+  const [hasNextPage, setHasNextPage] = useState(false);
+  const [endCursor, setEndCursor] = useState<string | null>(null);
+  const [productCreateAdminUrl, setProductCreateAdminUrl] = useState('');
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
+  const [newProductOpen, setNewProductOpen] = useState(false);
   const [menuMounted, setMenuMounted] = useState(false);
   const [typeMenuPosition, setTypeMenuPosition] = useState({ top: 0, left: 0 });
   const [typeTriggerEl, setTypeTriggerEl] = useState<HTMLButtonElement | null>(
@@ -91,6 +99,8 @@ export default function SupplyProductPickerClient({
   const [supplierNetBalances, setSupplierNetBalances] = useState<
     Record<string, number>
   >({});
+  const requestSeq = useRef(0);
+  const typesLoadedRef = useRef(false);
 
   const getMaxReturnableQuantity = (lineKey: string): number =>
     Math.max(0, supplierNetBalances[lineKey] ?? 0);
@@ -104,32 +114,71 @@ export default function SupplyProductPickerClient({
     };
   }, [setTopbarButtons, setTopbarPage]);
 
-  const loadProducts = useCallback(async (forceFresh = false) => {
-    if (forceFresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-    setError(null);
-    try {
-      const data = await fetchProductsWithSuppliers(forceFresh);
-      setRows(data);
-    } catch (err: unknown) {
-      setError(
-        err instanceof Error ? err.message : 'Памылка загрузкі прадуктаў'
-      );
-    } finally {
-      if (forceFresh) {
-        setRefreshing(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  const loadPage = useCallback(
+    async (options: {
+      after: string | null;
+      pageIndex: number;
+      forceFresh?: boolean;
+      resetStack?: boolean;
+    }) => {
+      const seq = ++requestSeq.current;
+      if (options.forceFresh) {
+        setRefreshing(true);
       } else {
-        setLoading(false);
+        setLoading(true);
       }
-    }
-  }, []);
+      setError(null);
+      try {
+        const data = await fetchProductsCatalogPage({
+          search: searchQuery,
+          types: selectedTypes,
+          after: options.after,
+          pageSize,
+          includeTypes: !typesLoadedRef.current,
+        });
+        if (seq !== requestSeq.current) return;
+
+        setRows(data.items);
+        setHasNextPage(data.hasNextPage);
+        setEndCursor(data.endCursor);
+        setPageIndex(options.pageIndex);
+        if (options.resetStack) {
+          setCursorStack([null]);
+        }
+        if (data.productCreateAdminUrl) {
+          setProductCreateAdminUrl(data.productCreateAdminUrl);
+        }
+        if (data.productTypes.length > 0) {
+          typesLoadedRef.current = true;
+          setTypeOptions(data.productTypes);
+        }
+      } catch (err: unknown) {
+        if (seq !== requestSeq.current) return;
+        setError(
+          err instanceof Error ? err.message : 'Памылка загрузкі прадуктаў'
+        );
+      } finally {
+        if (seq !== requestSeq.current) return;
+        if (options.forceFresh) {
+          setRefreshing(false);
+        } else {
+          setLoading(false);
+        }
+      }
+    },
+    [searchQuery, selectedTypes, pageSize]
+  );
 
   useEffect(() => {
-    void loadProducts(false);
-  }, [loadProducts]);
+    void loadPage({ after: null, pageIndex: 0, resetStack: true });
+  }, [loadPage]);
 
   useEffect(() => {
     const supplierIdNumber = Number(supplierId);
@@ -142,10 +191,10 @@ export default function SupplyProductPickerClient({
       supplierIdNumber,
       supplyId ? Number(supplyId) : undefined
     )
-      .then((rows) => {
+      .then((balanceRows) => {
         if (cancelled) return;
         const map: Record<string, number> = {};
-        for (const row of rows) {
+        for (const row of balanceRows) {
           const key = makeSupplyLineKey(
             row.shopifyProductId,
             row.shopifyVariantId || undefined
@@ -162,42 +211,7 @@ export default function SupplyProductPickerClient({
     };
   }, [supplierId, supplyId]);
 
-  const typeOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          rows.map((r) => r.productType).filter((t) => t.trim().length > 0)
-        )
-      ).sort((a, b) => a.localeCompare(b, 'be')),
-    [rows]
-  );
-
-  const visibleRows = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    const byType =
-      selectedTypes.length === 0
-        ? rows
-        : rows.filter((r) => selectedTypes.includes(r.productType));
-    return q
-      ? byType.filter((r) => r.productName.toLowerCase().includes(q))
-      : byType;
-  }, [rows, selectedTypes, searchQuery]);
-
-  const pickerLines = useMemo(
-    () => expandPickerLines(visibleRows),
-    [visibleRows]
-  );
-
-  const totalPages = Math.max(1, Math.ceil(pickerLines.length / pageSize));
-  const pagedLines = useMemo(() => {
-    const safePage = Math.min(page, totalPages);
-    const start = (safePage - 1) * pageSize;
-    return pickerLines.slice(start, start + pageSize);
-  }, [pickerLines, page, totalPages]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [searchQuery, selectedTypes]);
+  const pickerLines = useMemo(() => expandPickerLines(rows), [rows]);
 
   const toggleType = (type: string) => {
     setSelectedTypes((prev) =>
@@ -209,7 +223,7 @@ export default function SupplyProductPickerClient({
     if (!typeTriggerEl) return;
     const rect = typeTriggerEl.getBoundingClientRect();
     const viewportPadding = 8;
-    const menuWidth = 256; // w-64
+    const menuWidth = 256;
     const estimatedMenuHeight = 280;
 
     const maxLeft = window.innerWidth - menuWidth - viewportPadding;
@@ -291,6 +305,10 @@ export default function SupplyProductPickerClient({
   };
 
   const openShopifyCreate = () => {
+    if (productCreateAdminUrl) {
+      window.open(productCreateAdminUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const from = rows.find((r) => r.productAdminUrl)?.productAdminUrl;
     if (!from) return;
     const url = new URL(from);
@@ -299,12 +317,59 @@ export default function SupplyProductPickerClient({
     window.open(createUrl, '_blank', 'noopener,noreferrer');
   };
 
+  const handleAiProductCreated = async (created: {
+    shopifyProductId: string;
+    shopifyVariantId: string;
+    title: string;
+  }) => {
+    setError(null);
+    const lineKey = makeSupplyLineKey(
+      created.shopifyProductId,
+      created.shopifyVariantId
+    );
+    setSelectedIds((prev) =>
+      prev.includes(lineKey) ? prev : [...prev, lineKey]
+    );
+    setDraftQuantities((prev) =>
+      prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
+    );
+    try {
+      await loadPage({
+        after: cursorStack[pageIndex] ?? null,
+        pageIndex,
+        forceFresh: true,
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Тавар створаны, але не ўдалося абнавіць спіс. Націсніце абнавіць.'
+      );
+    }
+  };
+
+  const goPrevPage = () => {
+    if (pageIndex <= 0 || loading || refreshing) return;
+    const prevAfter = cursorStack[pageIndex - 1] ?? null;
+    void loadPage({ after: prevAfter, pageIndex: pageIndex - 1 });
+  };
+
+  const goNextPage = () => {
+    if (!hasNextPage || !endCursor || loading || refreshing) return;
+    setCursorStack((prev) => {
+      const next = prev.slice(0, pageIndex + 1);
+      next.push(endCursor);
+      return next;
+    });
+    void loadPage({ after: endCursor, pageIndex: pageIndex + 1 });
+  };
+
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={openShopifyCreate}
+          onClick={() => setNewProductOpen(true)}
           className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
         >
           Дадаць новы тавар
@@ -317,6 +382,16 @@ export default function SupplyProductPickerClient({
           Дадаць выбраныя ({selectedIds.length})
         </button>
       </div>
+
+      <BookAiLookupModal
+        open={newProductOpen}
+        supplierId={supplierId}
+        onClose={() => setNewProductOpen(false)}
+        onOpenShopifyManual={openShopifyCreate}
+        onCreated={(created) => {
+          void handleAiProductCreated(created);
+        }}
+      />
 
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -331,15 +406,18 @@ export default function SupplyProductPickerClient({
               <FiSearch className="size-4 shrink-0 text-gray-400" />
               <input
                 type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(readFieldValue(e))}
-                placeholder="Пошук па назве..."
+                value={searchInput}
+                onChange={(e) => setSearchInput(readFieldValue(e))}
+                placeholder="Пошук па назве (па ўсім каталогу)..."
                 className="w-full border-0 bg-transparent text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none"
               />
-              {searchQuery.trim() && (
+              {searchInput.trim() && (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
+                  onClick={() => {
+                    setSearchInput('');
+                    setSearchQuery('');
+                  }}
                   className="text-gray-400 hover:text-gray-600"
                 >
                   <FiX className="size-4" />
@@ -360,7 +438,13 @@ export default function SupplyProductPickerClient({
             </div>
             <button
               type="button"
-              onClick={() => void loadProducts(true)}
+              onClick={() =>
+                void loadPage({
+                  after: cursorStack[pageIndex] ?? null,
+                  pageIndex,
+                  forceFresh: true,
+                })
+              }
               disabled={loading || refreshing}
               className="inline-flex size-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-700 shadow-sm transition hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-60"
               aria-label="Абнавіць спіс тавараў"
@@ -381,6 +465,10 @@ export default function SupplyProductPickerClient({
             className="mx-4 my-4 rounded-xl border border-gray-100 bg-gray-50/50 py-12"
             sizeClassName="size-7 border-[3px]"
           />
+        ) : pickerLines.length === 0 ? (
+          <p className="px-6 py-10 text-center text-sm text-gray-500">
+            Нічога не знойдзена. Паспрабуйце іншы пошук або дадайце новы тавар.
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse text-left text-sm">
@@ -393,7 +481,7 @@ export default function SupplyProductPickerClient({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {pagedLines.map(({ product: row, variant, lineKey }) => (
+                {pickerLines.map(({ product: row, variant, lineKey }) => (
                   <tr key={lineKey} className="transition hover:bg-gray-50/80">
                     <td className="px-4 py-3.5">
                       <input
@@ -409,54 +497,58 @@ export default function SupplyProductPickerClient({
                           <a
                             href={row.mainImageUrl}
                             target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex overflow-hidden rounded-md border border-gray-200 bg-white"
+                            rel="noreferrer"
+                            className="shrink-0"
                           >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
                               src={row.mainImageUrl}
-                              alt={row.productName}
-                              className="h-12 w-8 object-cover object-center"
-                              loading="lazy"
+                              alt=""
+                              className="size-12 rounded-lg object-cover"
                             />
                           </a>
-                        ) : (
-                          <div className="h-12 w-8 rounded-md border border-gray-200 bg-gray-100" />
-                        )}
-                        <div className="space-y-1">
-                          <a
-                            href={row.productAdminUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 hover:underline"
-                          >
-                            {formatProductNameWithAuthor(
-                              row.productName,
-                              row.productAuthor
-                            )}
-                            <FiExternalLink className="size-3.5 text-gray-500" />
-                          </a>
-                          {variant?.variantName && (
-                            <p className="text-xs font-normal text-gray-500">
-                              {variant.variantName}
+                        ) : null}
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span>
+                              {formatProductNameWithAuthor(
+                                row.productName,
+                                row.productAuthor
+                              )}
+                              {variant?.variantName
+                                ? ` · ${variant.variantName}`
+                                : ''}
+                            </span>
+                            {row.productAdminUrl ? (
+                              <a
+                                href={row.productAdminUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex text-gray-400 hover:text-primary"
+                                title="Адкрыць у Shopify"
+                              >
+                                <FiExternalLink className="size-3.5" />
+                              </a>
+                            ) : null}
+                          </div>
+                          {row.productType ? (
+                            <p className="mt-0.5 text-xs font-normal text-gray-500">
+                              {row.productType}
                             </p>
-                          )}
+                          ) : null}
                         </div>
                       </div>
                     </td>
                     <td className="px-4 py-3.5 text-center">
                       {(() => {
+                        const raw = draftQuantities[lineKey] ?? '';
+                        const parsed = Number(raw);
+                        const isReturn = Number.isFinite(parsed) && parsed < 0;
                         const maxReturnable = getMaxReturnableQuantity(lineKey);
-                        const quantityValue = Number(
-                          draftQuantities[lineKey] ?? ''
-                        );
-                        const isReturn =
-                          Number.isFinite(quantityValue) && quantityValue < 0;
                         return (
                           <input
                             type="number"
-                            min={maxReturnable > 0 ? -maxReturnable : 0}
-                            step="1"
-                            value={draftQuantities[lineKey] ?? ''}
+                            value={raw}
                             onChange={(e) =>
                               updateQuantity(lineKey, readFieldValue(e))
                             }
@@ -494,31 +586,31 @@ export default function SupplyProductPickerClient({
             </table>
           </div>
         )}
-        {pickerLines.length > 0 && (
-          <div className="flex items-center justify-between border-t border-gray-100 px-6 py-3">
-            <p className="text-sm text-gray-500">
-              Старонка {Math.min(page, totalPages)} з {totalPages}
-            </p>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-              >
-                Назад
-              </button>
-              <button
-                type="button"
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-              >
-                Далей
-              </button>
-            </div>
+        <div className="flex items-center justify-between border-t border-gray-100 px-6 py-3">
+          <p className="text-sm text-gray-500">
+            Старонка {pageIndex + 1}
+            {hasNextPage ? '+' : ''}
+            {searchQuery ? ` · пошук: «${searchQuery}»` : ''}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+              onClick={goPrevPage}
+              disabled={pageIndex <= 0 || loading || refreshing}
+            >
+              Назад
+            </button>
+            <button
+              type="button"
+              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+              onClick={goNextPage}
+              disabled={!hasNextPage || loading || refreshing}
+            >
+              Далей
+            </button>
           </div>
-        )}
+        </div>
       </div>
       {menuMounted &&
         typeMenuOpen &&
@@ -541,17 +633,15 @@ export default function SupplyProductPickerClient({
                 typeOptions.map((type) => (
                   <label
                     key={type}
-                    className="flex items-center gap-2 text-sm font-normal normal-case text-gray-700"
+                    className="flex cursor-pointer items-center gap-2 text-sm text-gray-700"
                   >
                     <input
                       type="checkbox"
-                      className="size-4 rounded border-gray-300 accent-primary focus:ring-primary"
+                      className="size-4 rounded border-gray-300 accent-primary"
                       checked={selectedTypes.includes(type)}
                       onChange={() => toggleType(type)}
                     />
-                    <span className="truncate" title={type}>
-                      {type}
-                    </span>
+                    <span className="truncate">{type}</span>
                   </label>
                 ))
               )}

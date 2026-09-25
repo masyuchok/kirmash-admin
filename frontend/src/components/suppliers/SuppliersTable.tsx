@@ -44,6 +44,7 @@ const SuppliersTable = ({
             <th className="whitespace-nowrap px-6 py-3.5">Назва</th>
             <th className="whitespace-nowrap px-4 py-3.5">Telegram</th>
             <th className="whitespace-nowrap px-4 py-3.5">Сайт</th>
+            <th className="whitespace-nowrap px-4 py-3.5">Прайс</th>
             <th className="whitespace-nowrap px-4 py-3.5">Краіна</th>
             <th className="whitespace-nowrap px-4 py-3.5">Горад</th>
             <th className="whitespace-nowrap px-4 py-3.5">VAT</th>
@@ -65,15 +66,34 @@ const SuppliersTable = ({
                 {s.telegram}
               </td>
               <td className="max-w-[14rem] px-4 py-3.5">
-                <a
-                  href={s.website}
-                  className="block truncate text-primary hover:text-primary-hover hover:underline"
-                  title={s.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {s.website}
-                </a>
+                {s.website ? (
+                  <a
+                    href={s.website}
+                    className="block truncate text-primary hover:text-primary-hover hover:underline"
+                    title={s.website}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {s.website}
+                  </a>
+                ) : (
+                  <span className="text-gray-400">—</span>
+                )}
+              </td>
+              <td className="max-w-[14rem] px-4 py-3.5">
+                {s.priceListUrl ? (
+                  <a
+                    href={s.priceListUrl}
+                    className="block truncate text-primary hover:text-primary-hover hover:underline"
+                    title={s.priceListUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {s.priceListUrl}
+                  </a>
+                ) : (
+                  <span className="text-gray-400">—</span>
+                )}
               </td>
               <td className="whitespace-nowrap px-4 py-3.5 text-gray-600">
                 {s.country}

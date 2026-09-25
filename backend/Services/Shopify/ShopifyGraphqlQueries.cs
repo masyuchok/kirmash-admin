@@ -197,4 +197,74 @@ public static class ShopifyGraphqlQueries
           }
         }
         """;
+
+    public const string ProductsCatalogPage = """
+        query ProductsCatalogPage($first: Int!, $after: String, $query: String) {
+          products(first: $first, after: $after, query: $query, sortKey: TITLE) {
+            edges {
+              cursor
+              node {
+                id
+                legacyResourceId
+                title
+                handle
+                productType
+                vendor
+                tags
+                totalInventory
+                authorMetafield: metafield(namespace: "custom", key: "author") {
+                  value
+                }
+                autorMetafield: metafield(namespace: "custom", key: "autor") {
+                  value
+                }
+                isbnMetafield: metafield(namespace: "custom", key: "isbn") {
+                  value
+                }
+                metafields(first: 25) {
+                  edges {
+                    node {
+                      namespace
+                      key
+                      value
+                    }
+                  }
+                }
+                variants(first: 100) {
+                  edges {
+                    node {
+                      id
+                      title
+                      barcode
+                      price
+                      inventoryQuantity
+                      selectedOptions {
+                        name
+                        value
+                      }
+                    }
+                  }
+                }
+                featuredImage {
+                  url
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+        """;
+
+    public const string ProductTypes = """
+        query ProductTypes {
+          productTypes(first: 250) {
+            edges {
+              node
+            }
+          }
+        }
+        """;
 }

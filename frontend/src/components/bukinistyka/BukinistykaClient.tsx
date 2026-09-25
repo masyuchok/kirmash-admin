@@ -20,6 +20,7 @@ import {
   fetchKirmaSentBukinistkaOffers,
   notifyBukinistkaOffersChanged,
   rejectBukinistkaOfferByKirma,
+  closeOrphanedBukinistkaOfferByKirma,
   updateKirmaBukinistkaOffer,
   updateOfferShopifySalePriceByKirma,
   type KirmaBukinistkaOffer,
@@ -106,6 +107,7 @@ function OffersTable({
   onDeleteRejected,
   onAccept,
   onReject,
+  onCloseOrphaned,
   onApplyPriceChange,
   showShopifyPriceColumn,
   showBukinistkaSalePriceColumn,
@@ -121,6 +123,7 @@ function OffersTable({
   onDeleteRejected?: (row: KirmaBukinistkaOffer) => void;
   onAccept?: (row: KirmaBukinistkaOffer) => void;
   onReject?: (row: KirmaBukinistkaOffer) => void;
+  onCloseOrphaned?: (row: KirmaBukinistkaOffer) => void;
   onApplyPriceChange?: (row: KirmaBukinistkaOffer) => void;
   showShopifyPriceColumn?: boolean;
   showBukinistkaSalePriceColumn?: boolean;
@@ -145,6 +148,7 @@ function OffersTable({
       onDeleteRejected ||
       onAccept ||
       onReject ||
+      onCloseOrphaned ||
       onApplyPriceChange
   );
 
@@ -401,8 +405,24 @@ function OffersTable({
                           >
                             <FiEdit2 className="size-3.5" aria-hidden />
                           </button>
-                        ) : !priceChange ? (
+                        ) : !priceChange && !onCloseOrphaned ? (
                           <span className="text-xs text-gray-400">—</span>
+                        ) : null}
+                        {accepted && onCloseOrphaned ? (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => onCloseOrphaned(row)}
+                            className="inline-flex size-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 transition hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                            aria-label="Закрыць прапанову (Shopify-картка выдаленая)"
+                            title="Закрыць прапанову — толькі калі яе Shopify-картка выдаленая"
+                          >
+                            {busy ? (
+                              <span className="size-3.5 animate-spin rounded-full border-2 border-red-200 border-t-red-600" />
+                            ) : (
+                              <FiX className="size-3.5" aria-hidden />
+                            )}
+                          </button>
                         ) : null}
                       </div>
                     )}
@@ -849,6 +869,32 @@ export default function BukinistykaClient() {
     }
   };
 
+  const handleCloseOrphanedReceived = async (row: KirmaBukinistkaOffer) => {
+    const ok = window.confirm(
+      `Закрыць прапанову «${row.productName}» (#${row.id})?\n\n` +
+        'Гэта магчыма толькі калі яе Shopify-картка выдаленая. ' +
+        'Склад не зменіцца; прапанова атрымае статус «Адхілена».'
+    );
+    if (!ok) return;
+    setBusyId(row.id);
+    setError(null);
+    try {
+      await closeOrphanedBukinistkaOfferByKirma(row.id);
+      setReceivedOffers((prev) =>
+        prev.map((item) =>
+          item.id === row.id ? { ...item, status: 'Rejected' } : item
+        )
+      );
+      notifyBukinistkaOffersChanged();
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error ? err.message : 'Не ўдалося закрыць прапанову.'
+      );
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const handleAcceptReceived = async (input: {
     shopifyProductId: string;
     shopifyVariantId?: string;
@@ -1148,6 +1194,9 @@ export default function BukinistykaClient() {
                   }}
                   onReject={(row) => {
                     void handleRejectReceived(row);
+                  }}
+                  onCloseOrphaned={(row) => {
+                    void handleCloseOrphanedReceived(row);
                   }}
                   onApplyPriceChange={(row) => {
                     void handleApplyPriceChange(row);

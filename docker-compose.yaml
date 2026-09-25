@@ -28,6 +28,13 @@ services:
       - Odoo__PosSyncIntervalMinutes=${ODOO_POS_SYNC_INTERVAL_MINUTES:-10}
       - Groq__ApiKey=${GROQ_API_KEY:-}
       - Groq__Model=${GROQ_MODEL:-openai/gpt-oss-20b}
+      - Groq__VisionModel=${GROQ_VISION_MODEL:-qwen/qwen3.8-27b}
+      - Tavily__ApiKey=${TAVILY_API_KEY:-}
+      - BookLookup__SerpApiKey=${SERPAPI_API_KEY:-}
+      - BookLookup__MaxSupplierSearches=${BOOK_LOOKUP_MAX_SUPPLIER_SEARCHES:-4}
+      - BookLookup__MaxWebSearches=${BOOK_LOOKUP_MAX_WEB_SEARCHES:-3}
+      - BookLookup__MaxPresentedHits=${BOOK_LOOKUP_MAX_PRESENTED_HITS:-6}
+      - BookLookup__AllowWebFallback=${BOOK_LOOKUP_ALLOW_WEB_FALLBACK:-false}
     depends_on:
       db:
         condition: service_healthy

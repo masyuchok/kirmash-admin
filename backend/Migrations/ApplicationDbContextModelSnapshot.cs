@@ -636,6 +636,9 @@ namespace backend.Migrations
                     b.Property<string>("Phone")
                         .HasColumnType("text");
 
+                    b.Property<string>("PriceListUrl")
+                        .HasColumnType("text");
+
                     b.Property<string>("TGContact")
                         .HasColumnType("text");
 

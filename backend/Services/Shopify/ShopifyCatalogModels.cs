@@ -15,3 +15,10 @@ public sealed class ShopifyCatalogProduct
     public string? ImageUrl { get; init; }
     public List<ProductVariantItem> Variants { get; init; } = [];
 }
+
+public sealed class ShopifyCatalogPage
+{
+    public List<ShopifyCatalogProduct> Products { get; init; } = [];
+    public bool HasNextPage { get; init; }
+    public string? EndCursor { get; init; }
+}

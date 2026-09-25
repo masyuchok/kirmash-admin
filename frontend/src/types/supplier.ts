@@ -4,6 +4,7 @@ export type Supplier = {
   name: string;
   telegram: string;
   website: string;
+  priceListUrl: string;
   country: string;
   city: string;
   isVatPayer: boolean;

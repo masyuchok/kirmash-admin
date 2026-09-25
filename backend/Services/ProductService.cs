@@ -40,6 +40,103 @@ public class ProductService
             "Няма Shopify-кантэксту для загрузкі прадуктаў."
         );
 
+        SupplyEnrichmentMaps maps = await LoadSupplyEnrichmentMapsAsync();
+        List<ShopifyCatalogProduct> catalogProducts =
+            await _catalog.FetchAllProductsAsync( session.Shop, session.AccessToken );
+
+        return MapCatalogProducts( catalogProducts, maps, session.Shop );
+    }
+
+    public async Task<ProductCatalogPageResponse> GetProductsCatalogPageAsync(
+        string? search,
+        IReadOnlyList<string>? productTypes,
+        string? after,
+        int pageSize,
+        bool includeProductTypes )
+    {
+        ShopifySession session = ShopifySessionReader.Require(
+            _httpContextAccessor,
+            "Няма Shopify-кантэксту для загрузкі прадуктаў."
+        );
+
+        string? query = BuildShopifyCatalogQuery( search, productTypes );
+        ShopifyCatalogPage page = await _catalog.FetchProductsPageAsync(
+            session.Shop,
+            session.AccessToken,
+            pageSize,
+            string.IsNullOrWhiteSpace( after ) ? null : after.Trim(),
+            query );
+
+        SupplyEnrichmentMaps maps = await LoadSupplyEnrichmentMapsAsync();
+        List<ProductWithSuppliersListItem> items = MapCatalogProducts( page.Products, maps, session.Shop );
+
+        List<string> types = [];
+        if (includeProductTypes)
+        {
+            types = (await _catalog.FetchProductTypesAsync( session.Shop, session.AccessToken )).ToList();
+        }
+
+        return new ProductCatalogPageResponse
+        {
+            Items = items,
+            HasNextPage = page.HasNextPage,
+            EndCursor = page.EndCursor,
+            ProductCreateAdminUrl = BuildProductCreateAdminUrl( session.Shop ),
+            ProductTypes = types,
+        };
+    }
+
+    private static string? BuildShopifyCatalogQuery(
+        string? search,
+        IReadOnlyList<string>? productTypes )
+    {
+        List<string> parts = new();
+        string? trimmedSearch = string.IsNullOrWhiteSpace( search ) ? null : search.Trim();
+        if (!string.IsNullOrWhiteSpace( trimmedSearch ))
+        {
+            string escaped = trimmedSearch.Replace( "\"", string.Empty, StringComparison.Ordinal );
+            // Search across catalog fields; wildcard helps partial title matches.
+            parts.Add( $"title:*{escaped}*" );
+        }
+
+        if (productTypes is { Count: > 0 })
+        {
+            List<string> typeClauses = productTypes
+                .Where( t => !string.IsNullOrWhiteSpace( t ) )
+                .Select( t => t.Trim().Replace( "\"", string.Empty, StringComparison.Ordinal ) )
+                .Where( t => t.Length > 0 )
+                .Select( t => $"product_type:\"{t}\"" )
+                .ToList();
+            if (typeClauses.Count == 1)
+            {
+                parts.Add( typeClauses[0] );
+            }
+            else if (typeClauses.Count > 1)
+            {
+                parts.Add( "(" + string.Join( " OR ", typeClauses ) + ")" );
+            }
+        }
+
+        return parts.Count == 0 ? null : string.Join( " AND ", parts );
+    }
+
+    private static string BuildProductCreateAdminUrl( string shop )
+    {
+        string storeSlug = shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase );
+        return $"https://admin.shopify.com/store/{storeSlug}/products/new";
+    }
+
+    private sealed class SupplyEnrichmentMaps
+    {
+        public required Dictionary<string, HashSet<string>> SuppliersByProductId { get; init; }
+        public required Dictionary<string, List<ProductSupplierPriceItem>> SupplierPricesByProductId { get; init; }
+        public required Dictionary<string, string> LastSyncedSupplierByProductId { get; init; }
+        public required Dictionary<string, List<ProductUnsyncedSupplierItem>> UnsyncedSuppliersByProductId { get; init; }
+        public required Dictionary<string, int> UnsyncedQuantityByProductId { get; init; }
+    }
+
+    private async Task<SupplyEnrichmentMaps> LoadSupplyEnrichmentMapsAsync()
+    {
         List<SupplyProduct> supplyProducts = await _db.SupplyProducts
             .AsNoTracking()
             .Include( sp => sp.Supply )
@@ -70,8 +167,6 @@ public class ProductService
                     )
                     .Select( supplierGroup =>
                     {
-                        // Prefer the latest non-zero prices so a draft/empty line
-                        // on the newest supply does not wipe the last set cost.
                         List<SupplyProduct> ordered = supplierGroup
                             .OrderByDescending( sp => sp.Supply.Date )
                             .ThenByDescending( sp => sp.Supply.Id )
@@ -142,22 +237,41 @@ public class ProductService
                 g => g.Sum( sp => sp.Quantity )
             );
 
-        List<ShopifyCatalogProduct> catalogProducts =
-            await _catalog.FetchAllProductsAsync( session.Shop, session.AccessToken );
+        return new SupplyEnrichmentMaps
+        {
+            SuppliersByProductId = suppliersByProductId,
+            SupplierPricesByProductId = supplierPricesByProductId,
+            LastSyncedSupplierByProductId = lastSyncedSupplierByProductId,
+            UnsyncedSuppliersByProductId = unsyncedSuppliersByProductId,
+            UnsyncedQuantityByProductId = unsyncedQuantityByProductId,
+        };
+    }
 
-        string storeSlug = session.Shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase );
+    private static List<ProductWithSuppliersListItem> MapCatalogProducts(
+        IReadOnlyList<ShopifyCatalogProduct> catalogProducts,
+        SupplyEnrichmentMaps maps,
+        string shop )
+    {
+        string storeSlug = shop.Replace( ".myshopify.com", "", StringComparison.OrdinalIgnoreCase );
         List<ProductWithSuppliersListItem> result = new();
 
         foreach (ShopifyCatalogProduct product in catalogProducts)
         {
-            suppliersByProductId.TryGetValue( product.ProductId, out HashSet<string>? suppliersSet );
+            maps.SuppliersByProductId.TryGetValue( product.ProductId, out HashSet<string>? suppliersSet );
             List<string> suppliers = (suppliersSet ?? [])
                 .OrderBy( n => n, StringComparer.OrdinalIgnoreCase )
                 .ToList();
-            supplierPricesByProductId.TryGetValue( product.ProductId, out List<ProductSupplierPriceItem>? supplierPrices );
-            lastSyncedSupplierByProductId.TryGetValue( product.ProductId, out string? lastSyncedSupplierName );
-            unsyncedSuppliersByProductId.TryGetValue( product.ProductId, out List<ProductUnsyncedSupplierItem>? unsyncedSuppliers );
-            bool hasSupplyQuantityOverride = unsyncedQuantityByProductId.TryGetValue( product.ProductId, out int overrideQuantity );
+            maps.SupplierPricesByProductId.TryGetValue(
+                product.ProductId,
+                out List<ProductSupplierPriceItem>? supplierPrices );
+            maps.LastSyncedSupplierByProductId.TryGetValue(
+                product.ProductId,
+                out string? lastSyncedSupplierName );
+            maps.UnsyncedSuppliersByProductId.TryGetValue(
+                product.ProductId,
+                out List<ProductUnsyncedSupplierItem>? unsyncedSuppliers );
+            bool hasSupplyQuantityOverride =
+                maps.UnsyncedQuantityByProductId.TryGetValue( product.ProductId, out int overrideQuantity );
             int effectiveQuantity = hasSupplyQuantityOverride ? overrideQuantity : product.TotalInventory;
 
             result.Add( new ProductWithSuppliersListItem

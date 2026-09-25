@@ -454,6 +454,25 @@ export async function rejectBukinistkaOfferByKirma(id: number): Promise<void> {
   }
 }
 
+/** Kirma closes an accepted Buk→Kirma offer whose Shopify card was deleted. */
+export async function closeOrphanedBukinistkaOfferByKirma(
+  id: number
+): Promise<void> {
+  const res = await fetch(
+    `${getApiBaseUrl()}/bukinistka/offers/${id}/close-orphaned`,
+    {
+      method: 'POST',
+      credentials: apiCredentials,
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(
+      await readErrorMessage(res, 'Не ўдалося закрыць прапанову.')
+    );
+  }
+}
+
 export async function cancelBukinistkaSentOffer(id: number): Promise<void> {
   const res = await fetch(
     `${getApiBaseUrl()}/bukinistka/offers/sent-by-bukinistka/${id}`,

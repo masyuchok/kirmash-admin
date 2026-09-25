@@ -331,6 +331,47 @@ public class ShopifyInventoryService
             title );
     }
 
+    public async Task AttachProductImageAsync(
+        string shop,
+        string accessToken,
+        string shopifyProductId,
+        byte[] imageBytes,
+        string fileName )
+    {
+        if (imageBytes is null || imageBytes.Length == 0)
+        {
+            return;
+        }
+
+        string productId = ShopifyIds.NormalizeProductId( shopifyProductId );
+        if (string.IsNullOrWhiteSpace( productId ))
+        {
+            throw new InvalidOperationException( "Некарэктны Shopify product id." );
+        }
+
+        string safeName = string.IsNullOrWhiteSpace( fileName ) ? "cover.jpg" : fileName.Trim();
+        Dictionary<string, object?> imagePayload = new()
+        {
+            ["attachment"] = Convert.ToBase64String( imageBytes ),
+            ["filename"] = safeName,
+        };
+
+        string payload = JsonSerializer.Serialize( new { image = imagePayload } );
+        HttpClient client = _httpClientFactory.CreateClient( "Shopify" );
+        using StringContent content = new( payload, Encoding.UTF8, "application/json" );
+        using HttpResponseMessage response = await ShopifyAuthorizedHttp.SendAsync(
+            client,
+            accessToken,
+            HttpMethod.Post,
+            ShopifyApi.RestUrl( shop, $"products/{productId}/images.json" ),
+            content );
+        string body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException( $"Не ўдалося загрузіць выяву ў Shopify: {body}" );
+        }
+    }
+
     private static string BuildBookProductTags( string? barcodeDigits, string? author )
     {
         List<string> tags = new();
@@ -1615,6 +1656,53 @@ public class ShopifyInventoryService
 
         using JsonDocument json = JsonDocument.Parse( await response.Content.ReadAsStringAsync() );
         return json.RootElement.GetProperty( "product" ).Clone();
+    }
+
+    /// <summary>
+    /// True when the sync key ("productId" or "productId::variantId") still resolves
+    /// to a live Shopify product/variant. False on 404 (deleted). Other errors rethrow.
+    /// </summary>
+    public async Task<bool> ProductKeyExistsAsync(
+        string shop,
+        string accessToken,
+        string productKey )
+    {
+        if (!TryParseSyncKey( productKey, out long productId, out long? variantId ))
+        {
+            string normalized = ShopifyIds.NormalizeProductId( productKey );
+            long? parsed = ShopifyIds.TryParseNumericProductId( normalized );
+            if (!parsed.HasValue)
+            {
+                return false;
+            }
+
+            productId = parsed.Value;
+            variantId = null;
+        }
+
+        HttpClient client = _httpClientFactory.CreateClient( "Shopify" );
+        string url = variantId.HasValue
+            ? ShopifyApi.RestUrl( shop, $"variants/{variantId.Value}.json" )
+            : ShopifyApi.RestUrl( shop, $"products/{productId}.json" );
+
+        using HttpResponseMessage response = await ShopifyAuthorizedHttp.SendAsync(
+            client,
+            accessToken,
+            HttpMethod.Get,
+            url );
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string body = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException(
+                $"Не ўдалося праверыць Shopify {productKey}: {body}" );
+        }
+
+        return true;
     }
 
     private static async Task<int> GetAvailableQuantityAsync(

@@ -395,6 +395,28 @@ public class BukinistkaOffersController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Kirma closes an accepted offer from Bukinistka whose Shopify card was deleted.
+    /// </summary>
+    [Authorize]
+    [HttpPost( "{id:int}/close-orphaned" )]
+    public async Task<IActionResult> CloseOrphaned( int id, CancellationToken cancellationToken )
+    {
+        try
+        {
+            await _offers.CloseOrphanedReceivedAsync( id, cancellationToken );
+            return Ok( new { success = true } );
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized( new { error = ex.Message } );
+        }
+        catch (Exception ex)
+        {
+            return BadRequest( new { error = ex.Message } );
+        }
+    }
+
     /// <summary>Bukinistka accepts a pending offer and links it to an existing Odoo product.</summary>
     [HttpPost( "{id:int}/accept" )]
     public async Task<ActionResult<KirmaBukinistkaOfferDto>> Accept(

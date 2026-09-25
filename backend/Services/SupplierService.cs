@@ -73,6 +73,9 @@ namespace backend.Services
             if (!string.IsNullOrEmpty(newSupplier.Website))
                 dbSupplier.Website = newSupplier.Website;
 
+            if (!string.IsNullOrEmpty(newSupplier.PriceListUrl))
+                dbSupplier.PriceListUrl = newSupplier.PriceListUrl;
+
             if (!string.IsNullOrEmpty(newSupplier.Country))
                 dbSupplier.Country = newSupplier.Country;
 

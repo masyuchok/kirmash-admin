@@ -77,6 +77,20 @@ export default function SupplierFormFields({
         </div>
       </div>
 
+      <div>
+        <label className="mb-1 block text-sm font-medium text-gray-700">
+          Спасылка на прайс
+        </label>
+        <input
+          type="url"
+          name="priceListUrl"
+          value={values.priceListUrl}
+          onChange={handleChange}
+          placeholder="https://..."
+          className={inputClass}
+        />
+      </div>
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div>
           <label className="mb-1 block text-sm font-medium text-gray-700">

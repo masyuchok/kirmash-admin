@@ -178,6 +178,7 @@ export async function fetchSuppliers(): Promise<
         row.telegram ?? row.tgContact ?? row.tGContact ?? row.TGContact
       ),
       website: readString(row.website ?? row.Website),
+      priceListUrl: readString(row.priceListUrl ?? row.PriceListUrl),
       country: readString(row.country ?? row.Country),
       city: readString(row.city ?? row.City),
       isVatPayer: readBoolean(

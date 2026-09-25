@@ -8,15 +8,18 @@ public sealed class OdooPosSalesReader
     private readonly OdooJsonRpcClient _client;
     private readonly OdooAuthService _auth;
     private readonly IConfiguration _config;
+    private readonly ILogger<OdooPosSalesReader> _logger;
 
     public OdooPosSalesReader(
         OdooJsonRpcClient client,
         OdooAuthService auth,
-        IConfiguration config )
+        IConfiguration config,
+        ILogger<OdooPosSalesReader> logger )
     {
         _client = client;
         _auth = auth;
         _config = config;
+        _logger = logger;
     }
 
     public sealed record PosOrderLine(
@@ -69,95 +72,133 @@ public sealed class OdooPosSalesReader
             domain.Add( new object[] { "id", ">=", Math.Max( 1, minId - 50 ) } );
         }
 
-        JsonElement orders = await _client.CallKwAsync(
-            session,
-            "pos.order",
-            "search_read",
-            [domain.ToArray()],
-            new Dictionary<string, object?>
-            {
-                ["fields"] = new[] { "id", "name", "date_order", "state" },
-                ["limit"] = 500,
-                ["order"] = "id asc",
-            },
-            cancellationToken );
-
         List<PosOrderLine> result = new();
-        if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
-        {
-            return result;
-        }
-
         List<(int OrderId, string? Name, DateTime SoldAt)> orderMeta = new();
-        foreach (JsonElement order in orders.EnumerateArray())
+        const int orderPageSize = 500;
+        for (int offset = 0; ; offset += orderPageSize)
         {
-            int orderId = ReadInt( order, "id" );
-            if (orderId <= 0)
+            JsonElement orders = await _client.CallKwAsync(
+                session,
+                "pos.order",
+                "search_read",
+                [domain.ToArray()],
+                new Dictionary<string, object?>
+                {
+                    ["fields"] = new[] { "id", "name", "date_order", "state" },
+                    ["limit"] = orderPageSize,
+                    ["offset"] = offset,
+                    ["order"] = "id asc",
+                },
+                cancellationToken );
+
+            if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
             {
-                continue;
+                break;
             }
 
-            orderMeta.Add( (
-                orderId,
-                ReadString( order, "name" ),
-                ReadDateTimeUtc( order, "date_order" ) ) );
+            foreach (JsonElement order in orders.EnumerateArray())
+            {
+                int orderId = ReadInt( order, "id" );
+                if (orderId <= 0)
+                {
+                    continue;
+                }
+
+                orderMeta.Add( (
+                    orderId,
+                    ReadString( order, "name" ),
+                    ReadDateTimeUtc( order, "date_order" ) ) );
+            }
+
+            if (orders.GetArrayLength() < orderPageSize)
+            {
+                break;
+            }
         }
 
-        if (orderMeta.Count == 0)
-        {
-            return result;
-        }
-
-        int[] orderIds = orderMeta.Select( x => x.OrderId ).ToArray();
         Dictionary<int, (string? Name, DateTime SoldAt)> byOrder =
             orderMeta.ToDictionary( x => x.OrderId, x => (x.Name, x.SoldAt) );
 
-        JsonElement lines = await _client.CallKwAsync(
-            session,
-            "pos.order.line",
-            "search_read",
-            [
-                new object[]
-                {
-                    new object[] { "order_id", "in", orderIds }
-                }
-            ],
-            new Dictionary<string, object?>
-            {
-                ["fields"] = new[] { "id", "order_id", "product_id", "qty" },
-                ["limit"] = 5000,
-                ["order"] = "id asc",
-            },
-            cancellationToken );
-
-        if (lines.ValueKind != JsonValueKind.Array)
+        foreach (int[] orderIds in orderMeta
+                     .Select( x => x.OrderId )
+                     .Distinct()
+                     .Chunk( 400 ))
         {
-            return result;
+            const int linePageSize = 5000;
+            for (int offset = 0; ; offset += linePageSize)
+            {
+                JsonElement lines = await _client.CallKwAsync(
+                    session,
+                    "pos.order.line",
+                    "search_read",
+                    [
+                        new object[]
+                        {
+                            new object[] { "order_id", "in", orderIds }
+                        }
+                    ],
+                    new Dictionary<string, object?>
+                    {
+                        ["fields"] = new[] { "id", "order_id", "product_id", "qty" },
+                        ["limit"] = linePageSize,
+                        ["offset"] = offset,
+                        ["order"] = "id asc",
+                    },
+                    cancellationToken );
+
+                if (lines.ValueKind != JsonValueKind.Array || lines.GetArrayLength() == 0)
+                {
+                    break;
+                }
+
+                foreach (JsonElement line in lines.EnumerateArray())
+                {
+                    int lineId = ReadInt( line, "id" );
+                    int orderId = ReadMany2OneId( line, "order_id" );
+                    int productId = ReadMany2OneId( line, "product_id" );
+                    decimal qty = ReadDecimal( line, "qty" );
+                    if (lineId <= 0 || orderId <= 0 || productId <= 0 || qty <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (!byOrder.TryGetValue( orderId, out var meta ))
+                    {
+                        continue;
+                    }
+
+                    result.Add( new PosOrderLine(
+                        orderId,
+                        meta.Name,
+                        lineId,
+                        productId,
+                        qty,
+                        meta.SoldAt ) );
+                }
+
+                if (lines.GetArrayLength() < linePageSize)
+                {
+                    break;
+                }
+            }
         }
 
-        foreach (JsonElement line in lines.EnumerateArray())
+        // Some Odoo installations expose completed POS stock pickings to the sync
+        // account but omit the corresponding pos.order/pos.order.line records.
+        // Use WH/POS stock moves as a fallback and deduplicate against normal POS lines.
+        try
         {
-            int lineId = ReadInt( line, "id" );
-            int orderId = ReadMany2OneId( line, "order_id" );
-            int productId = ReadMany2OneId( line, "product_id" );
-            decimal qty = ReadDecimal( line, "qty" );
-            if (lineId <= 0 || orderId <= 0 || productId <= 0 || qty <= 0)
-            {
-                continue;
-            }
-
-            if (!byOrder.TryGetValue( orderId, out var meta ))
-            {
-                continue;
-            }
-
-            result.Add( new PosOrderLine(
-                orderId,
-                meta.Name,
-                lineId,
-                productId,
-                qty,
-                meta.SoldAt ) );
+            await AppendCompletedPosStockMovesAsync(
+                session,
+                since,
+                result,
+                cancellationToken );
+        }
+        catch (Exception ex)
+        {
+            // Normal pos.order lines remain usable when the sync account cannot
+            // read stock pickings/moves.
+            _logger.LogWarning( ex, "Could not read completed WH/POS stock moves." );
         }
 
         return result;
@@ -193,38 +234,48 @@ public sealed class OdooPosSalesReader
             domain.Add( new object[] { "id", ">=", Math.Max( 1, minId - 50 ) } );
         }
 
-        JsonElement orders = await _client.CallKwAsync(
-            session,
-            "pos.order",
-            "search_read",
-            [domain.ToArray()],
-            new Dictionary<string, object?>
-            {
-                ["fields"] = new[] { "id", "name", "date_order", "state" },
-                ["limit"] = 500,
-                ["order"] = "id asc",
-            },
-            cancellationToken );
-
         List<PosOrderLine> result = new();
-        if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
-        {
-            return result;
-        }
-
         List<(int OrderId, string? Name, DateTime SoldAt)> orderMeta = new();
-        foreach (JsonElement order in orders.EnumerateArray())
+        const int orderPageSize = 500;
+        for (int offset = 0; ; offset += orderPageSize)
         {
-            int orderId = ReadInt( order, "id" );
-            if (orderId <= 0)
+            JsonElement orders = await _client.CallKwAsync(
+                session,
+                "pos.order",
+                "search_read",
+                [domain.ToArray()],
+                new Dictionary<string, object?>
+                {
+                    ["fields"] = new[] { "id", "name", "date_order", "state" },
+                    ["limit"] = orderPageSize,
+                    ["offset"] = offset,
+                    ["order"] = "id asc",
+                },
+                cancellationToken );
+
+            if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
             {
-                continue;
+                break;
             }
 
-            orderMeta.Add( (
-                orderId,
-                ReadString( order, "name" ),
-                ReadDateTimeUtc( order, "date_order" ) ) );
+            foreach (JsonElement order in orders.EnumerateArray())
+            {
+                int orderId = ReadInt( order, "id" );
+                if (orderId <= 0)
+                {
+                    continue;
+                }
+
+                orderMeta.Add( (
+                    orderId,
+                    ReadString( order, "name" ),
+                    ReadDateTimeUtc( order, "date_order" ) ) );
+            }
+
+            if (orders.GetArrayLength() < orderPageSize)
+            {
+                break;
+            }
         }
 
         if (orderMeta.Count == 0)
@@ -232,61 +283,180 @@ public sealed class OdooPosSalesReader
             return result;
         }
 
-        int[] orderIds = orderMeta.Select( x => x.OrderId ).ToArray();
         Dictionary<int, (string? Name, DateTime SoldAt)> byOrder =
             orderMeta.ToDictionary( x => x.OrderId, x => (x.Name, x.SoldAt) );
 
-        JsonElement lines = await _client.CallKwAsync(
-            session,
-            "pos.order.line",
-            "search_read",
-            [
-                new object[]
+        foreach (int[] orderIds in orderMeta
+                     .Select( x => x.OrderId )
+                     .Distinct()
+                     .Chunk( 400 ))
+        {
+            const int linePageSize = 5000;
+            for (int offset = 0; ; offset += linePageSize)
+            {
+                JsonElement lines = await _client.CallKwAsync(
+                    session,
+                    "pos.order.line",
+                    "search_read",
+                    [
+                        new object[]
+                        {
+                            new object[] { "order_id", "in", orderIds },
+                            new object[] { "qty", "<", 0 },
+                        }
+                    ],
+                    new Dictionary<string, object?>
+                    {
+                        ["fields"] = new[] { "id", "order_id", "product_id", "qty" },
+                        ["limit"] = linePageSize,
+                        ["offset"] = offset,
+                        ["order"] = "id asc",
+                    },
+                    cancellationToken );
+
+                if (lines.ValueKind != JsonValueKind.Array || lines.GetArrayLength() == 0)
                 {
-                    new object[] { "order_id", "in", orderIds },
-                    new object[] { "qty", "<", 0 },
+                    break;
                 }
-            ],
-            new Dictionary<string, object?>
-            {
-                ["fields"] = new[] { "id", "order_id", "product_id", "qty" },
-                ["limit"] = 5000,
-                ["order"] = "id asc",
-            },
-            cancellationToken );
 
-        if (lines.ValueKind != JsonValueKind.Array)
-        {
-            return result;
-        }
+                foreach (JsonElement line in lines.EnumerateArray())
+                {
+                    int lineId = ReadInt( line, "id" );
+                    int orderId = ReadMany2OneId( line, "order_id" );
+                    int productId = ReadMany2OneId( line, "product_id" );
+                    decimal qty = ReadDecimal( line, "qty" );
+                    if (lineId <= 0 || orderId <= 0 || productId <= 0 || qty >= 0)
+                    {
+                        continue;
+                    }
 
-        foreach (JsonElement line in lines.EnumerateArray())
-        {
-            int lineId = ReadInt( line, "id" );
-            int orderId = ReadMany2OneId( line, "order_id" );
-            int productId = ReadMany2OneId( line, "product_id" );
-            decimal qty = ReadDecimal( line, "qty" );
-            if (lineId <= 0 || orderId <= 0 || productId <= 0 || qty >= 0)
-            {
-                continue;
+                    if (!byOrder.TryGetValue( orderId, out var meta ))
+                    {
+                        continue;
+                    }
+
+                    // Store absolute quantity; callers treat these as returns.
+                    result.Add( new PosOrderLine(
+                        orderId,
+                        meta.Name,
+                        lineId,
+                        productId,
+                        Math.Abs( qty ),
+                        meta.SoldAt ) );
+                }
+
+                if (lines.GetArrayLength() < linePageSize)
+                {
+                    break;
+                }
             }
-
-            if (!byOrder.TryGetValue( orderId, out var meta ))
-            {
-                continue;
-            }
-
-            // Store absolute quantity; callers treat these as returns.
-            result.Add( new PosOrderLine(
-                orderId,
-                meta.Name,
-                lineId,
-                productId,
-                Math.Abs( qty ),
-                meta.SoldAt ) );
         }
 
         return result;
+    }
+
+    private async Task AppendCompletedPosStockMovesAsync(
+        OdooSession session,
+        DateTime sinceUtc,
+        List<PosOrderLine> result,
+        CancellationToken cancellationToken )
+    {
+        string sinceStr = sinceUtc.ToString(
+            "yyyy-MM-dd HH:mm:ss",
+            CultureInfo.InvariantCulture );
+        HashSet<int> matchedRegularIndexes = new();
+
+        const int movePageSize = 5000;
+        for (int offset = 0; ; offset += movePageSize)
+        {
+            JsonElement moves = await _client.CallKwAsync(
+                session,
+                "stock.move",
+                "search_read",
+                [
+                    new object[]
+                    {
+                        new object[] { "state", "=", "done" },
+                        new object[] { "date", ">=", sinceStr },
+                        new object[] { "reference", "=like", "WH/POS/%" },
+                    }
+                ],
+                new Dictionary<string, object?>
+                {
+                    ["fields"] = new[] { "id", "reference", "date", "product_id", "quantity" },
+                    ["limit"] = movePageSize,
+                    ["offset"] = offset,
+                    ["order"] = "id asc",
+                },
+                cancellationToken );
+
+            if (moves.ValueKind != JsonValueKind.Array || moves.GetArrayLength() == 0)
+            {
+                break;
+            }
+
+            foreach (JsonElement move in moves.EnumerateArray())
+            {
+                int moveId = ReadInt( move, "id" );
+                int productId = ReadMany2OneId( move, "product_id" );
+                decimal qty = ReadDecimal( move, "quantity" );
+                string? reference = ReadString( move, "reference" );
+                DateTime movedAt = ReadDateTimeUtc( move, "date" );
+                if (moveId <= 0
+                    || productId <= 0
+                    || qty <= 0
+                    || string.IsNullOrWhiteSpace( reference )
+                    || !reference.StartsWith( "WH/POS/", StringComparison.OrdinalIgnoreCase ))
+                {
+                    continue;
+                }
+
+                // A normal POS line and its stock move usually differ by only
+                // minutes. Consume one matching normal line so fallback rows do
+                // not double-count repeated sales of the same product.
+                int regularIndex = -1;
+                for (int i = 0; i < result.Count; i++)
+                {
+                    if (matchedRegularIndexes.Contains( i ))
+                    {
+                        continue;
+                    }
+
+                    PosOrderLine regular = result[i];
+                    if (regular.LineId <= 0
+                        || regular.ProductId != productId
+                        || regular.Quantity != qty
+                        || Math.Abs( (regular.SoldAtUtc - movedAt).TotalHours ) > 12)
+                    {
+                        continue;
+                    }
+
+                    regularIndex = i;
+                    break;
+                }
+
+                if (regularIndex >= 0)
+                {
+                    matchedRegularIndexes.Add( regularIndex );
+                    continue;
+                }
+
+                // Negative ids keep the stock-move fallback namespace separate
+                // from positive pos.order/pos.order.line ids.
+                result.Add( new PosOrderLine(
+                    -moveId,
+                    reference,
+                    -moveId,
+                    productId,
+                    qty,
+                    movedAt ) );
+            }
+
+            if (moves.GetArrayLength() < movePageSize)
+            {
+                break;
+            }
+        }
     }
 
     private static int ReadInt( JsonElement row, string property )

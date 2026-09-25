@@ -150,20 +150,12 @@ public sealed class BukinistkaShopifyOdooDeliverySyncService
             new( StringComparer.OrdinalIgnoreCase );
         foreach (KirmaBukinistkaOffer offer in syncOffers)
         {
-            int used = alreadySyncedByOffer.GetValueOrDefault( offer.Id );
-            string direction = string.IsNullOrWhiteSpace( offer.Direction )
-                ? KirmaBukinistkaOfferDirections.KirmaToBukinistka
-                : offer.Direction.Trim();
-            // POS at Bukinistka consumes Kirma→Buk consignments and Buk→Kirma assignments.
-            bool posConsumes = offer.IsAssignment
-                || string.Equals(
-                    direction,
-                    KirmaBukinistkaOfferDirections.KirmaToBukinistka,
-                    StringComparison.OrdinalIgnoreCase );
-            if (posConsumes)
-            {
-                used += posSoldByOffer.GetValueOrDefault( offer.Id );
-            }
+            // Every accepted offer is a shared availability bucket. Odoo POS sales
+            // consume it regardless of direction; otherwise a later Shopify order
+            // could allocate stock that Bukinistka has already sold.
+            int used =
+                alreadySyncedByOffer.GetValueOrDefault( offer.Id )
+                + posSoldByOffer.GetValueOrDefault( offer.Id );
 
             int remaining = offer.Quantity - used;
             if (remaining <= 0)

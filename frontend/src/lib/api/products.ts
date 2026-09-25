@@ -50,95 +50,161 @@ export async function fetchProductsWithSuppliers(
     throw new Error('Некарэктны адказ сервера');
   }
 
-  return data.map((row) => {
-    const r = row as Record<string, unknown>;
-    const suppliersRaw = r.suppliers ?? r.Suppliers;
-    const suppliers = Array.isArray(suppliersRaw)
-      ? suppliersRaw.filter(
-          (s): s is string => typeof s === 'string' && s.trim().length > 0
-        )
-      : [];
-    const supplierPricesRaw = r.supplierPrices ?? r.SupplierPrices;
-    const supplierPrices = Array.isArray(supplierPricesRaw)
-      ? supplierPricesRaw.map((item) => {
-          const p = item as Record<string, unknown>;
-          return {
-            supplierId: readInt(p.supplierId ?? p.SupplierId),
-            supplierName: readString(p.supplierName ?? p.SupplierName),
-            supplierPrice: readNumber(p.supplierPrice ?? p.SupplierPrice),
-            salePrice: readNumber(p.salePrice ?? p.SalePrice),
-          };
-        })
-      : [];
-    const unsyncedSuppliersRaw = r.unsyncedSuppliers ?? r.UnsyncedSuppliers;
-    const unsyncedSuppliers = Array.isArray(unsyncedSuppliersRaw)
-      ? unsyncedSuppliersRaw.map((item) => {
-          const s = item as Record<string, unknown>;
-          return {
-            supplierId: readInt(s.supplierId ?? s.SupplierId),
-            supplierName: readString(s.supplierName ?? s.SupplierName),
-            quantity: readInt(s.quantity ?? s.Quantity),
-          };
-        })
-      : [];
-    const variantsRaw = r.variants ?? r.Variants;
-    const variants = Array.isArray(variantsRaw)
-      ? variantsRaw.map((item) => {
-          const v = item as Record<string, unknown>;
-          return {
-            variantId: readString(v.variantId ?? v.VariantId),
-            variantName: readString(v.variantName ?? v.VariantName),
-            quantityInStock: readInt(v.quantityInStock ?? v.QuantityInStock),
-          };
-        })
-      : [];
+  return data.map((row) => mapProductWithSuppliersRow(row));
+}
 
-    const overpaidLinesRaw = r.overpaidLines ?? r.OverpaidLines;
-    const overpaidLines = Array.isArray(overpaidLinesRaw)
-      ? overpaidLinesRaw.map((item) => {
-          const o = item as Record<string, unknown>;
-          return {
-            supplierId: readInt(o.supplierId ?? o.SupplierId),
-            supplierName: readString(o.supplierName ?? o.SupplierName),
-            shopifyProductId: readString(
-              o.shopifyProductId ?? o.ShopifyProductId
-            ),
-            shopifyVariantId: readString(
-              o.shopifyVariantId ?? o.ShopifyVariantId
-            ),
-            shopifyVariantTitle: readString(
-              o.shopifyVariantTitle ?? o.ShopifyVariantTitle
-            ),
-            overpaidQuantity: readInt(o.overpaidQuantity ?? o.OverpaidQuantity),
-          };
-        })
-      : [];
+export type ProductCatalogPage = {
+  items: ProductWithSuppliers[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+  productCreateAdminUrl: string;
+  productTypes: string[];
+};
 
-    return {
-      shopifyProductId: readString(r.shopifyProductId ?? r.ShopifyProductId),
-      productName: readString(r.productName ?? r.ProductName) || '—',
-      productAuthor: readString(r.productAuthor ?? r.ProductAuthor),
-      productType: readString(r.productType ?? r.ProductType),
-      productAdminUrl: readString(r.productAdminUrl ?? r.ProductAdminUrl),
-      mainImageUrl: readString(r.mainImageUrl ?? r.MainImageUrl) || null,
-      quantityInStock: readInt(r.quantityInStock ?? r.QuantityInStock),
-      shopifyQuantityInStock: readInt(
-        r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock
-      ),
-      shopifySalePrice: readNumber(r.shopifySalePrice ?? r.ShopifySalePrice),
-      hasSupplyQuantityOverride: Boolean(
-        r.hasSupplyQuantityOverride ?? r.HasSupplyQuantityOverride ?? false
-      ),
-      lastSyncedSupplierName: readString(
-        r.lastSyncedSupplierName ?? r.LastSyncedSupplierName
-      ),
-      suppliers,
-      unsyncedSuppliers,
-      variants,
-      supplierPrices,
-      overpaidLines,
-    };
+export async function fetchProductsCatalogPage(options: {
+  search?: string;
+  types?: string[];
+  after?: string | null;
+  pageSize?: number;
+  includeTypes?: boolean;
+}): Promise<ProductCatalogPage> {
+  const params = new URLSearchParams();
+  const search = options.search?.trim();
+  if (search) params.set('search', search);
+  if (options.types && options.types.length > 0) {
+    params.set('types', options.types.join(','));
+  }
+  if (options.after?.trim()) params.set('after', options.after.trim());
+  if (options.pageSize && options.pageSize > 0) {
+    params.set('pageSize', String(options.pageSize));
+  }
+  if (options.includeTypes) params.set('includeTypes', 'true');
+
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${getApiBaseUrl()}/Products/catalog${suffix}`, {
+    method: 'GET',
+    credentials: apiCredentials,
+    cache: 'no-store',
   });
+  if (!res.ok) {
+    const msg = await readErrorMessage(res, 'Не ўдалося загрузіць прадукты');
+    throw new Error(msg);
+  }
+
+  const data = (await res.json()) as Record<string, unknown>;
+  const itemsRaw = data.items ?? data.Items;
+  const items = Array.isArray(itemsRaw)
+    ? itemsRaw.map((row) => mapProductWithSuppliersRow(row))
+    : [];
+  const typesRaw = data.productTypes ?? data.ProductTypes;
+  const productTypes = Array.isArray(typesRaw)
+    ? typesRaw.filter(
+        (t): t is string => typeof t === 'string' && t.trim().length > 0
+      )
+    : [];
+
+  return {
+    items,
+    hasNextPage: Boolean(data.hasNextPage ?? data.HasNextPage),
+    endCursor:
+      typeof (data.endCursor ?? data.EndCursor) === 'string'
+        ? String(data.endCursor ?? data.EndCursor)
+        : null,
+    productCreateAdminUrl: readString(
+      data.productCreateAdminUrl ?? data.ProductCreateAdminUrl
+    ),
+    productTypes,
+  };
+}
+
+function mapProductWithSuppliersRow(row: unknown): ProductWithSuppliers {
+  const r = row as Record<string, unknown>;
+  const suppliersRaw = r.suppliers ?? r.Suppliers;
+  const suppliers = Array.isArray(suppliersRaw)
+    ? suppliersRaw.filter(
+        (s): s is string => typeof s === 'string' && s.trim().length > 0
+      )
+    : [];
+  const supplierPricesRaw = r.supplierPrices ?? r.SupplierPrices;
+  const supplierPrices = Array.isArray(supplierPricesRaw)
+    ? supplierPricesRaw.map((item) => {
+        const p = item as Record<string, unknown>;
+        return {
+          supplierId: readInt(p.supplierId ?? p.SupplierId),
+          supplierName: readString(p.supplierName ?? p.SupplierName),
+          supplierPrice: readNumber(p.supplierPrice ?? p.SupplierPrice),
+          salePrice: readNumber(p.salePrice ?? p.SalePrice),
+        };
+      })
+    : [];
+  const unsyncedSuppliersRaw = r.unsyncedSuppliers ?? r.UnsyncedSuppliers;
+  const unsyncedSuppliers = Array.isArray(unsyncedSuppliersRaw)
+    ? unsyncedSuppliersRaw.map((item) => {
+        const s = item as Record<string, unknown>;
+        return {
+          supplierId: readInt(s.supplierId ?? s.SupplierId),
+          supplierName: readString(s.supplierName ?? s.SupplierName),
+          quantity: readInt(s.quantity ?? s.Quantity),
+        };
+      })
+    : [];
+  const variantsRaw = r.variants ?? r.Variants;
+  const variants = Array.isArray(variantsRaw)
+    ? variantsRaw.map((item) => {
+        const v = item as Record<string, unknown>;
+        return {
+          variantId: readString(v.variantId ?? v.VariantId),
+          variantName: readString(v.variantName ?? v.VariantName),
+          quantityInStock: readInt(v.quantityInStock ?? v.QuantityInStock),
+        };
+      })
+    : [];
+
+  const overpaidLinesRaw = r.overpaidLines ?? r.OverpaidLines;
+  const overpaidLines = Array.isArray(overpaidLinesRaw)
+    ? overpaidLinesRaw.map((item) => {
+        const o = item as Record<string, unknown>;
+        return {
+          supplierId: readInt(o.supplierId ?? o.SupplierId),
+          supplierName: readString(o.supplierName ?? o.SupplierName),
+          shopifyProductId: readString(
+            o.shopifyProductId ?? o.ShopifyProductId
+          ),
+          shopifyVariantId: readString(
+            o.shopifyVariantId ?? o.ShopifyVariantId
+          ),
+          shopifyVariantTitle: readString(
+            o.shopifyVariantTitle ?? o.ShopifyVariantTitle
+          ),
+          overpaidQuantity: readInt(o.overpaidQuantity ?? o.OverpaidQuantity),
+        };
+      })
+    : [];
+
+  return {
+    shopifyProductId: readString(r.shopifyProductId ?? r.ShopifyProductId),
+    productName: readString(r.productName ?? r.ProductName) || '—',
+    productAuthor: readString(r.productAuthor ?? r.ProductAuthor),
+    productType: readString(r.productType ?? r.ProductType),
+    productAdminUrl: readString(r.productAdminUrl ?? r.ProductAdminUrl),
+    mainImageUrl: readString(r.mainImageUrl ?? r.MainImageUrl) || null,
+    quantityInStock: readInt(r.quantityInStock ?? r.QuantityInStock),
+    shopifyQuantityInStock: readInt(
+      r.shopifyQuantityInStock ?? r.ShopifyQuantityInStock
+    ),
+    shopifySalePrice: readNumber(r.shopifySalePrice ?? r.ShopifySalePrice),
+    hasSupplyQuantityOverride: Boolean(
+      r.hasSupplyQuantityOverride ?? r.HasSupplyQuantityOverride ?? false
+    ),
+    lastSyncedSupplierName: readString(
+      r.lastSyncedSupplierName ?? r.LastSyncedSupplierName
+    ),
+    suppliers,
+    unsyncedSuppliers,
+    variants,
+    supplierPrices,
+    overpaidLines,
+  };
 }
 
 function readNullableInt(v: unknown): number | null {
