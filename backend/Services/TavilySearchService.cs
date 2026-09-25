@@ -116,6 +116,115 @@ public sealed class TavilySearchService
 
         return hits;
     }
+
+    /// <summary>
+    /// Fetch page text via Tavily Extract (bypasses Cloudflare on our server IP).
+    /// </summary>
+    public async Task<TavilyExtractResult?> ExtractAsync(
+        string url,
+        CancellationToken cancellationToken )
+    {
+        string apiKey = (_config["Tavily:ApiKey"] ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( apiKey ))
+        {
+            return null;
+        }
+
+        string trimmed = (url ?? string.Empty).Trim();
+        if (!Uri.TryCreate( trimmed, UriKind.Absolute, out _ ))
+        {
+            return null;
+        }
+
+        Dictionary<string, object?> payload = new()
+        {
+            ["api_key"] = apiKey,
+            ["urls"] = new[] { trimmed },
+            // advanced: better success on JS/Cloudflare shops; costs more credits.
+            ["extract_depth"] = "advanced",
+            ["format"] = "markdown",
+            ["timeout"] = 45.0,
+        };
+
+        HttpClient client = _httpClientFactory.CreateClient( "Tavily" );
+        using HttpRequestMessage request = new( HttpMethod.Post, "https://api.tavily.com/extract" );
+        request.Headers.Accept.Add( new MediaTypeWithQualityHeaderValue( "application/json" ) );
+        request.Content = new StringContent(
+            JsonSerializer.Serialize( payload ),
+            Encoding.UTF8,
+            "application/json" );
+
+        using HttpResponseMessage response = await client.SendAsync( request, cancellationToken );
+        string body = await response.Content.ReadAsStringAsync( cancellationToken );
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning(
+                "Tavily extract failed: {Status} {Body}",
+                (int)response.StatusCode,
+                body.Length > 400 ? body[..400] : body );
+            return null;
+        }
+
+        using JsonDocument doc = JsonDocument.Parse( body );
+        if (doc.RootElement.TryGetProperty( "failed_results", out JsonElement failed )
+            && failed.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement fail in failed.EnumerateArray())
+            {
+                string failUrl = fail.TryGetProperty( "url", out JsonElement fu )
+                    ? (fu.GetString() ?? string.Empty)
+                    : string.Empty;
+                string failErr = fail.TryGetProperty( "error", out JsonElement fe )
+                    ? (fe.GetString() ?? string.Empty)
+                    : string.Empty;
+                if (!string.IsNullOrWhiteSpace( failUrl ) || !string.IsNullOrWhiteSpace( failErr ))
+                {
+                    _logger.LogWarning(
+                        "Tavily extract failed_results: {Url} — {Error}",
+                        failUrl,
+                        failErr );
+                }
+            }
+        }
+
+        if (!doc.RootElement.TryGetProperty( "results", out JsonElement results )
+            || results.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (JsonElement item in results.EnumerateArray())
+        {
+            string raw = item.TryGetProperty( "raw_content", out JsonElement rc )
+                ? (rc.GetString() ?? string.Empty).Trim()
+                : string.Empty;
+            string resultUrl = item.TryGetProperty( "url", out JsonElement u )
+                ? (u.GetString() ?? string.Empty).Trim()
+                : trimmed;
+            if (string.IsNullOrWhiteSpace( raw ))
+            {
+                continue;
+            }
+
+            _logger.LogInformation(
+                "Tavily extract ok: {Url} ({Chars} chars)",
+                string.IsNullOrWhiteSpace( resultUrl ) ? trimmed : resultUrl,
+                raw.Length );
+            return new TavilyExtractResult
+            {
+                Url = string.IsNullOrWhiteSpace( resultUrl ) ? trimmed : resultUrl,
+                RawContent = raw,
+            };
+        }
+
+        return null;
+    }
+}
+
+public sealed class TavilyExtractResult
+{
+    public string Url { get; set; } = string.Empty;
+    public string RawContent { get; set; } = string.Empty;
 }
 
 public sealed class BookLookupSessionState
@@ -144,6 +253,10 @@ public sealed class BookLookupSessionState
     public bool PhotoLensFetched { get; set; }
     public bool PhotoSearchSupplierDone { get; set; }
     public bool PhotoSearchWebDone { get; set; }
+    /// <summary>One-shot WooCommerce/WP catalog prefill before slow Tavily calls.</summary>
+    public bool CatalogPrefillDone { get; set; }
+    /// <summary>Shop catalog HTTP blocked (Cloudflare 403) — skip further direct fetches.</summary>
+    public bool SupplierCatalogBlocked { get; set; }
 }
 
 public sealed class PendingSearchHit

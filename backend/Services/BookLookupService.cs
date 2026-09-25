@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -71,21 +72,35 @@ public sealed class BookLookupService
             ? null
             : await ReadAllBytesAsync( isbnPhoto, cancellationToken );
 
-        BookVisionExtract extracted = await ExtractFromImagesAsync(
-            coverBytes,
-            cover.ContentType,
-            isbnBytes,
-            isbnPhoto?.ContentType,
-            cancellationToken );
+        BookVisionExtract extracted;
+        string? ocrWarning = null;
+        try
+        {
+            extracted = await ExtractFromImagesAsync(
+                coverBytes,
+                cover.ContentType,
+                isbnBytes,
+                isbnPhoto?.ContentType,
+                cancellationToken );
+        }
+        catch (Exception ex)
+        {
+            // Groq 503/over-capacity must not block product creation — open manual OCR form.
+            _logger.LogWarning( ex, "Vision OCR failed; opening manual confirm form" );
+            extracted = new BookVisionExtract();
+            ocrWarning =
+                "Не ўдалося аўтаматычна прачытаць вокладку (Groq часова недаступны). " +
+                "Увядзіце назву / аўтара ўручную і націсніце «Так, шукаць».";
+        }
 
-        if (string.IsNullOrWhiteSpace( extracted.Title ))
+        if (string.IsNullOrWhiteSpace( extracted.Title ) && string.IsNullOrWhiteSpace( ocrWarning ))
         {
             throw new InvalidOperationException(
                 "Не ўдалося прачытаць назву кнігі з фота. Паспрабуйце іншае фота або ўвядзіце назву ўручную." );
         }
 
         BookLookupSessionState session = await CreateSessionAsync(
-            extracted.Title,
+            extracted.Title ?? string.Empty,
             extracted.Author,
             extracted.Isbn,
             supplierId,
@@ -104,7 +119,7 @@ public sealed class BookLookupService
             AttemptsMax = MaxAttemptsBudget( session ),
             Done = false,
             AwaitingOcrConfirm = true,
-            Message = "Праверце, ці правільна прачытаны даныя з фота.",
+            Message = ocrWarning,
         };
     }
 
@@ -138,6 +153,8 @@ public sealed class BookLookupService
         session.WebQueryIndex = 0;
         session.PresentedHits = 0;
         session.CandidateBeingShown = null;
+        session.CatalogPrefillDone = false;
+        session.SupplierCatalogBlocked = false;
         session.SupplierPhaseExhausted = session.SupplierDomains.Count == 0;
         _sessions.Save( session );
 
@@ -335,12 +352,14 @@ public sealed class BookLookupService
 
     /// <summary>
     /// Manual URL: pull title/author from the page into a candidate for the create form.
+    /// When Cloudflare blocks our server, falls back to Tavily search/extract, then URL slug.
     /// </summary>
     public async Task<BookLookupCandidateDto> ImportFromUrlAsync(
         string? sessionId,
         string url,
         CancellationToken cancellationToken )
     {
+        _ = sessionId;
         string trimmed = (url ?? string.Empty).Trim();
         if (!Uri.TryCreate( trimmed, UriKind.Absolute, out Uri? uri )
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
@@ -348,45 +367,919 @@ public sealed class BookLookupService
             throw new InvalidOperationException( "Укажыце карэктную http(s) спасылку." );
         }
 
-        BookLookupSessionState session;
-        if (!string.IsNullOrWhiteSpace( sessionId )
-            && _sessions.TryGet( sessionId, out BookLookupSessionState existing ))
+        string cleanUrl = CleanProductUrl( uri );
+
+        // 1) WooCommerce / WordPress product API for this exact slug —
+        // same title/author/ISBN as on the product page (HTML is Cloudflare-blocked;
+        // Tavily Extract also fails to fetch Kamunikat).
+        BookLookupCandidateDto? fromStore = await TryImportUrlViaWooStoreAsync(
+            cleanUrl,
+            cancellationToken );
+        if (fromStore is not null && !string.IsNullOrWhiteSpace( fromStore.Title ))
         {
-            session = existing;
-        }
-        else
-        {
-            session = new BookLookupSessionState
-            {
-                SessionId = string.IsNullOrWhiteSpace( sessionId )
-                    ? Guid.NewGuid().ToString( "N" )
-                    : sessionId.Trim(),
-                QueryTitle = string.Empty,
-            };
+            fromStore.Source = "manual";
+            fromStore.Url = cleanUrl;
+            return fromStore;
         }
 
-        PendingSearchHit pending = new()
+        // 2) Tavily Extract — read page HTML via Tavily when the shop allows it.
+        BookLookupCandidateDto? fromExtract = await TryImportUrlViaExtractAsync(
+            cleanUrl,
+            cancellationToken );
+        if (fromExtract is not null && !string.IsNullOrWhiteSpace( fromExtract.Title ))
         {
-            Title = string.Empty,
-            Url = uri.ToString(),
-            Content = string.Empty,
-            Source = "manual",
+            fromExtract.Source = "manual";
+            fromExtract.Url = cleanUrl;
+            return fromExtract;
+        }
+
+        // 3) Tavily Search index — title/snippet when extract is empty.
+        BookLookupCandidateDto? fromIndex = await TryImportUrlViaIndexerAsync(
+            cleanUrl,
+            cancellationToken );
+        if (fromIndex is not null && !string.IsNullOrWhiteSpace( fromIndex.Title ))
+        {
+            fromIndex.Source = "manual";
+            fromIndex.Url = cleanUrl;
+            return fromIndex;
+        }
+
+        // 3b) Broader web search (book often cited on FB/news with Cyrillic title).
+        BookLookupCandidateDto? fromWeb = await TryImportUrlViaWebMentionsAsync(
+            cleanUrl,
+            cancellationToken );
+        if (fromWeb is not null && !string.IsNullOrWhiteSpace( fromWeb.Title ))
+        {
+            fromWeb.Source = "manual";
+            fromWeb.Url = cleanUrl;
+            return fromWeb;
+        }
+
+        // 4) Direct HTML (non-Cloudflare shops).
+        try
+        {
+            PageTitleHints pageHints = await TryFetchPageTitleHintsAsync(
+                cleanUrl,
+                cancellationToken );
+            string? directTitle = FirstNonEmpty(
+                pageHints.H1,
+                pageHints.OgTitle,
+                pageHints.HtmlTitle );
+            if (!string.IsNullOrWhiteSpace( directTitle )
+                && !LooksLikeBotWallTitle( directTitle ))
+            {
+                (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle(
+                    directTitle,
+                    pageHints.AuthorHint );
+                string cleaned = CleanBookTitle(
+                    string.IsNullOrWhiteSpace( titleOnly ) ? directTitle : titleOnly );
+                if (!string.IsNullOrWhiteSpace( cleaned ))
+                {
+                    _logger.LogInformation(
+                        "Book lookup from-url via direct HTML: {Url} → {Title}",
+                        cleanUrl,
+                        cleaned );
+                    return new BookLookupCandidateDto
+                    {
+                        Title = cleaned,
+                        Author = authorFromTitle ?? pageHints.AuthorHint,
+                        Url = cleanUrl,
+                        Source = "manual",
+                    };
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "from-url direct HTML failed for {Url}", cleanUrl );
+        }
+
+        // No URL-slug guessing: user requires fields from the shop page itself.
+        throw new InvalidOperationException(
+            "Не ўдалося прачытаць назву са старонкі крамы (Cloudflare). Паспрабуйце яшчэ раз або ўвядзіце даныя ўручную." );
+    }
+
+    private async Task<BookLookupCandidateDto?> TryImportUrlViaWooStoreAsync(
+        string cleanUrl,
+        CancellationToken cancellationToken )
+    {
+        if (!Uri.TryCreate( cleanUrl, UriKind.Absolute, out Uri? uri ))
+        {
+            return null;
+        }
+
+        string? slug = TryGetProductSlugFromPath( uri.AbsolutePath );
+        if (string.IsNullOrWhiteSpace( slug ))
+        {
+            return null;
+        }
+
+        string host = uri.Host.Trim().TrimEnd( '.' );
+        string[] endpoints =
+        {
+            $"https://{host}/wp-json/wc/store/v1/products?slug={Uri.EscapeDataString( slug )}",
+            $"https://{host}/wp-json/wc/store/products?slug={Uri.EscapeDataString( slug )}",
+            $"https://{host}/wp-json/wp/v2/product?slug={Uri.EscapeDataString( slug )}",
         };
 
-        BookLookupCandidateDto candidate = await NormalizeHitAsync(
-            session,
-            pending,
-            cancellationToken );
-
-        if (string.IsNullOrWhiteSpace( candidate.Title ))
+        HttpClient client = _httpClientFactory.CreateClient( "BookLookupJson" );
+        foreach (string endpoint in endpoints)
         {
-            throw new InvalidOperationException(
-                "Не ўдалося прачытаць назву са старонкі. Праверце спасылку або ўвядзіце даныя ўручную." );
+            try
+            {
+                using HttpResponseMessage response = await client.GetAsync(
+                    endpoint,
+                    cancellationToken );
+                int status = (int)response.StatusCode;
+                string body = await response.Content.ReadAsStringAsync( cancellationToken );
+                string? mediaType = response.Content.Headers.ContentType?.MediaType;
+
+                if (status is 403 or 503
+                    || LooksLikeCloudflareOrHtmlPayload( body, mediaType ))
+                {
+                    _logger.LogWarning(
+                        "from-url Woo/WP store blocked or HTML challenge: {Url} → {Status} ct={ContentType}",
+                        endpoint,
+                        status,
+                        mediaType ?? "?" );
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning(
+                        "from-url Woo/WP store {Url} → {Status}",
+                        endpoint,
+                        status );
+                    continue;
+                }
+
+                BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( body, cleanUrl );
+                if (parsed is not null && !string.IsNullOrWhiteSpace( parsed.Title ))
+                {
+                    _logger.LogInformation(
+                        "Book lookup from-url via shop API: {Url} → {Title} / {Author}",
+                        cleanUrl,
+                        parsed.Title,
+                        parsed.Author );
+                    return parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning( ex, "from-url Woo/WP store failed for {Url}", endpoint );
+            }
         }
 
-        candidate.Source = "manual";
-        candidate.Url = uri.ToString();
-        return candidate;
+        // Direct shop API blocked (Cloudflare on our IP) — ask Tavily to fetch the JSON URL.
+        foreach (string endpoint in endpoints)
+        {
+            try
+            {
+                TavilyExtractResult? extracted = await _tavily.ExtractAsync(
+                    endpoint,
+                    cancellationToken );
+                if (extracted is null || string.IsNullOrWhiteSpace( extracted.RawContent ))
+                {
+                    continue;
+                }
+
+                string raw = extracted.RawContent.Trim();
+                // Extract may wrap JSON in markdown fences or prose — pull the JSON array/object.
+                string? json = ExtractJsonPayload( raw );
+                if (string.IsNullOrWhiteSpace( json ))
+                {
+                    continue;
+                }
+
+                BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( json, cleanUrl );
+                if (parsed is not null && !string.IsNullOrWhiteSpace( parsed.Title ))
+                {
+                    _logger.LogInformation(
+                        "Book lookup from-url via Tavily→shop API: {Url} → {Title} / {Author}",
+                        cleanUrl,
+                        parsed.Title,
+                        parsed.Author );
+                    return parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "from-url Tavily shop API extract failed for {Url}",
+                    endpoint );
+            }
+        }
+
+        return null;
+    }
+
+    private static bool LooksLikeCloudflareOrHtmlPayload( string body, string? mediaType )
+    {
+        if (!string.IsNullOrWhiteSpace( mediaType )
+            && mediaType.Contains( "html", StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace( body ))
+        {
+            return true;
+        }
+
+        string trim = body.TrimStart();
+        if (trim.StartsWith( '<' )
+            || trim.Contains( "Just a moment", StringComparison.OrdinalIgnoreCase )
+            || trim.Contains( "cf-browser-verification", StringComparison.OrdinalIgnoreCase )
+            || trim.Contains( "Attention Required", StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? ExtractJsonPayload( string raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        string t = raw.Trim();
+        // ```json ... ```
+        Match fence = Regex.Match(
+            t,
+            @"```(?:json)?\s*(?<j>[\s\S]*?)```",
+            RegexOptions.IgnoreCase );
+        if (fence.Success)
+        {
+            t = fence.Groups["j"].Value.Trim();
+        }
+
+        int arr = t.IndexOf( '[', StringComparison.Ordinal );
+        int obj = t.IndexOf( '{', StringComparison.Ordinal );
+        int start = -1;
+        if (arr >= 0 && (obj < 0 || arr < obj))
+        {
+            start = arr;
+        }
+        else if (obj >= 0)
+        {
+            start = obj;
+        }
+
+        if (start < 0)
+        {
+            return null;
+        }
+
+        t = t[start..];
+        // Prefer full array/object if balanced enough; otherwise return as-is for JsonDocument.
+        return t.Trim();
+    }
+
+    private static BookLookupCandidateDto? TryParseWooOrWpProductJson( string body, string cleanUrl )
+    {
+        if (string.IsNullOrWhiteSpace( body )
+            || LooksLikeCloudflareOrHtmlPayload( body, null ))
+        {
+            return null;
+        }
+
+        try
+        {
+            return ParseWooOrWpProductJson( body, cleanUrl );
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static BookLookupCandidateDto? ParseWooOrWpProductJson( string body, string cleanUrl )
+    {
+        if (string.IsNullOrWhiteSpace( body ))
+        {
+            return null;
+        }
+
+        using JsonDocument doc = JsonDocument.Parse( body );
+        JsonElement root = doc.RootElement;
+        JsonElement product = root;
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            if (root.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            product = root[0];
+        }
+        else if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        // WC Store: "name"; WP REST: title.rendered
+        string? name = null;
+        if (product.TryGetProperty( "name", out JsonElement nameEl )
+            && nameEl.ValueKind == JsonValueKind.String)
+        {
+            name = DecodeHtml( nameEl.GetString() );
+        }
+        else if (product.TryGetProperty( "title", out JsonElement titleEl )
+            && titleEl.ValueKind == JsonValueKind.Object
+            && titleEl.TryGetProperty( "rendered", out JsonElement rendered ))
+        {
+            name = DecodeHtml( rendered.GetString() );
+        }
+
+        if (string.IsNullOrWhiteSpace( name ) || LooksLikeBotWallTitle( name ))
+        {
+            return null;
+        }
+
+        string? authorAttr = null;
+        string? isbnAttr = null;
+        string? publisherAttr = null;
+        if (product.TryGetProperty( "attributes", out JsonElement attrs )
+            && attrs.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement attr in attrs.EnumerateArray())
+            {
+                string taxonomy = attr.TryGetProperty( "taxonomy", out JsonElement taxEl )
+                    ? (taxEl.GetString() ?? string.Empty)
+                    : string.Empty;
+                string attrName = attr.TryGetProperty( "name", out JsonElement anEl )
+                    ? (anEl.GetString() ?? string.Empty)
+                    : string.Empty;
+                string? termName = FirstWooAttributeTermName( attr );
+                if (string.IsNullOrWhiteSpace( termName ))
+                {
+                    continue;
+                }
+
+                if (taxonomy.Contains( "autar", StringComparison.OrdinalIgnoreCase )
+                    || taxonomy.Contains( "author", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "Аўтар", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "Автор", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Equals( "Author", StringComparison.OrdinalIgnoreCase ))
+                {
+                    authorAttr ??= termName;
+                }
+                else if (taxonomy.Contains( "isbn", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "ISBN", StringComparison.OrdinalIgnoreCase ))
+                {
+                    isbnAttr ??= termName;
+                }
+                else if (taxonomy.Contains( "vydav", StringComparison.OrdinalIgnoreCase )
+                    || taxonomy.Contains( "publisher", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "Выдавец", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "Издател", StringComparison.OrdinalIgnoreCase )
+                    || attrName.Contains( "Publisher", StringComparison.OrdinalIgnoreCase ))
+                {
+                    publisherAttr ??= termName;
+                }
+            }
+        }
+
+        (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle( name, authorAttr );
+        string cleaned = CleanBookTitle(
+            string.IsNullOrWhiteSpace( titleOnly ) ? name : titleOnly );
+        if (string.IsNullOrWhiteSpace( cleaned ))
+        {
+            return null;
+        }
+
+        string? isbn = IsbnUtil.Normalize( isbnAttr ) ?? ExtractIsbnFromText( name );
+        string? author = authorAttr ?? authorFromTitle;
+
+        return new BookLookupCandidateDto
+        {
+            Title = cleaned,
+            Author = author,
+            Isbn = isbn,
+            Publisher = publisherAttr,
+            Url = cleanUrl,
+            Source = "manual",
+            Snippet = TruncateSnippet( name ),
+        };
+    }
+
+    private static string? FirstWooAttributeTermName( JsonElement attr )
+    {
+        if (attr.TryGetProperty( "terms", out JsonElement terms )
+            && terms.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement term in terms.EnumerateArray())
+            {
+                if (term.TryGetProperty( "name", out JsonElement n )
+                    && n.ValueKind == JsonValueKind.String)
+                {
+                    string? v = DecodeHtml( n.GetString() );
+                    if (!string.IsNullOrWhiteSpace( v ))
+                    {
+                        return v.Trim();
+                    }
+                }
+            }
+        }
+
+        // Some payloads put options as string array.
+        if (attr.TryGetProperty( "options", out JsonElement options )
+            && options.ValueKind == JsonValueKind.Array
+            && options.GetArrayLength() > 0
+            && options[0].ValueKind == JsonValueKind.String)
+        {
+            return DecodeHtml( options[0].GetString() )?.Trim();
+        }
+
+        return null;
+    }
+
+    private static string CleanProductUrl( Uri uri )
+    {
+        // Drop tracking/?v= noise so matching and extract work on the canonical product URL.
+        var builder = new UriBuilder( uri )
+        {
+            Query = string.Empty,
+            Fragment = string.Empty,
+        };
+        string path = builder.Path.TrimEnd( '/' );
+        builder.Path = path.Length == 0 ? "/" : path + "/";
+        return builder.Uri.ToString();
+    }
+
+    private static bool LooksLikeBotWallTitle( string? title )
+    {
+        if (string.IsNullOrWhiteSpace( title ))
+        {
+            return true;
+        }
+
+        string t = title.Trim();
+        return t.Contains( "Just a moment", StringComparison.OrdinalIgnoreCase )
+            || t.Contains( "Attention Required", StringComparison.OrdinalIgnoreCase )
+            || t.Contains( "Cloudflare", StringComparison.OrdinalIgnoreCase )
+            || string.Equals( t, "403", StringComparison.Ordinal )
+            || string.Equals( t, "404", StringComparison.Ordinal );
+    }
+
+    private async Task<BookLookupCandidateDto?> TryImportUrlViaIndexerAsync(
+        string cleanUrl,
+        CancellationToken cancellationToken )
+    {
+        if (!Uri.TryCreate( cleanUrl, UriKind.Absolute, out Uri? uri ))
+        {
+            return null;
+        }
+
+        string? slug = TryGetProductSlugFromPath( uri.AbsolutePath );
+        if (string.IsNullOrWhiteSpace( slug ) || slug.Length < 6)
+        {
+            return null;
+        }
+
+        string apex = StripWww( uri.Host );
+        string query = $"site:{apex} {slug.Replace( '-', ' ' )}";
+        try
+        {
+            IReadOnlyList<TavilySearchHit> hits = await _tavily.SearchAsync(
+                query,
+                includeDomains: new[] { apex, "www." + apex },
+                ResultsPerSearch,
+                cancellationToken );
+
+            TavilySearchHit? best = hits
+                .OrderByDescending( h =>
+                {
+                    int score = 0;
+                    string key = NormalizeUrlKey( h.Url );
+                    if (key.Contains( slug, StringComparison.OrdinalIgnoreCase ))
+                    {
+                        score += 100;
+                    }
+
+                    if (NormalizeUrlKey( cleanUrl ) == key)
+                    {
+                        score += 50;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace( h.Title ))
+                    {
+                        score += 10;
+                    }
+
+                    return score;
+                } )
+                .FirstOrDefault( h =>
+                    !string.IsNullOrWhiteSpace( h.Title )
+                    && !LooksLikeBotWallTitle( h.Title ) );
+
+            if (best is null)
+            {
+                return null;
+            }
+
+            (string titleOnly, string? author) = SplitAuthorFromTitle( best.Title, null );
+            string title = CleanBookTitle(
+                string.IsNullOrWhiteSpace( titleOnly ) ? best.Title : titleOnly );
+            if (string.IsNullOrWhiteSpace( title ))
+            {
+                return null;
+            }
+
+            _logger.LogInformation(
+                "Book lookup from-url via indexer: {Url} → {Title}",
+                cleanUrl,
+                title );
+            return new BookLookupCandidateDto
+            {
+                Title = title,
+                Author = author,
+                Url = cleanUrl,
+                Source = "manual",
+                Snippet = TruncateSnippet( best.Content ),
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "from-url indexer search failed for {Url}", cleanUrl );
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// When the shop itself is Cloudflare-blocked, Tavily still finds Cyrillic titles
+    /// on Facebook / news that cite the same book (often with the product slug or ISBN).
+    /// </summary>
+    private async Task<BookLookupCandidateDto?> TryImportUrlViaWebMentionsAsync(
+        string cleanUrl,
+        CancellationToken cancellationToken )
+    {
+        if (!Uri.TryCreate( cleanUrl, UriKind.Absolute, out Uri? uri ))
+        {
+            return null;
+        }
+
+        string? slug = TryGetProductSlugFromPath( uri.AbsolutePath );
+        if (string.IsNullOrWhiteSpace( slug ) || slug.Length < 6)
+        {
+            return null;
+        }
+
+        string cyrillicPhrase = BelarusianLacinka.SlugToPhrase( slug );
+        string latinPhrase = slug.Replace( '-', ' ' );
+        string[] queries =
+        {
+            $"{cyrillicPhrase} kamunikat",
+            $"{latinPhrase} kamunikat",
+            cleanUrl,
+        };
+
+        try
+        {
+            foreach (string query in queries)
+            {
+                if (string.IsNullOrWhiteSpace( query ) || query.Length < 8)
+                {
+                    continue;
+                }
+
+                IReadOnlyList<TavilySearchHit> hits = await _tavily.SearchAsync(
+                    query,
+                    includeDomains: null,
+                    ResultsPerSearch,
+                    cancellationToken );
+
+                TavilySearchHit? best = hits
+                    .Where( h =>
+                        !string.IsNullOrWhiteSpace( h.Title )
+                        && !LooksLikeBotWallTitle( h.Title )
+                        && ContainsCyrillic( h.Title ) )
+                    .OrderByDescending( h =>
+                    {
+                        int score = 0;
+                        string blob = $"{h.Title}\n{h.Url}\n{h.Content}";
+                        if (blob.Contains( slug, StringComparison.OrdinalIgnoreCase )
+                            || blob.Contains( "kamunikat", StringComparison.OrdinalIgnoreCase ))
+                        {
+                            score += 50;
+                        }
+
+                        if (SoftTitlePhraseContainedIn( h.Title, cyrillicPhrase )
+                            || SoftTitlePhraseContainedIn( cyrillicPhrase, h.Title ))
+                        {
+                            score += 40;
+                        }
+
+                        if (ContainsCyrillic( h.Title ))
+                        {
+                            score += 20;
+                        }
+
+                        return score;
+                    } )
+                    .FirstOrDefault();
+
+                if (best is null)
+                {
+                    continue;
+                }
+
+                (string titleOnly, string? author) = SplitAuthorFromTitle( best.Title, null );
+                string title = CleanBookTitle(
+                    string.IsNullOrWhiteSpace( titleOnly ) ? best.Title : titleOnly );
+                if (string.IsNullOrWhiteSpace( title ) || !ContainsCyrillic( title ))
+                {
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    "Book lookup from-url via web mentions: {Url} → {Title}",
+                    cleanUrl,
+                    title );
+                return new BookLookupCandidateDto
+                {
+                    Title = title,
+                    Author = author,
+                    Url = cleanUrl,
+                    Source = "manual",
+                    Isbn = ExtractIsbnFromText( $"{best.Title}\n{best.Content}" ),
+                    Snippet = TruncateSnippet( best.Content ),
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "from-url web mentions failed for {Url}", cleanUrl );
+        }
+
+        return null;
+    }
+
+    private static bool ContainsCyrillic( string? text )
+    {
+        if (string.IsNullOrEmpty( text ))
+        {
+            return false;
+        }
+
+        foreach (char c in text)
+        {
+            if (c is (>= '\u0400' and <= '\u04FF'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<BookLookupCandidateDto?> TryImportUrlViaExtractAsync(
+        string cleanUrl,
+        CancellationToken cancellationToken )
+    {
+        try
+        {
+            TavilyExtractResult? extracted = await _tavily.ExtractAsync( cleanUrl, cancellationToken );
+            if (extracted is null || string.IsNullOrWhiteSpace( extracted.RawContent ))
+            {
+                return null;
+            }
+
+            string raw = extracted.RawContent;
+            if (LooksLikeBotWallTitle( raw[..Math.Min( raw.Length, 200 )] ))
+            {
+                _logger.LogWarning( "Tavily extract returned bot-wall content for {Url}", cleanUrl );
+                return null;
+            }
+
+            string plain = StripHtmlTags( raw );
+            string? title = ExtractMetaContent( raw, "og:title" )
+                ?? ExtractHtmlTagText( raw, "h1" )
+                ?? ExtractMarkdownHeading( raw )
+                ?? ExtractHtmlTagText( raw, "title" )
+                ?? ExtractLabeledField( plain, "Назва", "Title", "Тытул" );
+            title = DecodeHtml( title );
+            if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
+            {
+                // First substantial content line (skip nav crumbs).
+                title = plain
+                    .Split( '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries )
+                    .Select( l => Regex.Replace( l, @"^#+\s*", string.Empty ).Trim() )
+                    .Where( l => l.Length is >= 8 and <= 220 )
+                    .FirstOrDefault( l =>
+                        !LooksLikeBotWallTitle( l )
+                        && !l.StartsWith( "http", StringComparison.OrdinalIgnoreCase )
+                        && !Regex.IsMatch( l, @"^(Home|Галоўная|Каш|Cart|Menu)\b", RegexOptions.IgnoreCase ) );
+            }
+
+            if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
+            {
+                return null;
+            }
+
+            string? author = DecodeHtml(
+                ExtractMetaContent( raw, "book:author" )
+                ?? ExtractMetaContent( raw, "author" )
+                ?? ExtractRelAuthor( raw )
+                ?? ExtractLabeledField( plain, "Аўтар", "Автор", "Author", "Аўтары" ) );
+            string? publisher = ExtractLabeledField(
+                plain,
+                "Выдавец",
+                "Выдавецтва",
+                "Издательство",
+                "Publisher" );
+            string? isbn = ExtractIsbnFromText( plain );
+
+            (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle( title, author );
+            string cleaned = CleanBookTitle(
+                string.IsNullOrWhiteSpace( titleOnly ) ? title : titleOnly );
+            if (string.IsNullOrWhiteSpace( cleaned ))
+            {
+                return null;
+            }
+
+            _logger.LogInformation(
+                "Book lookup from-url via Tavily extract: {Url} → {Title} / {Author}",
+                cleanUrl,
+                cleaned,
+                authorFromTitle ?? author );
+            return new BookLookupCandidateDto
+            {
+                Title = cleaned,
+                Author = authorFromTitle ?? author,
+                Isbn = isbn,
+                Publisher = publisher,
+                Url = cleanUrl,
+                Source = "manual",
+                Snippet = TruncateSnippet( plain ),
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "from-url extract failed for {Url}", cleanUrl );
+            return null;
+        }
+    }
+
+    private static string? ExtractMarkdownHeading( string markdown )
+    {
+        if (string.IsNullOrWhiteSpace( markdown ))
+        {
+            return null;
+        }
+
+        Match m = Regex.Match(
+            markdown,
+            @"^#{1,3}\s+(?<t>.+)$",
+            RegexOptions.Multiline );
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        string t = m.Groups["t"].Value.Trim();
+        return t.Length is >= 3 and <= 220 ? t : null;
+    }
+
+    private static string? ExtractLabeledField( string text, params string[] labels )
+    {
+        if (string.IsNullOrWhiteSpace( text ) || labels.Length == 0)
+        {
+            return null;
+        }
+
+        string alt = string.Join( "|", labels.Select( Regex.Escape ) );
+        Match m = Regex.Match(
+            text,
+            $@"(?im)^\s*(?:{alt})\s*[:：\-–—]\s*(?<v>.+?)\s*$" );
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        string v = m.Groups["v"].Value.Trim().Trim( '*', '_', '#' );
+        return v.Length is >= 2 and <= 180 ? v : null;
+    }
+
+    private static string? TruncateSnippet( string? text )
+    {
+        if (string.IsNullOrWhiteSpace( text ))
+        {
+            return null;
+        }
+
+        string t = text.Trim();
+        return t.Length <= 280 ? t : t[..280] + "…";
+    }
+
+    private static string? TryGetProductSlugFromPath( string absolutePath )
+    {
+        Match m = Regex.Match(
+            absolutePath ?? string.Empty,
+            @"/(?:pradukt|produkt|product)/(?<slug>[^/]+)/?",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        string slug = Uri.UnescapeDataString( m.Groups["slug"].Value ).Trim().Trim( '/' );
+        return string.IsNullOrWhiteSpace( slug ) ? null : slug;
+    }
+
+    private static bool TryParseProductUrlSlug(
+        string url,
+        out string title,
+        out string? author )
+    {
+        title = string.Empty;
+        author = null;
+        if (!Uri.TryCreate( url, UriKind.Absolute, out Uri? uri ))
+        {
+            return false;
+        }
+
+        string? slug = TryGetProductSlugFromPath( uri.AbsolutePath );
+        if (string.IsNullOrWhiteSpace( slug ))
+        {
+            return false;
+        }
+
+        string[] parts = slug.Split( '-', StringSplitOptions.RemoveEmptyEntries );
+        if (parts.Length < 3)
+        {
+            return false;
+        }
+
+        // Heuristic: firstname-lastname-title-words… (Kamunikat Łacinka style).
+        // Prefer Belarusian Cyrillic so the form matches the shop page language.
+        string[] cyrParts = parts
+            .Select( BelarusianLacinka.WordToCyrillic )
+            .Where( w => !string.IsNullOrWhiteSpace( w ) )
+            .ToArray();
+        if (cyrParts.Length >= 3)
+        {
+            author = CapitalizeCyrillicWord( cyrParts[0] )
+                + " "
+                + CapitalizeCyrillicWord( cyrParts[1] );
+            title = string.Join(
+                " ",
+                cyrParts.Skip( 2 ).Select( CapitalizeCyrillicWord ) );
+            if (title.Length >= 3)
+            {
+                return true;
+            }
+        }
+
+        string authorLatin = $"{CapitalizeLatin( parts[0] )} {CapitalizeLatin( parts[1] )}";
+        string titleLatin = string.Join(
+            " ",
+            parts.Skip( 2 ).Select( CapitalizeLatin ) );
+        if (titleLatin.Length < 3)
+        {
+            return false;
+        }
+
+        author = authorLatin;
+        title = titleLatin;
+        return true;
+    }
+
+    private static string CapitalizeCyrillicWord( string word )
+    {
+        if (string.IsNullOrWhiteSpace( word ))
+        {
+            return string.Empty;
+        }
+
+        string w = word.Trim();
+        if (w.Length == 1)
+        {
+            return w.ToUpperInvariant();
+        }
+
+        return char.ToUpper( w[0], CultureInfo.InvariantCulture ) + w[1..];
+    }
+
+    private static string CapitalizeLatin( string word )
+    {
+        if (string.IsNullOrWhiteSpace( word ))
+        {
+            return string.Empty;
+        }
+
+        string w = word.Trim().ToLowerInvariant();
+        if (w.Length == 1)
+        {
+            return w;
+        }
+
+        return char.ToUpperInvariant( w[0] ) + w[1..];
     }
 
     public async Task<BookCreateFromLookupResultDto> CreateShopifyProductAsync(
@@ -561,6 +1454,17 @@ public sealed class BookLookupService
                     continue;
                 }
 
+                // Cheap reject before LLM / page fetch (wrong Tavily hits were burning minutes).
+                if (!LooksPromisingHit( session, pending ))
+                {
+                    _logger.LogInformation(
+                        "Skipping unpromising hit {Url} (title={Title})",
+                        pending.Url,
+                        pending.Title );
+                    session.ExcludeUrls.Add( urlKey );
+                    continue;
+                }
+
                 BookLookupCandidateDto candidate = await NormalizeHitAsync(
                     session,
                     pending,
@@ -636,55 +1540,455 @@ public sealed class BookLookupService
         return dto;
     }
 
+    /// <summary>
+    /// Fast path: one author catalog probe. Cloudflare often 403s the shop from
+    /// datacenter IPs — stop immediately and fall through to Tavily / slug guess.
+    /// </summary>
+    private async Task<bool> TryPrefillWordpressCatalogAsync(
+        BookLookupSessionState session,
+        CancellationToken cancellationToken )
+    {
+        if (session.SupplierCatalogBlocked)
+        {
+            return false;
+        }
+
+        string authorLast = AuthorLastName( session.QueryAuthor );
+        if (!string.IsNullOrWhiteSpace( authorLast ) && LooksLikeOcrAllCaps( authorLast ))
+        {
+            authorLast = HumanizeOcrName( authorLast );
+        }
+        else if (!string.IsNullOrWhiteSpace( session.QueryAuthor )
+            && LooksLikeOcrAllCaps( session.QueryAuthor ))
+        {
+            authorLast = AuthorLastName( HumanizeOcrName( session.QueryAuthor.Trim() ) );
+        }
+
+        string softTitle = SoftTitleForSearch( session.QueryTitle );
+        string core3 = SoftTitleCore( softTitle, maxWords: 3 );
+
+        // At most two cheap probes — never burn 4× WP+HTML round-trips on 403.
+        List<string> queries = new();
+        if (!string.IsNullOrWhiteSpace( authorLast ))
+        {
+            queries.Add( authorLast );
+        }
+        else if (!string.IsNullOrWhiteSpace( core3 ))
+        {
+            queries.Add( core3 );
+        }
+
+        foreach (string query in queries.Take( 1 ))
+        {
+            _logger.LogInformation(
+                "Book lookup catalog prefill: {Query} domains={Domains}",
+                query,
+                string.Join( ",", session.SupplierDomains ) );
+
+            (IReadOnlyList<TavilySearchHit> hits, bool blocked) =
+                await SearchWordpressCatalogAsync(
+                    query,
+                    session.SupplierDomains,
+                    cancellationToken );
+            if (blocked)
+            {
+                session.SupplierCatalogBlocked = true;
+                _logger.LogWarning(
+                    "Book lookup: supplier catalog blocked (Cloudflare); skipping further direct shop HTTP" );
+                return false;
+            }
+
+            if (hits.Count == 0)
+            {
+                continue;
+            }
+
+            EnqueueHits( session, RankHits( hits, session ), "supplier" );
+            if (session.Queue.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Book lookup catalog prefill queued {Count} hit(s)",
+                    session.Queue.Count );
+                return true;
+            }
+        }
+
+        _logger.LogInformation( "Book lookup catalog prefill found no products" );
+        return false;
+    }
+
     private async Task<IReadOnlyList<TavilySearchHit>> SearchSupplierAsync(
+        BookLookupSessionState session,
         string query,
         IReadOnlyList<string> domains,
         CancellationToken cancellationToken )
     {
-        IReadOnlyList<TavilySearchHit> hits = FilterHitsToDomains(
-            await _tavily.SearchAsync(
-                query,
-                domains,
-                ResultsPerSearch,
-                cancellationToken ),
-            domains );
-
-        if (hits.Count > 0)
+        if (!session.SupplierCatalogBlocked)
         {
-            return hits;
+            (IReadOnlyList<TavilySearchHit> catalogHits, bool blocked) =
+                await SearchWordpressCatalogAsync( query, domains, cancellationToken );
+            if (blocked)
+            {
+                session.SupplierCatalogBlocked = true;
+            }
+
+            if (catalogHits.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Book lookup supplier catalog hit {Count} product(s) for query={Query}",
+                    catalogHits.Count,
+                    query );
+                return catalogHits;
+            }
         }
 
-        // Fallback: some indexes ignore include_domains — try explicit site: operator.
-        List<TavilySearchHit> siteHits = new();
-        foreach (string domain in domains.Take( 3 ))
+        // Bare ISBN is almost never indexed for these shops — skip slow Tavily.
+        if (IsBareIsbnQuery( query ))
         {
-            string apex = StripWww( domain );
+            _logger.LogInformation(
+                "Book lookup: skipping Tavily for bare ISBN query on supplier domains" );
+            return Array.Empty<TavilySearchHit>();
+        }
+
+        try
+        {
+            IReadOnlyList<TavilySearchHit> hits = FilterHitsToDomains(
+                await _tavily.SearchAsync(
+                    query,
+                    domains,
+                    ResultsPerSearch,
+                    cancellationToken ),
+                domains );
+
+            if (hits.Count > 0)
+            {
+                return hits;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "Tavily supplier search failed for query={Query}", query );
+        }
+
+        string apex = StripWww( domains[0] );
+        if (string.IsNullOrWhiteSpace( apex ))
+        {
+            return Array.Empty<TavilySearchHit>();
+        }
+
+        try
+        {
             string siteQuery = $"site:{apex} {query}";
             _logger.LogInformation( "Book lookup site: fallback query={Query}", siteQuery );
-            IReadOnlyList<TavilySearchHit> batch = FilterHitsToDomains(
+            return FilterHitsToDomains(
                 await _tavily.SearchAsync(
                     siteQuery,
                     includeDomains: null,
                     ResultsPerSearch,
                     cancellationToken ),
                 domains );
-            foreach (TavilySearchHit hit in batch)
-            {
-                if (siteHits.Any( h => NormalizeUrlKey( h.Url ) == NormalizeUrlKey( hit.Url ) ))
-                {
-                    continue;
-                }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "Tavily site: fallback failed for query={Query}", query );
+            return Array.Empty<TavilySearchHit>();
+        }
+    }
 
-                siteHits.Add( hit );
-            }
+    private static bool IsBareIsbnQuery( string query )
+    {
+        string trimmed = (query ?? string.Empty).Trim();
+        string? asIsbn = IsbnUtil.Normalize( trimmed );
+        return !string.IsNullOrWhiteSpace( asIsbn )
+            && string.Equals( DigitsOnly( trimmed ), asIsbn, StringComparison.Ordinal );
+    }
 
-            if (siteHits.Count > 0)
+    /// <summary>
+    /// Shop catalog: WooCommerce REST, then HTML <c>?s=</c> search.
+    /// Returns Blocked=true when Cloudflare (or similar) 403s the shop.
+    /// </summary>
+    private async Task<(IReadOnlyList<TavilySearchHit> Hits, bool Blocked)> SearchWordpressCatalogAsync(
+        string query,
+        IReadOnlyList<string> domains,
+        CancellationToken cancellationToken )
+    {
+        string trimmed = (query ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( trimmed ) || domains.Count == 0)
+        {
+            return (Array.Empty<TavilySearchHit>(), false);
+        }
+
+        if (IsBareIsbnQuery( trimmed ))
+        {
+            return (Array.Empty<TavilySearchHit>(), false);
+        }
+
+        HttpClient client = _httpClientFactory.CreateClient( "BookLookupPage" );
+        List<TavilySearchHit> hits = new();
+        HashSet<string> seen = new( StringComparer.OrdinalIgnoreCase );
+        string? apex = domains
+            .Select( StripWww )
+            .FirstOrDefault( a => !string.IsNullOrWhiteSpace( a ) );
+        if (string.IsNullOrWhiteSpace( apex ))
+        {
+            return (Array.Empty<TavilySearchHit>(), false);
+        }
+
+        (bool restOk, bool restBlocked) = await TryWordpressRestCatalogAsync(
+            client,
+            apex,
+            trimmed,
+            domains,
+            hits,
+            seen,
+            cancellationToken );
+        if (restBlocked)
+        {
+            return (hits, true);
+        }
+
+        if (hits.Count > 0)
+        {
+            return (hits, false);
+        }
+
+        if (!restOk)
+        {
+            (_, bool htmlBlocked) = await TryStorefrontHtmlSearchAsync(
+                client,
+                apex,
+                trimmed,
+                domains,
+                hits,
+                seen,
+                cancellationToken );
+            if (htmlBlocked)
             {
-                break;
+                return (hits, true);
             }
         }
 
-        return siteHits;
+        return (hits, false);
+    }
+
+    private async Task<(bool Ok, bool Blocked)> TryWordpressRestCatalogAsync(
+        HttpClient client,
+        string apex,
+        string query,
+        IReadOnlyList<string> domains,
+        List<TavilySearchHit> hits,
+        HashSet<string> seen,
+        CancellationToken cancellationToken )
+    {
+        string url =
+            $"https://{apex}/wp-json/wp/v2/product?search={Uri.EscapeDataString( query )}&per_page=5";
+        try
+        {
+            using HttpResponseMessage response = await client.GetAsync( url, cancellationToken );
+            int status = (int)response.StatusCode;
+            if (status is 403 or 503)
+            {
+                _logger.LogWarning( "WordPress catalog {Url} returned {Status}", url, status );
+                return (false, true);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning( "WordPress catalog {Url} returned {Status}", url, status );
+                return (false, false);
+            }
+
+            string body = await response.Content.ReadAsStringAsync( cancellationToken );
+            using JsonDocument doc = JsonDocument.Parse( body );
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return (true, false);
+            }
+
+            foreach (JsonElement item in doc.RootElement.EnumerateArray())
+            {
+                string link = item.TryGetProperty( "link", out JsonElement linkEl )
+                    ? (linkEl.GetString() ?? string.Empty).Trim()
+                    : string.Empty;
+                string title = string.Empty;
+                if (item.TryGetProperty( "title", out JsonElement titleEl )
+                    && titleEl.ValueKind == JsonValueKind.Object
+                    && titleEl.TryGetProperty( "rendered", out JsonElement rendered ))
+                {
+                    title = DecodeHtml( rendered.GetString() ?? string.Empty ) ?? string.Empty;
+                }
+
+                string excerpt = string.Empty;
+                if (item.TryGetProperty( "excerpt", out JsonElement excerptEl )
+                    && excerptEl.ValueKind == JsonValueKind.Object
+                    && excerptEl.TryGetProperty( "rendered", out JsonElement excerptRendered ))
+                {
+                    excerpt = StripHtmlTags(
+                        DecodeHtml( excerptRendered.GetString() ?? string.Empty ) ?? string.Empty );
+                }
+
+                TryAddCatalogHit( hits, seen, domains, link, title, excerpt );
+            }
+
+            return (true, false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "WordPress catalog search failed for {Url}", url );
+            return (false, false);
+        }
+    }
+
+    private async Task<(bool Ok, bool Blocked)> TryStorefrontHtmlSearchAsync(
+        HttpClient client,
+        string apex,
+        string query,
+        IReadOnlyList<string> domains,
+        List<TavilySearchHit> hits,
+        HashSet<string> seen,
+        CancellationToken cancellationToken )
+    {
+        string url =
+            $"https://{apex}/?s={Uri.EscapeDataString( query )}&post_type=product";
+        try
+        {
+            using HttpRequestMessage request = new( HttpMethod.Get, url );
+            request.Headers.TryAddWithoutValidation( "Referer", $"https://{apex}/" );
+            using HttpResponseMessage response = await client.SendAsync( request, cancellationToken );
+            int status = (int)response.StatusCode;
+            if (status is 403 or 503)
+            {
+                _logger.LogWarning( "Storefront HTML search {Url} returned {Status}", url, status );
+                return (false, true);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning( "Storefront HTML search {Url} returned {Status}", url, status );
+                return (false, false);
+            }
+
+            string html = await response.Content.ReadAsStringAsync( cancellationToken );
+            if (string.IsNullOrWhiteSpace( html )
+                || html.Contains( "Just a moment", StringComparison.OrdinalIgnoreCase )
+                || html.Contains( "cf-browser-verification", StringComparison.OrdinalIgnoreCase ))
+            {
+                _logger.LogWarning( "Storefront HTML search {Url} looks like a bot wall", url );
+                return (false, true);
+            }
+
+            int before = hits.Count;
+            foreach ((string link, string title) in ExtractProductLinksFromSearchHtml( html, apex ))
+            {
+                TryAddCatalogHit( hits, seen, domains, link, title, content: string.Empty );
+                if (hits.Count >= 5)
+                {
+                    break;
+                }
+            }
+
+            if (hits.Count > before)
+            {
+                _logger.LogInformation(
+                    "Book lookup storefront HTML search queued {Count} hit(s) for query={Query}",
+                    hits.Count - before,
+                    query );
+            }
+
+            return (true, false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "Storefront HTML search failed for {Url}", url );
+            return (false, false);
+        }
+    }
+
+    private static void TryAddCatalogHit(
+        List<TavilySearchHit> hits,
+        HashSet<string> seen,
+        IReadOnlyList<string> domains,
+        string link,
+        string title,
+        string content )
+    {
+        if (string.IsNullOrWhiteSpace( link ) || string.IsNullOrWhiteSpace( title ))
+        {
+            return;
+        }
+
+        if (!IsSupplierHost( link, domains ))
+        {
+            return;
+        }
+
+        string key = NormalizeUrlKey( link );
+        if (!seen.Add( key ))
+        {
+            return;
+        }
+
+        hits.Add( new TavilySearchHit
+        {
+            Title = title.Trim(),
+            Url = link.Trim(),
+            Content = (content ?? string.Empty).Trim(),
+        } );
+    }
+
+    /// <summary>
+    /// Pull product cards from WooCommerce/WordPress search HTML.
+    /// </summary>
+    private static IEnumerable<(string Url, string Title)> ExtractProductLinksFromSearchHtml(
+        string html,
+        string apex )
+    {
+        if (string.IsNullOrWhiteSpace( html ))
+        {
+            yield break;
+        }
+
+        // href="https://shop/pradukt/slug/" ... title text in nearby heading or link body.
+        Regex linkRe = new(
+            $@"href\s*=\s*[""'](?<url>https?://(?:www\.)?{Regex.Escape( apex )}/(?:pradukt|produkt|product)/[^""'#?]+/?)[""'][^>]*>(?<inner>.*?)</a>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant );
+
+        HashSet<string> yielded = new( StringComparer.OrdinalIgnoreCase );
+        foreach (Match m in linkRe.Matches( html ))
+        {
+            string url = m.Groups["url"].Value.Trim();
+            string inner = StripHtmlTags( DecodeHtml( m.Groups["inner"].Value ) ?? string.Empty )
+                .Trim();
+            if (string.IsNullOrWhiteSpace( inner ) || inner.Length < 3)
+            {
+                continue;
+            }
+
+            // Skip nav/noise ("Дадаць у кошык", prices-only).
+            if (inner.Length > 180 || LooksLikeCartOrUiNoise( inner ))
+            {
+                continue;
+            }
+
+            string key = NormalizeUrlKey( url );
+            if (!yielded.Add( key ))
+            {
+                continue;
+            }
+
+            yield return (url, inner);
+        }
+    }
+
+    private static bool LooksLikeCartOrUiNoise( string text )
+    {
+        string n = text.Trim().ToLowerInvariant();
+        return n.Contains( "кошык", StringComparison.Ordinal )
+            || n.Contains( "корзин", StringComparison.Ordinal )
+            || n.Contains( "add to cart", StringComparison.Ordinal )
+            || n.Contains( "czytaj więcej", StringComparison.Ordinal )
+            || n.Contains( "чытаць далей", StringComparison.Ordinal )
+            || (n.Length <= 12 && n.Any( char.IsDigit ) && n.Contains( "zł", StringComparison.Ordinal ));
     }
 
     private static IReadOnlyList<TavilySearchHit> FilterHitsToDomains(
@@ -710,6 +2014,28 @@ public sealed class BookLookupService
 
         if (!session.SupplierPhaseExhausted
             && session.SupplierDomains.Count > 0
+            && !session.CatalogPrefillDone)
+        {
+            session.CatalogPrefillDone = true;
+            if (await TryPrefillWordpressCatalogAsync( session, cancellationToken ))
+            {
+                _sessions.Save( session );
+                return true;
+            }
+
+            // Direct shop HTTP is often Cloudflare-blocked from the server.
+            // Search the shop via Tavily (indexed pages) — never invent product URLs.
+            if (await TrySearchSupplierViaIndexerAsync( session, cancellationToken ))
+            {
+                _sessions.Save( session );
+                return true;
+            }
+
+            _sessions.Save( session );
+        }
+
+        if (!session.SupplierPhaseExhausted
+            && session.SupplierDomains.Count > 0
             && session.SupplierSearchCalls < maxSupplier)
         {
             IReadOnlyList<string> queries = BuildSearchQueries( session, forSupplier: true );
@@ -729,6 +2055,7 @@ public sealed class BookLookupService
                 string.Join( ",", session.SupplierDomains ) );
 
             IReadOnlyList<TavilySearchHit> hits = await SearchSupplierAsync(
+                session,
                 query,
                 session.SupplierDomains,
                 cancellationToken );
@@ -822,6 +2149,373 @@ public sealed class BookLookupService
         }
     }
 
+    private static bool LooksPromisingHit(
+        BookLookupSessionState session,
+        PendingSearchHit hit )
+    {
+        if (string.IsNullOrWhiteSpace( hit.Url ))
+        {
+            return false;
+        }
+
+        // Manual URLs are trusted enough to normalize.
+        if (string.Equals( hit.Source, "manual", StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        if (SoftTitlePhraseContainedIn( hit.Title, session.QueryTitle )
+            || SoftTitlePhraseContainedIn( $"{hit.Title} {hit.Content}", session.QueryTitle ))
+        {
+            return true;
+        }
+
+        string last = AuthorLastName( session.QueryAuthor );
+        string blobNorm = NormalizeForMatch( $"{hit.Title}\n{hit.Url}\n{hit.Content}" );
+        bool authorHit = !string.IsNullOrWhiteSpace( last )
+            && last.Length >= 3
+            && (blobNorm.Contains( NormalizeForMatch( last ), StringComparison.Ordinal )
+                || FoldBeLetters( blobNorm ).Contains(
+                    FoldBeLetters( NormalizeForMatch( last ) ),
+                    StringComparison.Ordinal ));
+
+        IReadOnlyList<string> titleWords = SoftTitleWords( session.QueryTitle )
+            .Where( w => w.Length >= 3 && !IsWeakTitleWord( w ) )
+            .ToArray();
+        int titleHits = CountSoftWordHits( SoftTitleWords( $"{hit.Title} {hit.Content}" ), titleWords );
+
+        if (authorHit && titleHits >= 1)
+        {
+            return true;
+        }
+
+        if (titleHits >= 2)
+        {
+            return true;
+        }
+
+        // Latin slug in URL (mikalaj-statkevich-i-heta…).
+        string slug = BuildProductSlug( session.QueryAuthor, session.QueryTitle );
+        if (!string.IsNullOrWhiteSpace( slug )
+            && slug.Length >= 8
+            && hit.Url.Contains( slug, StringComparison.OrdinalIgnoreCase ))
+        {
+            return true;
+        }
+
+        string latinAuthor = ToBelarusianLatinSlug(
+            string.Join( " ", SoftTitleWords( session.QueryAuthor ).Take( 2 ) ) );
+        if (!string.IsNullOrWhiteSpace( latinAuthor )
+            && latinAuthor.Length >= 5
+            && hit.Url.Contains( latinAuthor, StringComparison.OrdinalIgnoreCase )
+            && titleHits >= 1)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Search the supplier shop via Tavily (works when Cloudflare blocks our server IP).
+    /// Only enqueues real indexed hits — never invents /pradukt/… URLs.
+    /// </summary>
+    private async Task<bool> TrySearchSupplierViaIndexerAsync(
+        BookLookupSessionState session,
+        CancellationToken cancellationToken )
+    {
+        if (session.SupplierDomains.Count == 0)
+        {
+            return false;
+        }
+
+        string apex = StripWww( session.SupplierDomains[0] );
+        if (string.IsNullOrWhiteSpace( apex ))
+        {
+            return false;
+        }
+
+        string? author = session.QueryAuthor;
+        if (!string.IsNullOrWhiteSpace( author ) && LooksLikeOcrAllCaps( author ))
+        {
+            author = HumanizeOcrName( author.Trim() );
+        }
+
+        string authorLast = AuthorLastName( author );
+        string softTitle = SoftTitleForSearch( session.QueryTitle );
+        string core3 = SoftTitleCore( softTitle, maxWords: 3 );
+        string latinAuthor = ToBelarusianLatinSlug(
+            string.Join( " ", SoftTitleWords( author ).Take( 2 ) ) );
+        string latinTitle = ToBelarusianLatinSlug(
+            string.Join(
+                " ",
+                TitleTokensForSlug( session.QueryTitle ).Where( w => !IsSlugParticle( w ) ).Take( 3 ) ) );
+
+        List<string> queries = new();
+        void AddQuery( string? q )
+        {
+            if (string.IsNullOrWhiteSpace( q ))
+            {
+                return;
+            }
+
+            string t = q.Trim();
+            if (!queries.Contains( t, StringComparer.OrdinalIgnoreCase ))
+            {
+                queries.Add( t );
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace( latinAuthor ) && latinAuthor.Length >= 5)
+        {
+            AddQuery( $"site:{apex}/pradukt {latinAuthor.Replace( '-', ' ' )}" );
+            AddQuery( $"site:{apex} {latinAuthor.Replace( '-', ' ' )}" );
+        }
+
+        if (!string.IsNullOrWhiteSpace( latinAuthor ) && !string.IsNullOrWhiteSpace( latinTitle ))
+        {
+            AddQuery(
+                $"site:{apex} {latinAuthor.Replace( '-', ' ' )} {latinTitle.Replace( '-', ' ' )}" );
+        }
+
+        if (!string.IsNullOrWhiteSpace( authorLast ) && !string.IsNullOrWhiteSpace( core3 ))
+        {
+            AddQuery( $"site:{apex} {authorLast} {core3}" );
+        }
+
+        if (!string.IsNullOrWhiteSpace( authorLast ))
+        {
+            AddQuery( $"site:{apex} {authorLast}" );
+        }
+
+        if (!string.IsNullOrWhiteSpace( softTitle ))
+        {
+            AddQuery( $"site:{apex} {softTitle}" );
+        }
+
+        foreach (string query in queries.Take( 4 ))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _logger.LogInformation( "Book lookup indexer search: {Query}", query );
+
+            IReadOnlyList<TavilySearchHit> found;
+            try
+            {
+                found = FilterHitsToDomains(
+                    await _tavily.SearchAsync(
+                        query,
+                        includeDomains: null,
+                        ResultsPerSearch,
+                        cancellationToken ),
+                    session.SupplierDomains );
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning( ex, "Indexer search failed for {Query}", query );
+                continue;
+            }
+
+            IReadOnlyList<TavilySearchHit> ranked = RankHits( found, session )
+                .Where( h => LooksPromisingHit(
+                    session,
+                    new PendingSearchHit
+                    {
+                        Title = h.Title,
+                        Url = h.Url,
+                        Content = h.Content,
+                        Source = "supplier",
+                    } ) )
+                .Take( ResultsPerSearch )
+                .ToList();
+
+            if (ranked.Count == 0)
+            {
+                continue;
+            }
+
+            EnqueueHits( session, ranked, "supplier" );
+            if (session.Queue.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Book lookup indexer queued {Count} hit(s) for {Query}",
+                    session.Queue.Count,
+                    query );
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Latin fragment for Tavily queries (not for inventing URLs).</summary>
+    private static string BuildProductSlug( string? author, string? title )
+    {
+        return BuildProductSlugVariants( author, title ).FirstOrDefault() ?? string.Empty;
+    }
+
+    private static IReadOnlyList<string> BuildProductSlugVariants( string? author, string? title )
+    {
+        List<string> parts = new();
+        foreach (string w in SoftTitleWords( author ).Take( 2 ))
+        {
+            string latin = ToBelarusianLatinSlug( w );
+            if (!string.IsNullOrWhiteSpace( latin ))
+            {
+                parts.Add( latin );
+            }
+        }
+
+        int authorParts = parts.Count;
+        foreach (string w in TitleTokensForSlug( title ))
+        {
+            string latin = ToBelarusianLatinSlug( w );
+            if (!string.IsNullOrWhiteSpace( latin ))
+            {
+                parts.Add( latin );
+            }
+        }
+
+        if (parts.Count <= authorParts)
+        {
+            return Array.Empty<string>();
+        }
+
+        List<string> variants = new();
+        variants.Add( string.Join( "-", parts ) );
+        if (parts.Count > authorParts + 4)
+        {
+            variants.Add( string.Join( "-", parts.Take( authorParts + 4 ) ) );
+        }
+
+        return variants
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .Where( v => v.Length >= 8 )
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> TitleTokensForSlug( string? title )
+    {
+        if (string.IsNullOrWhiteSpace( title ))
+        {
+            return Array.Empty<string>();
+        }
+
+        List<string> result = new();
+        foreach (string raw in NormalizeForMatch( title )
+                     .Split( ' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries ))
+        {
+            string w = FoldBeLetters( raw );
+            if (string.IsNullOrWhiteSpace( w ))
+            {
+                continue;
+            }
+
+            if (IsWeakTitleWord( w ) || IsSlugGenreWord( w ))
+            {
+                break;
+            }
+
+            if (w.Length == 1 && !IsSlugParticle( w ))
+            {
+                continue;
+            }
+
+            result.Add( w );
+            if (result.Count( t => !IsSlugParticle( t ) ) >= 5)
+            {
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    private static bool IsSlugParticle( string word )
+    {
+        string w = FoldBeLetters( word.Trim().ToLowerInvariant() );
+        return w is "і" or "и" or "у" or "i" or "u" or "a" or "the" or "of";
+    }
+
+    private static bool IsSlugGenreWord( string word )
+    {
+        string w = FoldBeLetters( word.Trim().ToLowerInvariant() );
+        if (w is "эсэ" or "эссе" or "есе" or "essay" or "essays" or "проза" or "паэзія"
+            or "вершы" or "аповесць" or "раман")
+        {
+            return true;
+        }
+
+        return w.StartsWith( "турэмн", StringComparison.Ordinal )
+            || w.StartsWith( "тюремн", StringComparison.Ordinal )
+            || w.StartsWith( "prison", StringComparison.Ordinal );
+    }
+
+    private static string ToBelarusianLatinSlug( string? word )
+    {
+        if (string.IsNullOrWhiteSpace( word ))
+        {
+            return string.Empty;
+        }
+
+        string folded = FoldBeLetters( word.Trim().ToLowerInvariant() );
+        StringBuilder sb = new( folded.Length * 2 );
+        char prev = '\0';
+        foreach (char c in folded)
+        {
+            if (c == 'е')
+            {
+                // табе→tabie (е after labial); статкевіч→statkevich (е after к).
+                bool labial = prev is 'б' or 'п' or 'в' or 'м' or 'ф';
+                sb.Append( labial ? "ie" : "e" );
+            }
+            else
+            {
+                sb.Append( c switch
+                {
+                    'а' => "a",
+                    'б' => "b",
+                    'в' => "v",
+                    'г' => "h",
+                    'д' => "d",
+                    'ё' => "io",
+                    'ж' => "zh",
+                    'з' => "z",
+                    'і' => "i",
+                    'й' => "j",
+                    'к' => "k",
+                    'л' => "l",
+                    'м' => "m",
+                    'н' => "n",
+                    'о' => "o",
+                    'п' => "p",
+                    'р' => "r",
+                    'с' => "s",
+                    'т' => "t",
+                    'у' => "u",
+                    'ф' => "f",
+                    'х' => "kh",
+                    'ц' => "c",
+                    'ч' => "ch",
+                    'ш' => "sh",
+                    'ы' => "y",
+                    'э' => "e",
+                    'ю' => "iu",
+                    'я' => "ia",
+                    'ь' or '\'' or '’' => "",
+                    _ when c is >= 'a' and <= 'z' || c is >= '0' and <= '9' => c.ToString(),
+                    _ => ""
+                } );
+            }
+
+            if (char.IsLetter( c ))
+            {
+                prev = c;
+            }
+        }
+
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Supplier site: soft title (+ shorter core) → author → ISBN.
     /// Titles are punctuation-stripped so near-matches still hit.
@@ -834,53 +2528,76 @@ public sealed class BookLookupService
         List<string> queries = new();
         string? isbn = session.QueryIsbn;
         string? author = session.QueryAuthor;
+        // OCR authors are often ALL CAPS — humanize for shop/Tavily queries.
+        if (!string.IsNullOrWhiteSpace( author ) && LooksLikeOcrAllCaps( author ))
+        {
+            author = HumanizeOcrName( author.Trim() );
+        }
+
         string softTitle = SoftTitleForSearch( session.QueryTitle );
         string authorLast = AuthorLastName( author );
 
         if (forSupplier)
         {
-            // Title phrase first (punctuation-stripped) — shop titles often contain the
-            // OCR phrase rather than matching it exactly.
-            if (!string.IsNullOrWhiteSpace( softTitle ))
+            // When Cloudflare blocks the shop, bare ISBN never helps and only wastes a slot.
+            if (!session.SupplierCatalogBlocked && !string.IsNullOrWhiteSpace( isbn ))
             {
-                queries.Add( softTitle );
-            }
-
-            string coreTitle = SoftTitleCore( softTitle, maxWords: 5 );
-            if (!string.IsNullOrWhiteSpace( coreTitle )
-                && !string.Equals( coreTitle, softTitle, StringComparison.OrdinalIgnoreCase ))
-            {
-                queries.Add( coreTitle );
-            }
-
-            if (!string.IsNullOrWhiteSpace( author ) && !string.IsNullOrWhiteSpace( softTitle ))
-            {
-                queries.Add( $"{author.Trim()} {softTitle}" );
-            }
-            else if (!string.IsNullOrWhiteSpace( authorLast ) && !string.IsNullOrWhiteSpace( softTitle ))
-            {
-                queries.Add( $"{authorLast} {softTitle}" );
-            }
-
-            if (!string.IsNullOrWhiteSpace( isbn ))
-            {
-                // Bare digits match both 9788367937856 and 978-83-67937-85-6.
                 queries.Add( isbn );
             }
 
-            if (!string.IsNullOrWhiteSpace( author ))
+            string core3 = SoftTitleCore( softTitle, maxWords: 3 );
+            string core5 = SoftTitleCore( softTitle, maxWords: 5 );
+            string latinSlug = BuildProductSlug( author, session.QueryTitle );
+            string latinAuthor = ToBelarusianLatinSlug(
+                string.Join( " ", SoftTitleWords( author ).Take( 2 ) ) );
+
+            // Author + short title first — best Tavily signal for Cyrillic shops.
+            if (!string.IsNullOrWhiteSpace( authorLast ) && !string.IsNullOrWhiteSpace( core3 ))
+            {
+                queries.Add( $"{authorLast} {core3}" );
+            }
+
+            if (!string.IsNullOrWhiteSpace( authorLast ))
+            {
+                queries.Add( authorLast );
+            }
+            else if (!string.IsNullOrWhiteSpace( author ))
             {
                 queries.Add( author.Trim() );
             }
-            else if (!string.IsNullOrWhiteSpace( authorLast ))
+
+            if (!string.IsNullOrWhiteSpace( latinSlug ) && latinSlug.Length >= 8)
             {
-                queries.Add( authorLast );
+                queries.Add( latinSlug.Replace( '-', ' ' ) );
+            }
+
+            if (!string.IsNullOrWhiteSpace( latinAuthor ) && latinAuthor.Length >= 4)
+            {
+                queries.Add( latinAuthor.Replace( '-', ' ' ) );
+            }
+
+            if (!string.IsNullOrWhiteSpace( core3 ))
+            {
+                queries.Add( core3 );
+            }
+
+            if (!string.IsNullOrWhiteSpace( softTitle )
+                && !string.Equals( softTitle, core3, StringComparison.OrdinalIgnoreCase )
+                && !string.Equals( softTitle, core5, StringComparison.OrdinalIgnoreCase ))
+            {
+                queries.Add( softTitle );
+            }
+            else if (!string.IsNullOrWhiteSpace( core5 )
+                && !string.Equals( core5, core3, StringComparison.OrdinalIgnoreCase ))
+            {
+                queries.Add( core5 );
             }
 
             return queries
                 .Where( q => !string.IsNullOrWhiteSpace( q ) )
                 .Select( q => q.Trim() )
                 .Distinct( StringComparer.OrdinalIgnoreCase )
+                .Take( 5 )
                 .ToList();
         }
 
@@ -928,7 +2645,8 @@ public sealed class BookLookupService
 
     private static string SoftTitleForSearch( string? title )
     {
-        return string.Join( " ", SoftTitleWords( title ).Take( 8 ) );
+        // Keep queries short — long OCR strings (subtitle/genre) miss shop pages.
+        return string.Join( " ", SoftTitleWords( title ).Take( 5 ) );
     }
 
     /// <summary>
@@ -978,7 +2696,39 @@ public sealed class BookLookupService
             }
         }
 
+        // Unordered soft overlap: enough distinctive words regardless of order/subtitle.
+        int distinctive = needle.Count( w => w.Length >= 3 );
+        if (distinctive >= 2)
+        {
+            int need = distinctive <= 3 ? 2 : Math.Max( 2, ( distinctive + 1 ) / 2 );
+            if (CountSoftWordHits( hay, needle ) >= need)
+            {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private static int CountSoftWordHits(
+        IReadOnlyList<string> hayWords,
+        IReadOnlyList<string> needleWords )
+    {
+        int hits = 0;
+        foreach (string needle in needleWords)
+        {
+            if (needle.Length < 3)
+            {
+                continue;
+            }
+
+            if (hayWords.Any( h => WordsSoftEqual( h, needle ) ))
+            {
+                hits++;
+            }
+        }
+
+        return hits;
     }
 
     private static bool PhraseWordsMatchInOrder(
@@ -1035,16 +2785,25 @@ public sealed class BookLookupService
             return true;
         }
 
-        if (a.Length < 4 || b.Length < 4)
+        // Short tokens (3 chars): allow one trailing-char drift (эсе/эсэ).
+        if (a.Length < 3 || b.Length < 3)
         {
             return false;
         }
 
+        if (a.Length == 3 || b.Length == 3)
+        {
+            string shorter = a.Length <= b.Length ? a : b;
+            string longer = a.Length <= b.Length ? b : a;
+            return longer.Length <= 4
+                && longer.StartsWith( shorter[..^1], StringComparison.Ordinal );
+        }
+
         // Slight ending drift: каханне / кахання / каханню
-        string shorter = a.Length <= b.Length ? a : b;
-        string longer = a.Length <= b.Length ? b : a;
-        return longer.StartsWith( shorter[..^1], StringComparison.Ordinal )
-            || (shorter.Length >= 5 && longer.StartsWith( shorter[..^2], StringComparison.Ordinal ));
+        string shortW = a.Length <= b.Length ? a : b;
+        string longW = a.Length <= b.Length ? b : a;
+        return longW.StartsWith( shortW[..^1], StringComparison.Ordinal )
+            || (shortW.Length >= 5 && longW.StartsWith( shortW[..^2], StringComparison.Ordinal ));
     }
 
     /// <summary>Shorter title query so Tavily still finds near-matches.</summary>
@@ -1207,6 +2966,64 @@ public sealed class BookLookupService
         PendingSearchHit hit,
         CancellationToken cancellationToken )
     {
+        // Catalog/search titles are trustworthy when they already soft-match the OCR query.
+        // Skip LLM + Cloudflare HTML for these — they were wrongly rejecting real Kamunikat hits.
+        bool hitTitleMatchesQuery = SoftTitlePhraseContainedIn( hit.Title, session.QueryTitle );
+        string queryAuthorLast = AuthorLastName( session.QueryAuthor );
+        bool hitAuthorMatchesQuery = !string.IsNullOrWhiteSpace( queryAuthorLast )
+            && queryAuthorLast.Length >= 3
+            && NormalizeForMatch( hit.Title )
+                .Contains( NormalizeForMatch( queryAuthorLast ), StringComparison.Ordinal );
+
+        if (hitTitleMatchesQuery
+            || (hitAuthorMatchesQuery
+                && CountSoftWordHits(
+                    SoftTitleWords( hit.Title ),
+                    SoftTitleWords( session.QueryTitle ).Where( w => w.Length >= 3 && !IsWeakTitleWord( w ) ).ToArray() ) >= 2))
+        {
+            (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle(
+                hit.Title,
+                session.QueryAuthor );
+            string catalogTitle = CleanBookTitle(
+                string.IsNullOrWhiteSpace( titleOnly ) ? hit.Title : titleOnly );
+            string? catalogAuthor = ResolveNominativeAuthor(
+                authorFromTitle,
+                session.QueryAuthor,
+                hit.Title,
+                string.IsNullOrWhiteSpace( session.QueryAuthor )
+                    ? null
+                    : HumanizeOcrName( session.QueryAuthor.Trim() ) );
+
+            if (string.IsNullOrWhiteSpace( catalogAuthor ) && hitAuthorMatchesQuery)
+            {
+                catalogAuthor = FormatAuthorFirstLast(
+                    HumanizeOcrName( session.QueryAuthor!.Trim() ),
+                    session.QueryAuthor );
+            }
+
+            _logger.LogInformation(
+                "Book lookup using catalog/search title for {Url}: {Title}",
+                hit.Url,
+                catalogTitle );
+
+            string snippet = hit.Content ?? string.Empty;
+            if (snippet.Length > 280)
+            {
+                snippet = snippet[..280];
+            }
+
+            return new BookLookupCandidateDto
+            {
+                Title = catalogTitle,
+                Author = catalogAuthor,
+                Isbn = session.QueryIsbn,
+                Publisher = null,
+                Url = hit.Url,
+                Source = hit.Source,
+                Snippet = snippet,
+            };
+        }
+
         PageTitleHints pageHints = await TryFetchPageTitleHintsAsync( hit.Url, cancellationToken );
         string pageTitleRaw = pageHints.BestRawTitle
             ?? (string.IsNullOrWhiteSpace( hit.Title ) ? session.QueryTitle : hit.Title);
@@ -1234,17 +3051,38 @@ public sealed class BookLookupService
                 cancellationToken );
             if (parsed is not null)
             {
+                // Prefer the search-hit title over Cloudflare interstitial H1.
                 if (parsed.SameBook == false)
                 {
-                    return new BookLookupCandidateDto
+                    bool catalogTitleOk = SoftTitlePhraseContainedIn( hit.Title, session.QueryTitle );
+                    bool htmlTitleOk = SoftTitlePhraseContainedIn(
+                        FirstNonEmpty( pageHints.H1, pageHints.OgTitle ) ?? string.Empty,
+                        session.QueryTitle );
+                    if (!catalogTitleOk && !htmlTitleOk)
                     {
-                        Title = string.Empty,
-                        Url = hit.Url,
-                        Source = hit.Source,
-                    };
+                        _logger.LogInformation(
+                            "LLM marked {Url} as different book; skipping",
+                            hit.Url );
+                        return new BookLookupCandidateDto
+                        {
+                            Title = string.Empty,
+                            Url = hit.Url,
+                            Source = hit.Source,
+                        };
+                    }
+
+                    _logger.LogInformation(
+                        "LLM marked {Url} as different book; catalog/HTML title still matches — keeping",
+                        hit.Url );
                 }
 
-                if (!string.IsNullOrWhiteSpace( parsed.Title ))
+                if (!string.IsNullOrWhiteSpace( parsed.Title )
+                    && parsed.SameBook != false)
+                {
+                    llmTitle = parsed.Title.Trim();
+                }
+                else if (!string.IsNullOrWhiteSpace( parsed.Title )
+                    && SoftTitlePhraseContainedIn( parsed.Title, session.QueryTitle ))
                 {
                     llmTitle = parsed.Title.Trim();
                 }
@@ -1305,6 +3143,31 @@ public sealed class BookLookupService
             && SoftTitlePhraseContainedIn( hitTitleOnly, session.QueryTitle ))
         {
             title = CleanBookTitle( hitTitleOnly );
+        }
+
+        // Never show the raw OCR query as if it came from the shop page.
+        if (!string.IsNullOrWhiteSpace( session.QueryTitle )
+            && string.Equals(
+                NormalizeForMatch( title ),
+                NormalizeForMatch( session.QueryTitle ),
+                StringComparison.Ordinal )
+            && LooksLikeOcrAllCaps( session.QueryTitle ))
+        {
+            string? shopTitle = FirstNonEmpty(
+                pageHints.H1,
+                pageHints.OgTitle,
+                hitTitleOnly,
+                pageHints.HtmlTitle );
+            if (!string.IsNullOrWhiteSpace( shopTitle )
+                && !LooksLikeOcrAllCaps( shopTitle ))
+            {
+                title = CleanBookTitle( SplitAuthorFromTitle( shopTitle, pageAuthorForSplit ).Title );
+            }
+            else
+            {
+                // No usable shop title — drop this hit rather than paint OCR onto a wrong URL.
+                title = string.Empty;
+            }
         }
 
         author = ResolveNominativeAuthor(
@@ -1452,7 +3315,14 @@ public sealed class BookLookupService
             return best;
         }
 
-        return string.IsNullOrWhiteSpace( query ) ? (best ?? string.Empty) : query;
+        // Prefer any real shop title over copying the OCR query onto a wrong page.
+        if (!string.IsNullOrWhiteSpace( best ))
+        {
+            return best;
+        }
+
+        // No page title at all — empty so PresentNext skips (do not paint OCR on a random URL).
+        return string.Empty;
     }
 
     private static int ScoreTitleAgainstQuery( string candidate, IReadOnlyList<string> queryWords )
@@ -1462,8 +3332,8 @@ public sealed class BookLookupService
             return 0;
         }
 
-        string norm = FoldBeLetters( NormalizeForMatch( candidate ) );
-        return queryWords.Count( w => norm.Contains( w, StringComparison.Ordinal ) );
+        IReadOnlyList<string> candWords = SoftTitleWords( candidate );
+        return CountSoftWordHits( candWords, queryWords );
     }
 
     /// <summary>Belarusian OCR often confuses ў/у — fold for matching only.</summary>
@@ -1661,6 +3531,17 @@ public sealed class BookLookupService
         }
 
         return System.Net.WebUtility.HtmlDecode( value )?.Trim();
+    }
+
+    private static string StripHtmlTags( string? value )
+    {
+        if (string.IsNullOrWhiteSpace( value ))
+        {
+            return string.Empty;
+        }
+
+        string text = Regex.Replace( value, "<[^>]+>", " " );
+        return Regex.Replace( text, @"\s+", " " ).Trim();
     }
 
     /// <summary>
@@ -2004,40 +3885,48 @@ public sealed class BookLookupService
         bool onSupplierSite = session.SupplierDomains.Count > 0
             && IsSupplierHost( hit.Url, session.SupplierDomains );
         bool fromImageSearch = string.Equals( hit.Source, "image", StringComparison.OrdinalIgnoreCase )
-            || string.Equals( hit.Source, "manual", StringComparison.OrdinalIgnoreCase );
+            || string.Equals( hit.Source, "manual", StringComparison.OrdinalIgnoreCase )
+            || string.Equals( hit.Source, "slug", StringComparison.OrdinalIgnoreCase );
 
         bool isbnMatch = !string.IsNullOrWhiteSpace( session.QueryIsbn )
             && digits.Contains( session.QueryIsbn, StringComparison.Ordinal );
 
         bool authorMatch = !string.IsNullOrWhiteSpace( lastNorm )
             && lastNorm.Length >= 3
-            && blobNorm.Contains( lastNorm, StringComparison.Ordinal );
+            && (blobNorm.Contains( lastNorm, StringComparison.Ordinal )
+                || FoldBeLetters( blobNorm ).Contains( FoldBeLetters( lastNorm ), StringComparison.Ordinal )
+                || BlobHasAuthorStem( blobNorm, lastNorm ));
 
-        // Primary title signal: OCR phrase contained in shop title (punctuation-tolerant).
+        // Title signals from product titles only — not from long descriptions
+        // (descriptions often contain generic words like «зборнік» and false-match).
         bool titlePhraseInCandidate = SoftTitlePhraseContainedIn( candidate.Title, session.QueryTitle );
-        bool titlePhraseInHit = SoftTitlePhraseContainedIn( hit.Title, session.QueryTitle )
-            || SoftTitlePhraseContainedIn( $"{hit.Title} {hit.Content}", session.QueryTitle );
+        bool titlePhraseInHit = SoftTitlePhraseContainedIn( hit.Title, session.QueryTitle );
         bool titlePhraseMatch = titlePhraseInCandidate || titlePhraseInHit;
 
         IReadOnlyList<string> titleWords = SoftTitleWords( session.QueryTitle )
-            .Where( w => w.Length >= 3 )
+            .Where( w => w.Length >= 3 && !IsWeakTitleWord( w ) )
             .ToArray();
-        int titleHits = titleWords.Count( w => blobNorm.Contains( FoldBeLetters( w ), StringComparison.Ordinal )
-            || FoldBeLetters( blobNorm ).Contains( FoldBeLetters( w ), StringComparison.Ordinal ) );
+        IReadOnlyList<string> titleFieldWords = SoftTitleWords( $"{candidate.Title} {hit.Title}" );
+        int titleHits = CountSoftWordHits( titleFieldWords, titleWords );
 
         if (isbnMatch)
         {
             return true;
         }
 
-        // Page shows a different author than the cover OCR → different book.
+        // Different author on the page than cover OCR → always a different book.
         string candidateLast = NormalizeForMatch( AuthorLastName( candidate.Author ) );
+        string hitAuthorLast = NormalizeForMatch(
+            AuthorLastName( SplitAuthorFromTitle( hit.Title, null ).Author ) );
+        string pageAuthorLast = !string.IsNullOrWhiteSpace( candidateLast )
+            ? candidateLast
+            : hitAuthorLast;
         if (!string.IsNullOrWhiteSpace( lastNorm )
             && lastNorm.Length >= 3
-            && !string.IsNullOrWhiteSpace( candidateLast )
-            && candidateLast.Length >= 3
-            && !string.Equals( lastNorm, candidateLast, StringComparison.Ordinal )
-            && !AuthorTokenStemsMatch( lastNorm, candidateLast ))
+            && !string.IsNullOrWhiteSpace( pageAuthorLast )
+            && pageAuthorLast.Length >= 3
+            && !string.Equals( lastNorm, pageAuthorLast, StringComparison.Ordinal )
+            && !AuthorTokenStemsMatch( lastNorm, pageAuthorLast ))
         {
             return false;
         }
@@ -2074,6 +3963,7 @@ public sealed class BookLookupService
                 return true;
             }
 
+            // Need real title overlap — one generic word is not enough.
             int titleNeed = titleWords.Count <= 2
                 ? Math.Max( 1, titleWords.Count )
                 : 2;
@@ -2105,6 +3995,33 @@ public sealed class BookLookupService
         }
 
         return false;
+    }
+
+    private static bool IsWeakTitleWord( string word )
+    {
+        string w = FoldBeLetters( word.Trim().ToLowerInvariant() );
+        return w is "зборнік" or "сборник" or "кніга" or "книга" or "book" or "том"
+            or "частка" or "часть" or "выданне" or "издание" or "найлепшае"
+            || IsSlugGenreWord( w );
+    }
+
+    private static bool BlobHasAuthorStem( string blobNorm, string authorLastNorm )
+    {
+        string stem = AuthorTokenStem( FoldBeLetters( authorLastNorm ) );
+        if (stem.Length < 3)
+        {
+            return false;
+        }
+
+        foreach (string word in SoftTitleWords( blobNorm ))
+        {
+            if (AuthorTokenStemsMatch( stem, FoldBeLetters( word ) ))
+            {
+                return true;
+            }
+        }
+
+        return FoldBeLetters( blobNorm ).Contains( stem, StringComparison.Ordinal );
     }
 
     private static bool AuthorTokenStemsMatch( string a, string b )
@@ -2216,7 +4133,7 @@ public sealed class BookLookupService
         CancellationToken cancellationToken )
     {
         string apiKey = RequireGroqApiKey();
-        string model = ResolveVisionModel();
+        IReadOnlyList<string> models = ResolveVisionModelCandidates();
 
         List<object> contentParts = new()
         {
@@ -2264,41 +4181,78 @@ public sealed class BookLookupService
             } );
         }
 
-        object payload = new
+        Exception? lastError = null;
+        foreach (string model in models)
         {
-            model,
-            temperature = 0,
-            max_completion_tokens = 700,
-            response_format = new { type = "json_object" },
-            messages = new object[]
+            cancellationToken.ThrowIfCancellationRequested();
+            object payload = new
             {
-                new
+                model,
+                temperature = 0,
+                max_completion_tokens = 700,
+                response_format = new { type = "json_object" },
+                messages = new object[]
                 {
-                    role = "user",
-                    content = contentParts
+                    new
+                    {
+                        role = "user",
+                        content = contentParts
+                    }
                 }
+            };
+
+            try
+            {
+                string body = await SendGroqChatAsync( apiKey, payload, cancellationToken );
+                if (!TryGetMessageContent( body, out string? content ) || string.IsNullOrWhiteSpace( content ))
+                {
+                    throw new InvalidOperationException( "Vision-мадэль не вярнула адказ." );
+                }
+
+                string json = ExtractJsonObject( content );
+                BookVisionExtract? parsed = JsonSerializer.Deserialize<BookVisionExtract>( json, JsonOptions );
+                if (parsed is null)
+                {
+                    throw new InvalidOperationException( "Не ўдалося разабраць адказ vision-мадэлі." );
+                }
+
+                parsed.Title = NormalizeOcrText( parsed.Title );
+                parsed.Author = string.IsNullOrWhiteSpace( parsed.Author )
+                    ? null
+                    : NormalizeOcrText( parsed.Author );
+                parsed.Isbn = IsbnUtil.Normalize( parsed.Isbn );
+
+                if (!string.Equals( model, models[0], StringComparison.OrdinalIgnoreCase ))
+                {
+                    _logger.LogInformation( "Vision OCR succeeded with fallback model {Model}", model );
+                }
+
+                return parsed;
             }
-        };
-
-        string body = await SendGroqChatAsync( apiKey, payload, cancellationToken );
-        if (!TryGetMessageContent( body, out string? content ) || string.IsNullOrWhiteSpace( content ))
-        {
-            throw new InvalidOperationException( "Vision-мадэль не вярнула адказ." );
+            catch (Exception ex) when (IsTransientGroqFailure( ex ))
+            {
+                lastError = ex;
+                _logger.LogWarning(
+                    ex,
+                    "Vision OCR transient failure on model {Model}; trying next fallback if any",
+                    model );
+            }
         }
 
-        string json = ExtractJsonObject( content );
-        BookVisionExtract? parsed = JsonSerializer.Deserialize<BookVisionExtract>( json, JsonOptions );
-        if (parsed is null)
-        {
-            throw new InvalidOperationException( "Не ўдалося разабраць адказ vision-мадэлі." );
-        }
+        throw lastError
+            ?? new InvalidOperationException( "Не ўдалося прачытаць вокладку праз Groq." );
+    }
 
-        parsed.Title = NormalizeOcrText( parsed.Title );
-        parsed.Author = string.IsNullOrWhiteSpace( parsed.Author )
-            ? null
-            : NormalizeOcrText( parsed.Author );
-        parsed.Isbn = IsbnUtil.Normalize( parsed.Isbn );
-        return parsed;
+    private static bool IsTransientGroqFailure( Exception ex )
+    {
+        string msg = ex.Message ?? string.Empty;
+        return msg.Contains( "503", StringComparison.Ordinal )
+            || msg.Contains( "502", StringComparison.Ordinal )
+            || msg.Contains( "429", StringComparison.Ordinal )
+            || msg.Contains( "over capacity", StringComparison.OrdinalIgnoreCase )
+            || msg.Contains( "rate limit", StringComparison.OrdinalIgnoreCase )
+            || msg.Contains( "занадта шмат", StringComparison.OrdinalIgnoreCase )
+            || msg.Contains( "перагружаны", StringComparison.OrdinalIgnoreCase );
     }
 
     private static string NormalizeOcrText( string? value )
@@ -2319,21 +4273,38 @@ public sealed class BookLookupService
         CancellationToken cancellationToken )
     {
         HttpClient client = _httpClientFactory.CreateClient( "Groq" );
-        using HttpRequestMessage request = new(
-            HttpMethod.Post,
-            "https://api.groq.com/openai/v1/chat/completions" );
-        request.Headers.Authorization = new AuthenticationHeaderValue( "Bearer", apiKey );
-        request.Content = new StringContent(
-            JsonSerializer.Serialize( payload ),
-            Encoding.UTF8,
-            "application/json" );
+        const int maxAttempts = 4;
+        string? lastBody = null;
+        int lastStatus = 0;
 
-        using HttpResponseMessage response = await client.SendAsync( request, cancellationToken );
-        string body = await response.Content.ReadAsStringAsync( cancellationToken );
-        if (!response.IsSuccessStatusCode)
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            _logger.LogWarning( "Groq book lookup failed: {Status} {Body}", (int)response.StatusCode, body );
-            if ((int)response.StatusCode == 404)
+            using HttpRequestMessage request = new(
+                HttpMethod.Post,
+                "https://api.groq.com/openai/v1/chat/completions" );
+            request.Headers.Authorization = new AuthenticationHeaderValue( "Bearer", apiKey );
+            request.Content = new StringContent(
+                JsonSerializer.Serialize( payload ),
+                Encoding.UTF8,
+                "application/json" );
+
+            using HttpResponseMessage response = await client.SendAsync( request, cancellationToken );
+            string body = await response.Content.ReadAsStringAsync( cancellationToken );
+            if (response.IsSuccessStatusCode)
+            {
+                return body;
+            }
+
+            lastBody = body;
+            lastStatus = (int)response.StatusCode;
+            _logger.LogWarning(
+                "Groq book lookup failed attempt {Attempt}/{Max}: {Status} {Body}",
+                attempt,
+                maxAttempts,
+                lastStatus,
+                body );
+
+            if (lastStatus == 404)
             {
                 string modelHint = TryReadPayloadModel( payload ) ?? "(невядома)";
                 throw new InvalidOperationException(
@@ -2341,11 +4312,87 @@ public sealed class BookLookupService
                     "Праверце Groq:VisionModel / GROQ_VISION_MODEL." );
             }
 
-            throw new InvalidOperationException(
-                $"Groq API памылка: {(int)response.StatusCode}." );
+            bool retriable = lastStatus is 429 or 502 or 503 or 529;
+            if (!retriable || attempt >= maxAttempts)
+            {
+                break;
+            }
+
+            int delayMs = TryReadRetryAfterMs( response )
+                ?? TryReadRetryAfterMsFromBody( body )
+                ?? (int)Math.Min( 12_000, 800 * Math.Pow( 2, attempt - 1 ) );
+            _logger.LogInformation(
+                "Groq transient {Status}; waiting {DelayMs}ms before retry",
+                lastStatus,
+                delayMs );
+            await Task.Delay( delayMs, cancellationToken );
         }
 
-        return body;
+        if (lastStatus == 429)
+        {
+            throw new InvalidOperationException(
+                "Groq API: занадта шмат запытаў (429). Пачакайце 20–30 секунд і паўтарыце." );
+        }
+
+        if (lastStatus is 502 or 503 or 529)
+        {
+            throw new InvalidOperationException(
+                $"Groq API памылка: {lastStatus} (перагружаны). Пачакайце хвіліну і паўтарыце, або ўвядзіце назву ўручную." );
+        }
+
+        throw new InvalidOperationException(
+            $"Groq API памылка: {lastStatus}." );
+    }
+
+    private static int? TryReadRetryAfterMs( HttpResponseMessage response )
+    {
+        if (response.Headers.RetryAfter?.Delta is TimeSpan delta
+            && delta > TimeSpan.Zero)
+        {
+            return (int)Math.Clamp( delta.TotalMilliseconds, 500, 30_000 );
+        }
+
+        if (response.Headers.TryGetValues( "Retry-After", out IEnumerable<string>? values ))
+        {
+            string? raw = values.FirstOrDefault();
+            if (double.TryParse(
+                    raw,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out double seconds )
+                && seconds > 0)
+            {
+                return (int)Math.Clamp( seconds * 1000, 500, 30_000 );
+            }
+        }
+
+        return null;
+    }
+
+    private static int? TryReadRetryAfterMsFromBody( string body )
+    {
+        if (string.IsNullOrWhiteSpace( body ))
+        {
+            return null;
+        }
+
+        // Groq: "Please try again in 2.5s" / "try again in 1s"
+        Match m = Regex.Match(
+            body,
+            @"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*s",
+            RegexOptions.IgnoreCase );
+        if (m.Success
+            && double.TryParse(
+                m.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out double seconds )
+            && seconds > 0)
+        {
+            return (int)Math.Clamp( ( seconds + 0.25 ) * 1000, 500, 30_000 );
+        }
+
+        return null;
     }
 
     private static string? TryReadPayloadModel( object payload )
@@ -2394,6 +4441,30 @@ public sealed class BookLookupService
 
         // Current Groq vision model (preview). Override via Groq:VisionModel.
         return "qwen/qwen3.8-27b";
+    }
+
+    private IReadOnlyList<string> ResolveVisionModelCandidates()
+    {
+        List<string> models = new();
+        void Add( string? raw )
+        {
+            string m = (raw ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace( m ))
+            {
+                return;
+            }
+
+            if (!models.Contains( m, StringComparer.OrdinalIgnoreCase ))
+            {
+                models.Add( m );
+            }
+        }
+
+        Add( ResolveVisionModel() );
+        // Fallbacks when primary is over capacity (503).
+        Add( "meta-llama/llama-4-scout-17b-16e-instruct" );
+        Add( "meta-llama/llama-4-maverick-17b-128e-instruct" );
+        return models;
     }
 
     private int ReadInt( string key, int fallback )

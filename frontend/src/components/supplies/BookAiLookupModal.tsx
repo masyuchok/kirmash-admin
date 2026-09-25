@@ -13,10 +13,12 @@ import {
   type BookLookupCandidate,
   type BookLookupStepResult,
 } from '@/lib/api/bookLookup';
+import { lookupProductFromShopPageInBrowser } from '@/lib/shop/lookupProductFromShopPageInBrowser';
 import { compressImageForUpload } from '@/lib/images/compressImageForUpload';
 
 type Step =
   | 'menu'
+  | 'link'
   | 'photo'
   | 'text'
   | 'ocrConfirm'
@@ -41,7 +43,7 @@ const inputClass =
   'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25';
 
 function sourceLabel(source: string): string {
-  if (source === 'supplier') return 'сайт пастаўшчыка';
+  if (source === 'supplier' || source === 'slug') return 'сайт пастаўшчыка';
   if (source === 'image') return 'пошук па фота';
   if (source === 'manual') return 'ручная спасылка';
   return 'інтэрнэт';
@@ -117,6 +119,9 @@ export default function BookAiLookupModal({
       setOcrAuthor(result.queryAuthor || '');
       setOcrIsbn(result.queryIsbn || '');
       setCandidate(null);
+      if (result.message) {
+        setError(result.message);
+      }
       setStep('ocrConfirm');
       return;
     }
@@ -250,19 +255,42 @@ export default function BookAiLookupModal({
     setError(null);
     setStep('busy');
     try {
-      const imported = await lookupBookFromUrl({
-        sessionId: sessionId || undefined,
-        url,
-      });
+      // 1) Browser → shop JSONP: real product fields for this page (bypasses server CF).
+      const fromPage = await lookupProductFromShopPageInBrowser(url);
+      const imported =
+        fromPage ??
+        (await lookupBookFromUrl({
+          sessionId: sessionId || undefined,
+          url,
+        }));
+
+      const slugNote = imported.snippet?.trim() || '';
+      const isSlugGuess =
+        !fromPage &&
+        (slugNote.includes('Назва з URL') ||
+          slugNote.includes('крама не аддала'));
+
       setEditTitle(imported.title?.trim() || '');
       setEditAuthor(imported.author?.trim() || '');
       setEditIsbn(imported.isbn?.trim() || '');
       setEditPublisher(imported.publisher?.trim() || '');
       setCandidate(imported);
+      setError(isSlugGuess ? slugNote : null);
       setStep('edit');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Памылка чытання спасылкі');
-      setStep('exhausted');
+      const message =
+        err instanceof Error ? err.message : 'Памылка чытання спасылкі';
+      setError(`${message} Можаце запоўніць назву і аўтара ўручную ніжэй.`);
+      setEditTitle('');
+      setEditAuthor('');
+      setEditIsbn('');
+      setEditPublisher('');
+      setCandidate({
+        title: '',
+        url,
+        source: 'manual',
+      });
+      setStep('edit');
     }
   };
 
@@ -331,7 +359,7 @@ export default function BookAiLookupModal({
           {step === 'menu' && (
             <div className="space-y-2">
               <p className="text-sm text-gray-600">
-                Абярыце спосаб стварэння кнігі.
+                Абярыце спосаб дадавання кнігі.
               </p>
               <button
                 type="button"
@@ -348,10 +376,21 @@ export default function BookAiLookupModal({
                 className="w-full rounded-xl border border-gray-200 px-4 py-3 text-left text-sm font-medium text-gray-900 hover:bg-gray-50"
                 onClick={() => {
                   setError(null);
+                  setManualUrl('');
+                  setStep('link');
+                }}
+              >
+                Спасылка на прадукт з сайта пастаўшчыка
+              </button>
+              <button
+                type="button"
+                className="w-full rounded-xl border border-gray-200 px-4 py-3 text-left text-sm font-medium text-gray-900 hover:bg-gray-50"
+                onClick={() => {
+                  setError(null);
                   setStep('photo');
                 }}
               >
-                Праз ШІ: фота вокладкі (+ ISBN)
+                Праз ШІ з фота
               </button>
               <button
                 type="button"
@@ -361,8 +400,50 @@ export default function BookAiLookupModal({
                   setStep('text');
                 }}
               >
-                Праз ШІ: назва і ISBN
+                Праз ШІ па назве
               </button>
+            </div>
+          )}
+
+          {step === 'link' && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Устаўце спасылку на старонку кнігі ў краме пастаўшчыка —
+                падцягнем назву і аўтара, калі старонка даступная.
+              </p>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">
+                  Спасылка на прадукт *
+                </label>
+                <input
+                  className={inputClass}
+                  value={manualUrl}
+                  onChange={(e) => setManualUrl(e.target.value)}
+                  placeholder="https://…"
+                  autoFocus
+                />
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm"
+                  onClick={resetToMenu}
+                >
+                  Назад
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-60"
+                  disabled={!manualUrl.trim()}
+                  onClick={() => void importManualUrl()}
+                >
+                  Падцягнуць даныя
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">
+                Калі аўтаматычнае чытанне не спрацуе (напрыклад, Cloudflare),
+                можна запоўніць палі ўручную на наступным кроку.
+              </p>
             </div>
           )}
 
@@ -602,8 +683,8 @@ export default function BookAiLookupModal({
             <div className="space-y-3">
               {step === 'exhausted' && (
                 <p className="text-sm text-gray-600">
-                  {doneMessage || 'Не знойдзена.'} Можаце шукаць па фота, увесці
-                  спасылку, запоўніць палі ўручную або адкрыць Shopify.
+                  {doneMessage || 'Не знойдзена.'} Можаце паспрабаваць фота,
+                  спасылку з меню, запоўніць палі ўручную або адкрыць Shopify.
                 </p>
               )}
               {step === 'exhausted' && canSearchByPhoto && (

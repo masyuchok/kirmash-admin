@@ -64,7 +64,11 @@ builder.Services.AddControllers( );
 builder.Services.AddHttpClient( "Shopify" );
 builder.Services.AddHttpClient( "Odoo" );
 builder.Services.AddHttpClient( "Groq" );
-builder.Services.AddHttpClient( "Tavily" );
+builder.Services.AddHttpClient( "Tavily", client =>
+{
+    // Extract (advanced) can take up to ~45s; search stays quick in practice.
+    client.Timeout = TimeSpan.FromSeconds( 60 );
+} );
 builder.Services.AddHttpClient( "SerpApi", client =>
 {
     client.Timeout = TimeSpan.FromSeconds( 60 );
@@ -72,8 +76,20 @@ builder.Services.AddHttpClient( "SerpApi", client =>
 builder.Services.AddHttpClient( "BookLookupPage", client =>
 {
     client.Timeout = TimeSpan.FromSeconds( 12 );
+    // Real browser UA — Cloudflare often 403s custom bot agents from datacenter IPs.
     client.DefaultRequestHeaders.UserAgent.ParseAdd(
-        "KirmaBookLookup/1.0 (+https://kirma.sh)" );
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" );
+    client.DefaultRequestHeaders.Accept.ParseAdd(
+        "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7" );
+    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd( "be,ru;q=0.9,en;q=0.8" );
+} );
+builder.Services.AddHttpClient( "BookLookupJson", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds( 20 );
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" );
+    client.DefaultRequestHeaders.Accept.ParseAdd( "application/json" );
+    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd( "be,ru;q=0.9,en;q=0.8" );
 } );
 
 builder.Services.AddMemoryCache( );
