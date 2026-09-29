@@ -1178,6 +1178,7 @@ public sealed class KirmaBukinistkaOfferService
                     odoo.DescriptionHtml,
                     author,
                     weightKg,
+                    CoverType: null,
                     PublishAsDraft: true ) );
         }
         catch (Exception ex) when (IsShopifyBarcodeConflictMessage( ex.Message ))

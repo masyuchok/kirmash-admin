@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace backend.Services;
@@ -6,6 +7,9 @@ public static class IsbnUtil
 {
     private static readonly Regex DigitsRegex = new( @"[^0-9Xx]", RegexOptions.Compiled );
 
+    /// <summary>
+    /// Digits-only ISBN (10/13) after validation. Used for matching.
+    /// </summary>
     public static string? Normalize( string? raw )
     {
         if (string.IsNullOrWhiteSpace( raw ))
@@ -39,6 +43,85 @@ public static class IsbnUtil
 
         return null;
     }
+
+    /// <summary>
+    /// Validates ISBN; keeps hyphens from the source when present
+    /// (e.g. supplier "978-83-67937-84-9" → same with dashes).
+    /// Falls back to digits-only when the source had no hyphens.
+    /// </summary>
+    public static string? NormalizePreferHyphens( string? raw )
+    {
+        string? digits = Normalize( raw );
+        if (digits is null || string.IsNullOrWhiteSpace( raw ))
+        {
+            return digits;
+        }
+
+        if (!raw.Contains( '-', StringComparison.Ordinal ))
+        {
+            return digits;
+        }
+
+        string? hyphenated = TryBuildHyphenatedForm( raw, digits );
+        return hyphenated ?? digits;
+    }
+
+    private static string? TryBuildHyphenatedForm( string raw, string expectedDigits )
+    {
+        foreach (Match m in Regex.Matches(
+            raw,
+            @"97[89][\d\- ]{10,20}|[\dXx][\d\- ]{8,14}[\dXx]",
+            RegexOptions.IgnoreCase ))
+        {
+            string candidate = CompactHyphenatedToken( m.Value );
+            if (MatchesDigits( candidate, expectedDigits ) && candidate.Contains( '-', StringComparison.Ordinal ))
+            {
+                return candidate;
+            }
+        }
+
+        string direct = CompactHyphenatedToken( raw );
+        if (MatchesDigits( direct, expectedDigits ) && direct.Contains( '-', StringComparison.Ordinal ))
+        {
+            return direct;
+        }
+
+        return null;
+    }
+
+    private static string CompactHyphenatedToken( string value )
+    {
+        StringBuilder sb = new( value.Length );
+        foreach (char c in value)
+        {
+            if (char.IsDigit( c ))
+            {
+                sb.Append( c );
+            }
+            else if (c is 'X' or 'x')
+            {
+                sb.Append( 'X' );
+            }
+            else if (c == '-')
+            {
+                sb.Append( '-' );
+            }
+        }
+
+        string compact = sb.ToString();
+        while (compact.Contains( "--", StringComparison.Ordinal ))
+        {
+            compact = compact.Replace( "--", "-", StringComparison.Ordinal );
+        }
+
+        return compact.Trim( '-' );
+    }
+
+    private static bool MatchesDigits( string hyphenatedOrDigits, string expectedDigits ) =>
+        string.Equals(
+            DigitsRegex.Replace( hyphenatedOrDigits, string.Empty ).ToUpperInvariant(),
+            expectedDigits,
+            StringComparison.Ordinal );
 
     public static bool IsValid( string isbn )
     {

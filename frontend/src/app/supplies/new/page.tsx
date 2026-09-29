@@ -1,4 +1,5 @@
 import NewSupplyClient from '@/components/supplies/NewSupplyClient';
+import { parseSelectedProductPrices } from '@/lib/supply-picker-pending';
 
 type Props = {
   searchParams: Promise<{
@@ -6,6 +7,7 @@ type Props = {
     date?: string;
     selectedProductIds?: string;
     selectedProductQuantities?: string;
+    selectedProductPrices?: string;
     restoreDraft?: string;
   }>;
 };
@@ -40,6 +42,11 @@ export default async function NewSupplyPage({ searchParams }: Props) {
       selectedProductQuantities = {};
     }
   }
+  const selectedProductPrices = parseSelectedProductPrices(
+    typeof params.selectedProductPrices === 'string'
+      ? params.selectedProductPrices
+      : undefined
+  );
   const restoreDraft = params.restoreDraft === '1';
   return (
     <NewSupplyClient
@@ -50,6 +57,7 @@ export default async function NewSupplyPage({ searchParams }: Props) {
       initialDate={typeof params.date === 'string' ? params.date : ''}
       selectedProductIds={selectedProductIds}
       selectedProductQuantities={selectedProductQuantities}
+      selectedProductPrices={selectedProductPrices}
       restoreDraft={restoreDraft}
     />
   );

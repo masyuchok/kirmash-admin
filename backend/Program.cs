@@ -1,6 +1,7 @@
 ﻿using backend.Data;
 using backend.Services;
 using backend.Services.Auth;
+using backend.Services.ImageFetch;
 using backend.Services.Odoo;
 using backend.Services.Shopify;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -64,13 +65,13 @@ builder.Services.AddControllers( );
 builder.Services.AddHttpClient( "Shopify" );
 builder.Services.AddHttpClient( "Odoo" );
 builder.Services.AddHttpClient( "Groq" );
+builder.Services.AddHttpClient( "OpenAI", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds( 60 );
+} );
 builder.Services.AddHttpClient( "Tavily", client =>
 {
     // Extract (advanced) can take up to ~45s; search stays quick in practice.
-    client.Timeout = TimeSpan.FromSeconds( 60 );
-} );
-builder.Services.AddHttpClient( "SerpApi", client =>
-{
     client.Timeout = TimeSpan.FromSeconds( 60 );
 } );
 builder.Services.AddHttpClient( "BookLookupPage", client =>
@@ -83,6 +84,24 @@ builder.Services.AddHttpClient( "BookLookupPage", client =>
         "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7" );
     client.DefaultRequestHeaders.AcceptLanguage.ParseAdd( "be,ru;q=0.9,en;q=0.8" );
 } );
+builder.Services.AddHttpClient( "BookLookupImage", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds( 25 );
+    client.DefaultRequestVersion = System.Net.HttpVersion.Version11;
+    client.DefaultVersionPolicy = System.Net.Http.HttpVersionPolicy.RequestVersionOrLower;
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" );
+    client.DefaultRequestHeaders.Accept.ParseAdd(
+        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" );
+    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd( "be,ru;q=0.9,en;q=0.8" );
+} )
+.ConfigurePrimaryHttpMessageHandler( () => new System.Net.Http.SocketsHttpHandler
+{
+    AutomaticDecompression = System.Net.DecompressionMethods.All,
+    // Manual redirect following so each hop is allowlist-checked (SSRF).
+    AllowAutoRedirect = false,
+    ConnectTimeout = TimeSpan.FromSeconds( 10 ),
+} );
 builder.Services.AddHttpClient( "BookLookupJson", client =>
 {
     client.Timeout = TimeSpan.FromSeconds( 20 );
@@ -91,6 +110,36 @@ builder.Services.AddHttpClient( "BookLookupJson", client =>
     client.DefaultRequestHeaders.Accept.ParseAdd( "application/json" );
     client.DefaultRequestHeaders.AcceptLanguage.ParseAdd( "be,ru;q=0.9,en;q=0.8" );
 } );
+builder.Services.AddHttpClient( RelayRemoteImageFetcher.HttpClientName, client =>
+{
+    client.Timeout = TimeSpan.FromSeconds( 45 );
+} );
+
+builder.Services.Configure<ImageFetchOptions>( opts =>
+{
+    builder.Configuration.GetSection( ImageFetchOptions.SectionName ).Bind( opts );
+    string? relayUrl = Environment.GetEnvironmentVariable( "IMAGE_FETCH_RELAY_URL" );
+    if (!string.IsNullOrWhiteSpace( relayUrl ))
+    {
+        opts.RelayUrl = relayUrl.Trim();
+    }
+
+    string? relayToken = Environment.GetEnvironmentVariable( "IMAGE_FETCH_RELAY_TOKEN" );
+    if (!string.IsNullOrWhiteSpace( relayToken ))
+    {
+        opts.RelayToken = relayToken.Trim();
+    }
+
+    string? disableDirect = Environment.GetEnvironmentVariable( "IMAGE_FETCH_DISABLE_DIRECT" );
+    if (bool.TryParse( disableDirect, out bool disable ))
+    {
+        opts.DisableDirect = disable;
+    }
+} );
+builder.Services.AddSingleton<SupplierImageHostAllowlist>();
+builder.Services.AddSingleton<DirectRemoteImageFetcher>();
+builder.Services.AddSingleton<RelayRemoteImageFetcher>();
+builder.Services.AddSingleton<IRemoteImageFetcher, CascadingRemoteImageFetcher>();
 
 builder.Services.AddMemoryCache( );
 builder.Services.AddScoped<JwtService>( );
@@ -123,8 +172,10 @@ builder.Services.AddScoped<InvoiceLineItemParser>();
 builder.Services.AddScoped<GroqInvoiceExtractionService>();
 builder.Services.AddScoped<InvoiceExpenseExtractionService>();
 builder.Services.AddSingleton<BookLookupSessionStore>();
+builder.Services.AddSingleton<BookTempMediaStore>();
 builder.Services.AddScoped<TavilySearchService>();
-builder.Services.AddScoped<SerpApiGoogleLensService>();
+builder.Services.AddSingleton<BookCoverStylizer>();
+builder.Services.AddScoped<SupplierPriceListLookupService>();
 builder.Services.AddScoped<BookLookupService>();
 builder.Services.AddScoped<VatReportProfitService>();
 builder.Services.AddScoped<VatReportQueryService>();
@@ -159,6 +210,28 @@ builder.Services.AddDbContext<AppDbContext>( options =>
             w.Ignore( Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning ) ) );
 
 var app = builder.Build( );
+
+{
+    ImageFetchOptions imageFetchOpts =
+        app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ImageFetchOptions>>().Value;
+    var imageFetchLogger = app.Services.GetRequiredService<ILoggerFactory>()
+        .CreateLogger( "ImageFetchStartup" );
+    string? relayHost = null;
+    if (!string.IsNullOrWhiteSpace( imageFetchOpts.RelayUrl )
+        && Uri.TryCreate( imageFetchOpts.RelayUrl.Trim(), UriKind.Absolute, out Uri? relayUri ))
+    {
+        relayHost = relayUri.Host;
+    }
+
+    bool relayConfigured =
+        !string.IsNullOrWhiteSpace( imageFetchOpts.RelayUrl )
+        && !string.IsNullOrWhiteSpace( imageFetchOpts.RelayToken );
+    imageFetchLogger.LogInformation(
+        "ImageFetch startup RelayConfigured={RelayConfigured} RelayUrlHost={RelayUrlHost} DisableDirect={DisableDirect} Fetcher=CascadingRemoteImageFetcher",
+        relayConfigured,
+        relayHost ?? "(none)",
+        imageFetchOpts.DisableDirect );
+}
 
 using (var scope = app.Services.CreateScope( ))
 {

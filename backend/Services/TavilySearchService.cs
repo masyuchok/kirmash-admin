@@ -247,16 +247,6 @@ public sealed class BookLookupSessionState
     public byte[]? CoverImageBytes { get; set; }
     public string? CoverContentType { get; set; }
     public BookLookupCandidateDto? CandidateBeingShown { get; set; }
-
-    /// <summary>Cached Google Lens hits for optional photo search button.</summary>
-    public List<PendingSearchHit> PhotoLensHits { get; set; } = new();
-    public bool PhotoLensFetched { get; set; }
-    public bool PhotoSearchSupplierDone { get; set; }
-    public bool PhotoSearchWebDone { get; set; }
-    /// <summary>One-shot WooCommerce/WP catalog prefill before slow Tavily calls.</summary>
-    public bool CatalogPrefillDone { get; set; }
-    /// <summary>Shop catalog HTTP blocked (Cloudflare 403) — skip further direct fetches.</summary>
-    public bool SupplierCatalogBlocked { get; set; }
 }
 
 public sealed class PendingSearchHit

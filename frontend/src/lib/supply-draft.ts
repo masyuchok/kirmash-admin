@@ -173,6 +173,7 @@ export function createDraftLinesForProduct(
     supplierPrice?: number;
     salePrice?: number;
     marginPercent?: number;
+    syncWithShopify?: boolean;
   }
 ): SupplyProductDraft[] {
   const variants = (product.variants ?? []).filter(
@@ -204,12 +205,30 @@ export function createDraftLinesForProduct(
     productId: product.shopifyProductId,
     productName: product.productName,
     productType: product.productType,
-    syncWithShopify: true,
+    syncWithShopify: defaults?.syncWithShopify ?? true,
     isReturnFinalized: false,
     supplierPrice,
     vatRatePercent: String(defaultVatRatePercent),
     marginPercent,
     salePrice,
+  };
+
+  const resolveQuantity = (lineKey: string): string => {
+    const direct = quantities[lineKey]?.trim();
+    if (direct) return direct;
+    const byProduct = quantities[product.shopifyProductId]?.trim();
+    if (byProduct) return byProduct;
+    for (const [key, value] of Object.entries(quantities)) {
+      if (!value?.trim()) continue;
+      // Match productId::variantId or bare productId from the picker.
+      if (
+        key === product.shopifyProductId ||
+        key.startsWith(`${product.shopifyProductId}::`)
+      ) {
+        return value.trim();
+      }
+    }
+    return '';
   };
 
   if (variants.length > 1) {
@@ -220,7 +239,7 @@ export function createDraftLinesForProduct(
         lineKey,
         variantId: v.variantId,
         variantName: v.variantName,
-        quantity: quantities[lineKey] ?? '',
+        quantity: resolveQuantity(lineKey),
       };
     });
   }
@@ -233,8 +252,7 @@ export function createDraftLinesForProduct(
       lineKey,
       variantId: only?.variantId ?? '',
       variantName: only?.variantName ?? '',
-      quantity:
-        quantities[lineKey] ?? quantities[product.shopifyProductId] ?? '',
+      quantity: resolveQuantity(lineKey),
     },
   ];
 }

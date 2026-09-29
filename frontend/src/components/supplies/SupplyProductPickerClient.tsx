@@ -13,7 +13,13 @@ import {
   formatProductNameWithAuthor,
   readFieldValue,
 } from '@/lib/supply-draft';
-import { makeSupplyLineKey } from '@/lib/supply-line-key';
+import {
+  findPriceOverrideForProduct,
+  readPendingSupplyProducts,
+  upsertPendingSupplyProduct,
+  type SupplyPickerPriceOverride,
+} from '@/lib/supply-picker-pending';
+import { makeSupplyLineKey, parseSupplyLineKey } from '@/lib/supply-line-key';
 import type { ProductWithSuppliers, ProductVariant } from '@/types/product';
 
 function visibleVariants(product: ProductWithSuppliers): ProductVariant[] {
@@ -22,6 +28,61 @@ function visibleVariants(product: ProductWithSuppliers): ProductVariant[] {
       (v.variantId?.trim() || v.variantName?.trim()) &&
       v.variantName !== 'Default Title'
   );
+}
+
+function pickerLineKeyForProduct(
+  productId: string,
+  variants: ProductVariant[]
+): string {
+  const visible = variants.filter(
+    (v) =>
+      (v.variantId?.trim() || v.variantName?.trim()) &&
+      v.variantName !== 'Default Title'
+  );
+  if (visible.length > 1) {
+    return makeSupplyLineKey(productId, visible[0]?.variantId);
+  }
+  const only = visible[0];
+  return makeSupplyLineKey(productId, only?.variantId);
+}
+
+function buildCreatedProductStub(created: {
+  shopifyProductId: string;
+  shopifyVariantId: string;
+  title: string;
+  productAuthor?: string;
+  productAdminUrl?: string;
+  mainImageUrl?: string | null;
+  salePrice: number;
+}): ProductWithSuppliers {
+  const variantId = created.shopifyVariantId.trim();
+  return {
+    shopifyProductId: created.shopifyProductId,
+    productName: created.title,
+    productAuthor: created.productAuthor ?? '',
+    productType: 'Кніга',
+    productAdminUrl: created.productAdminUrl ?? '',
+    mainImageUrl: created.mainImageUrl ?? null,
+    quantityInStock: 0,
+    shopifyQuantityInStock: 0,
+    shopifySalePrice: created.salePrice > 0 ? created.salePrice : 0,
+    hasSupplyQuantityOverride: false,
+    lastSyncedSupplierName: '',
+    suppliers: [],
+    unsyncedSuppliers: [],
+    variants: variantId
+      ? [
+          {
+            variantId,
+            // Match catalog: Default Title is filtered → bare productId line key.
+            variantName: 'Default Title',
+            quantityInStock: 0,
+          },
+        ]
+      : [],
+    supplierPrices: [],
+    overpaidLines: [],
+  };
 }
 
 type PickerLine = {
@@ -83,6 +144,12 @@ export default function SupplyProductPickerClient({
   const [draftQuantities, setDraftQuantities] = useState<
     Record<string, string>
   >(selectedProductQuantities);
+  const [draftPrices, setDraftPrices] = useState<
+    Record<string, SupplyPickerPriceOverride>
+  >({});
+  const [pinnedProducts, setPinnedProducts] = useState<ProductWithSuppliers[]>(
+    []
+  );
   const [pageIndex, setPageIndex] = useState(0);
   const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
   const [hasNextPage, setHasNextPage] = useState(false);
@@ -211,7 +278,18 @@ export default function SupplyProductPickerClient({
     };
   }, [supplierId, supplyId]);
 
-  const pickerLines = useMemo(() => expandPickerLines(rows), [rows]);
+  const displayRows = useMemo(() => {
+    const seen = new Set(rows.map((row) => row.shopifyProductId));
+    const pinned = pinnedProducts.filter(
+      (row) => !seen.has(row.shopifyProductId)
+    );
+    return [...pinned, ...rows];
+  }, [rows, pinnedProducts]);
+
+  const pickerLines = useMemo(
+    () => expandPickerLines(displayRows),
+    [displayRows]
+  );
 
   const toggleType = (type: string) => {
     setSelectedTypes((prev) =>
@@ -298,6 +376,45 @@ export default function SupplyProductPickerClient({
         {}
       );
       query.set('selectedProductQuantities', JSON.stringify(quantitiesPayload));
+      const pending = readPendingSupplyProducts(supplyId || undefined);
+      const pricesPayload = selectedIds.reduce<
+        Record<string, SupplyPickerPriceOverride>
+      >((acc, id) => {
+        const productId = parseSupplyLineKey(id).productId;
+        const fromDraft = findPriceOverrideForProduct(
+          draftPrices,
+          productId,
+          id
+        );
+        const pendingItem = pending[productId];
+        const supplierPrice =
+          fromDraft?.supplierPrice != null && fromDraft.supplierPrice > 0
+            ? fromDraft.supplierPrice
+            : pendingItem?.unitCost != null && pendingItem.unitCost > 0
+              ? pendingItem.unitCost
+              : undefined;
+        const salePrice =
+          fromDraft?.salePrice != null && fromDraft.salePrice > 0
+            ? fromDraft.salePrice
+            : pendingItem?.salePrice != null && pendingItem.salePrice > 0
+              ? pendingItem.salePrice
+              : undefined;
+        if (supplierPrice == null && salePrice == null && !fromDraft?.fromAi) {
+          return acc;
+        }
+        acc[id] = {
+          supplierPrice,
+          salePrice,
+          fromAi:
+            fromDraft?.fromAi === true ||
+            pendingItem?.fromAi === true ||
+            undefined,
+        };
+        return acc;
+      }, {});
+      if (Object.keys(pricesPayload).length > 0) {
+        query.set('selectedProductPrices', JSON.stringify(pricesPayload));
+      }
     }
     query.set('restoreDraft', '1');
     const target = supplyId ? `/supplies/${supplyId}` : '/supplies/new';
@@ -317,35 +434,85 @@ export default function SupplyProductPickerClient({
     window.open(createUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const handleAiProductCreated = async (created: {
+  const handleAiProductCreated = (created: {
     shopifyProductId: string;
     shopifyVariantId: string;
     title: string;
+    quantity: number;
+    salePrice: number;
+    unitCost: number;
+    productAuthor?: string;
+    isbn?: string;
+    productAdminUrl?: string;
+    mainImageUrl?: string | null;
   }) => {
     setError(null);
-    const lineKey = makeSupplyLineKey(
-      created.shopifyProductId,
-      created.shopifyVariantId
+    if (!created.shopifyProductId.trim()) {
+      setError('Тавар створаны, але няма Shopify ID.');
+      return;
+    }
+
+    const stub = buildCreatedProductStub(created);
+    const lineKey = pickerLineKeyForProduct(
+      stub.shopifyProductId,
+      stub.variants
     );
+
+    const unitCost =
+      Number.isFinite(created.unitCost) && created.unitCost > 0
+        ? created.unitCost
+        : undefined;
+    const salePrice =
+      Number.isFinite(created.salePrice) && created.salePrice > 0
+        ? created.salePrice
+        : undefined;
+
+    upsertPendingSupplyProduct(supplyId || undefined, {
+      shopifyProductId: stub.shopifyProductId,
+      shopifyVariantId: created.shopifyVariantId,
+      title: stub.productName,
+      productAuthor: stub.productAuthor,
+      productType: stub.productType,
+      productAdminUrl: stub.productAdminUrl,
+      mainImageUrl: stub.mainImageUrl,
+      isbn: created.isbn?.trim() || undefined,
+      fromAi: true,
+      salePrice,
+      unitCost,
+    });
+
+    setPinnedProducts((prev) => {
+      const without = prev.filter(
+        (row) => row.shopifyProductId !== stub.shopifyProductId
+      );
+      return [stub, ...without];
+    });
     setSelectedIds((prev) =>
       prev.includes(lineKey) ? prev : [...prev, lineKey]
     );
-    setDraftQuantities((prev) =>
-      prev[lineKey] ? prev : { ...prev, [lineKey]: '1' }
-    );
-    try {
-      await loadPage({
-        after: cursorStack[pageIndex] ?? null,
-        pageIndex,
-        forceFresh: true,
-      });
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Тавар створаны, але не ўдалося абнавіць спіс. Націсніце абнавіць.'
-      );
-    }
+    const qty =
+      Number.isFinite(created.quantity) && created.quantity > 0
+        ? String(Math.floor(created.quantity))
+        : '1';
+    setDraftQuantities((prev) => ({ ...prev, [lineKey]: qty }));
+    setDraftPrices((prev) => ({
+      ...prev,
+      [lineKey]: {
+        supplierPrice: unitCost,
+        salePrice,
+        fromAi: true,
+      },
+    }));
+
+    // Keep new book visible at top; refresh catalog in background.
+    void loadPage({
+      after: null,
+      pageIndex: 0,
+      forceFresh: true,
+      resetStack: true,
+    }).catch(() => {
+      /* stub already pinned; refresh is best-effort */
+    });
   };
 
   const goPrevPage = () => {
@@ -388,9 +555,7 @@ export default function SupplyProductPickerClient({
         supplierId={supplierId}
         onClose={() => setNewProductOpen(false)}
         onOpenShopifyManual={openShopifyCreate}
-        onCreated={(created) => {
-          void handleAiProductCreated(created);
-        }}
+        onCreated={handleAiProductCreated}
       />
 
       {error && (

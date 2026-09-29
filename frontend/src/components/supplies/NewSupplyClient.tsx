@@ -24,12 +24,21 @@ import {
   createDraftLinesForProduct,
   createDraftRowFromSupplyProduct,
   displayDraftLabel,
+  formatDraftMargin,
+  formatDraftMoney,
   formatProductNameWithAuthor,
   normalizeSupplyDraftRow,
   readFieldValue,
   type SupplyProductDraft,
 } from '@/lib/supply-draft';
 import { makeSupplyLineKey, parseSupplyLineKey } from '@/lib/supply-line-key';
+import {
+  clearPendingSupplyProducts,
+  findPriceOverrideForProduct,
+  readPendingSupplyProducts,
+  type SupplyPickerPriceOverride,
+} from '@/lib/supply-picker-pending';
+import { lookupSupplierCost } from '@/lib/api/bookLookup';
 import type { ProductWithSuppliers } from '@/types/product';
 
 function resolveLastSupplierPriceForProduct(
@@ -65,6 +74,7 @@ type Props = {
   supplyId?: string;
   selectedProductIds?: string[];
   selectedProductQuantities?: Record<string, string>;
+  selectedProductPrices?: Record<string, SupplyPickerPriceOverride>;
   restoreDraft?: boolean;
 };
 
@@ -122,6 +132,7 @@ export default function NewSupplyClient({
   supplyId,
   selectedProductIds = [],
   selectedProductQuantities = {},
+  selectedProductPrices = {},
   restoreDraft = false,
 }: Props) {
   const VAT_RATE_OPTIONS = [5, 23] as const;
@@ -509,12 +520,132 @@ export default function NewSupplyClient({
         .map((key) => parseSupplyLineKey(key).productId)
         .filter(Boolean)
     );
-    fetchProductsWithSuppliers()
-      .then((rows) => {
+
+    const resolvePriceDefaults = (
+      lineKey: string,
+      productId: string,
+      fallback: { supplierPrice?: number; salePrice?: number }
+    ): { supplierPrice?: number; salePrice?: number } => {
+      const override = findPriceOverrideForProduct(
+        selectedProductPrices,
+        productId,
+        lineKey
+      );
+      return {
+        supplierPrice: override?.supplierPrice ?? fallback.supplierPrice,
+        salePrice: override?.salePrice ?? fallback.salePrice,
+      };
+    };
+
+    const lineMatchesSelection = (
+      lineKey: string,
+      productId: string,
+      variantId: string
+    ): boolean => {
+      if (selectedKeys.has(lineKey) || selectedKeys.has(productId)) return true;
+      for (const key of selectedKeys) {
+        const parsed = parseSupplyLineKey(key);
+        if (parsed.productId !== productId) continue;
+        if (!parsed.variantId || !variantId || parsed.variantId === variantId) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    fetchProductsWithSuppliers(true)
+      .then(async (rows) => {
         if (cancelled) return;
-        setProductCatalog(rows);
-        const selected = rows.filter((p) => productIds.has(p.shopifyProductId));
+        const pending = readPendingSupplyProducts(supplyId);
+        const aiProductIds = new Set(
+          Object.values(pending)
+            .filter((item) => item.fromAi)
+            .map((item) => item.shopifyProductId)
+        );
+        for (const [key, override] of Object.entries(selectedProductPrices)) {
+          if (override.fromAi) {
+            aiProductIds.add(parseSupplyLineKey(key).productId);
+          }
+        }
+
+        const pendingProducts: ProductWithSuppliers[] = Object.values(pending)
+          .filter((item) => productIds.has(item.shopifyProductId))
+          .filter(
+            (item) =>
+              !rows.some((r) => r.shopifyProductId === item.shopifyProductId)
+          )
+          .map((item) => ({
+            shopifyProductId: item.shopifyProductId,
+            productName: item.title,
+            productAuthor: item.productAuthor ?? '',
+            productType: item.productType ?? 'Кніга',
+            productAdminUrl: item.productAdminUrl ?? '',
+            mainImageUrl: item.mainImageUrl ?? null,
+            quantityInStock: 0,
+            shopifyQuantityInStock: 0,
+            shopifySalePrice:
+              item.salePrice != null && item.salePrice > 0 ? item.salePrice : 0,
+            hasSupplyQuantityOverride: false,
+            lastSyncedSupplierName: '',
+            suppliers: [],
+            unsyncedSuppliers: [],
+            variants: item.shopifyVariantId.trim()
+              ? [
+                  {
+                    variantId: item.shopifyVariantId,
+                    variantName: 'Default Title',
+                    quantityInStock: 0,
+                  },
+                ]
+              : [],
+            supplierPrices: [],
+            overpaidLines: [],
+          }));
+
+        const catalog = [...pendingProducts, ...rows];
+        setProductCatalog(catalog);
+        const selected = catalog.filter((p) =>
+          productIds.has(p.shopifyProductId)
+        );
         setSelectedProducts(selected);
+
+        const supplierIdNum = Number(currentSupplierId);
+        const priceListByProductId = new Map<string, number>();
+        if (Number.isFinite(supplierIdNum) && supplierIdNum > 0) {
+          await Promise.all(
+            selected.map(async (product) => {
+              const override = findPriceOverrideForProduct(
+                selectedProductPrices,
+                product.shopifyProductId
+              );
+              const pendingItem = pending[product.shopifyProductId];
+              const hasSupplierOverride =
+                (override?.supplierPrice != null &&
+                  override.supplierPrice > 0) ||
+                (pendingItem?.unitCost != null && pendingItem.unitCost > 0);
+              if (hasSupplierOverride) return;
+              try {
+                const match = await lookupSupplierCost({
+                  supplierId: supplierIdNum,
+                  title: product.productName,
+                  author: product.productAuthor || undefined,
+                  isbn: pendingItem?.isbn || undefined,
+                });
+                if (match.unitCostBrutto != null && match.unitCostBrutto > 0) {
+                  priceListByProductId.set(
+                    product.shopifyProductId,
+                    match.unitCostBrutto
+                  );
+                }
+              } catch {
+                /* price list is best-effort */
+              }
+            })
+          );
+        }
+
+        if (cancelled) return;
+
         setProductDrafts((prev) => {
           const prevMap = new Map(prev.map((row) => [row.lineKey, row]));
           const next = [...prev];
@@ -524,20 +655,111 @@ export default function NewSupplyClient({
               Number(currentSupplierId),
               currentSupplierName
             );
+            const fromPriceList = priceListByProductId.get(
+              product.shopifyProductId
+            );
+            const pendingItem = pending[product.shopifyProductId];
+            const pendingUnit =
+              pendingItem?.unitCost != null && pendingItem.unitCost > 0
+                ? pendingItem.unitCost
+                : undefined;
+            const pendingSale =
+              pendingItem?.salePrice != null && pendingItem.salePrice > 0
+                ? pendingItem.salePrice
+                : undefined;
+            const shopifySale =
+              product.shopifySalePrice > 0
+                ? product.shopifySalePrice
+                : undefined;
+            const catalogFallback = {
+              supplierPrice:
+                pendingUnit ?? fromPriceList ?? lastPrice.supplierPrice,
+              // Prefer live Shopify sale price over historical supply sale price.
+              salePrice: shopifySale ?? pendingSale ?? lastPrice.salePrice,
+            };
+            const isAi = aiProductIds.has(product.shopifyProductId);
             const lines = createDraftLinesForProduct(
               product,
               selectedProductQuantities,
               resolveDefaultVatRatePercent(product.productType),
-              lastPrice
+              {
+                ...catalogFallback,
+                syncWithShopify: !isAi,
+              }
             );
             for (const line of lines) {
-              const shouldAdd =
-                selectedKeys.has(line.lineKey) ||
-                selectedKeys.has(product.shopifyProductId);
-              if (shouldAdd && !prevMap.has(line.lineKey)) {
-                next.push(line);
-                prevMap.set(line.lineKey, line);
+              const defaults = resolvePriceDefaults(
+                line.lineKey,
+                product.shopifyProductId,
+                catalogFallback
+              );
+              const supplierPrice =
+                defaults.supplierPrice != null && defaults.supplierPrice > 0
+                  ? formatDraftMoney(defaults.supplierPrice)
+                  : line.supplierPrice;
+              const salePrice =
+                defaults.salePrice != null && defaults.salePrice > 0
+                  ? formatDraftMoney(defaults.salePrice)
+                  : line.salePrice;
+              let marginPercent = line.marginPercent;
+              const sp = defaults.supplierPrice;
+              const sale = defaults.salePrice;
+              if (
+                sp != null &&
+                sp > 0 &&
+                sale != null &&
+                sale > 0 &&
+                !marginPercent.trim()
+              ) {
+                marginPercent = formatDraftMargin(
+                  Math.round(((sale - sp) / sale) * 100)
+                );
               }
+              const withPrices = normalizeSupplyDraftRow({
+                ...line,
+                supplierPrice,
+                salePrice,
+                marginPercent,
+                syncWithShopify: !isAi,
+              });
+              const shouldAdd = lineMatchesSelection(
+                withPrices.lineKey,
+                product.shopifyProductId,
+                withPrices.variantId
+              );
+              if (!shouldAdd) continue;
+
+              const existing = prevMap.get(withPrices.lineKey);
+              if (!existing) {
+                next.push(withPrices);
+                prevMap.set(withPrices.lineKey, withPrices);
+                continue;
+              }
+
+              // Fill prices/qty left empty by an earlier race (restoreDraft / key mismatch).
+              const patched = normalizeSupplyDraftRow({
+                ...existing,
+                quantity: existing.quantity.trim() || withPrices.quantity,
+                supplierPrice:
+                  existing.supplierPrice.trim() || withPrices.supplierPrice,
+                salePrice: existing.salePrice.trim() || withPrices.salePrice,
+                marginPercent:
+                  existing.marginPercent.trim() || withPrices.marginPercent,
+                syncWithShopify: isAi ? false : existing.syncWithShopify,
+              });
+              if (
+                patched.quantity === existing.quantity &&
+                patched.supplierPrice === existing.supplierPrice &&
+                patched.salePrice === existing.salePrice &&
+                patched.marginPercent === existing.marginPercent &&
+                patched.syncWithShopify === existing.syncWithShopify
+              ) {
+                continue;
+              }
+              const idx = next.findIndex((r) => r.lineKey === patched.lineKey);
+              if (idx >= 0) next[idx] = patched;
+              else next.push(patched);
+              prevMap.set(patched.lineKey, patched);
             }
           }
           return next;
@@ -555,6 +777,7 @@ export default function NewSupplyClient({
   }, [
     selectedProductIds,
     selectedProductQuantities,
+    selectedProductPrices,
     supplyId,
     initialLoading,
     currentSupplierId,
@@ -871,6 +1094,8 @@ export default function NewSupplyClient({
 
       removeDraftSessionIfPresent(supplyId);
       if (!supplyId) removeDraftSessionIfPresent(undefined);
+      clearPendingSupplyProducts(supplyId);
+      if (!supplyId) clearPendingSupplyProducts(undefined);
 
       if (result.warning) {
         setSaveOk(

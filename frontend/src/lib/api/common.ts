@@ -38,10 +38,23 @@ export function readErrorMessage(
 ): Promise<string> {
   return res
     .json()
-    .then(
-      (data) =>
-        (typeof data?.error === 'string' ? data.error : data?.message) ||
-        fallback
-    )
+    .then((data) => {
+      const error =
+        typeof data?.error === 'string'
+          ? data.error
+          : typeof data?.Error === 'string'
+            ? data.Error
+            : typeof data?.message === 'string'
+              ? data.message
+              : null;
+      const details =
+        typeof data?.details === 'string'
+          ? data.details
+          : typeof data?.Details === 'string'
+            ? data.Details
+            : null;
+      if (error && details) return `${error}: ${details}`;
+      return error || details || fallback;
+    })
     .catch(() => res.text().catch(() => fallback));
 }
