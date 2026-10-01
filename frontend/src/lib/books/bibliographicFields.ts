@@ -246,13 +246,49 @@ export function normalizePlace(raw: string | null | undefined): string | null {
   if (raw == null) return null;
   let t = collapse(raw);
   t = t.replace(
-    /^(?:месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication|город|горад)\s*:?\s*/i,
+    /^(?:месца\s+выхаду|месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication|город|горад)\s*:?\s*/i,
     ''
   );
+  const withPublisher = t.match(
+    /^(.+?)\s*[.;|]\s*(?:Выдавец|Издатель|Publisher|Wydawca)\s*:/i
+  );
+  if (withPublisher) t = withPublisher[1].trim();
   t = t.trim().replace(/^[,;.:]+|[,;.:]+$/g, '');
   if (t.length < 2 || t.length > 80) return null;
   if (/^\d/.test(t)) return null;
   return t;
+}
+
+/** Place from free text on any site: "Месца выхаду: Беласток. Выдавец: …". */
+export function extractPlaceFromText(
+  raw: string | null | undefined
+): string | null {
+  if (raw == null) return null;
+  const text = String(raw);
+  if (!text.trim()) return null;
+  const labeled = text.match(
+    /(?:месца\s+выхаду|месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication)\s*[:：\-–—]\s*([\s\S]+?)(?=\s*(?:$|[\r\n]|(?:Выдавец|Издатель(?:ство)?|Publisher|Wydawca|ISBN|ІСБН|Год|Рэдактар|Редактор|Язык|Мова|Language)\s*[:：\-–—]|\.\s*(?:Выдавец|Издатель|Publisher|Wydawca)\s*:))/i
+  );
+  if (labeled) {
+    const fromLabel = normalizePlace(labeled[1]);
+    if (fromLabel) return fromLabel;
+  }
+  return normalizePlace(text);
+}
+
+export function extractPublisherFromText(
+  raw: string | null | undefined
+): string | null {
+  if (raw == null) return null;
+  const text = String(raw);
+  if (!text.trim()) return null;
+  const labeled = text.match(
+    /(?:Выдавец(?:тва)?|Издатель(?:ство)?|Publisher|Wydawca|Wydawnictwo)\s*[:：\-–—]\s*([\s\S]+?)(?=\s*(?:$|[\r\n]|(?:ISBN|ІСБН|Год|Рэдактар|Редактор|Язык|Мова|Language|Месца|Место|Place|Возраст|Узрост|Age)\s*[:：\-–—]))/i
+  );
+  if (!labeled) return null;
+  const v = labeled[1].trim().replace(/^[*_#"'«».,;]+|[*_#"'«».,;]+$/g, '');
+  if (v.length < 2 || v.length > 220) return null;
+  return v;
 }
 
 export function normalizeTranslation(
@@ -340,7 +376,7 @@ export function isPlaceAttributeLabel(
   taxonomy: string,
   attrName: string
 ): boolean {
-  return /place|city|месца|место|miejsce|город|горад/i.test(
+  return /place|city|месца|место|miejsce|miasto|город|горад/i.test(
     `${taxonomy} ${attrName}`
   );
 }

@@ -4,12 +4,14 @@ import { useCallback, useRef, useState } from 'react';
 import { FiX } from 'react-icons/fi';
 import {
   attachDraftImages,
+  bookCandidateNeedsEnrichment,
   createBookDraftShell,
   ensureRemoteImageInTemp,
   fetchBookGenreOptions,
   fetchBookVendorOptions,
   lookupBookFromUrl,
   lookupSupplierCost,
+  mergeBookCandidates,
   styleBookCover,
   suggestBookGenres,
   suggestBookVendor,
@@ -629,11 +631,22 @@ export default function BookAiLookupModal({
     setStep('busy');
     try {
       const fromPage = await lookupProductFromShopPageInBrowser(url);
-      const imported =
-        fromPage ??
-        (await lookupBookFromUrl({
-          url,
-        }));
+      let fromBackend: BookLookupCandidate | null = null;
+      if (bookCandidateNeedsEnrichment(fromPage)) {
+        try {
+          fromBackend = await lookupBookFromUrl({ url });
+        } catch (err) {
+          if (!fromPage?.title?.trim()) {
+            throw err;
+          }
+        }
+      }
+      const imported = mergeBookCandidates(fromPage, fromBackend);
+      if (!imported?.title?.trim()) {
+        throw new Error(
+          'Не ўдалося прачытаць назву са старонкі крамы. Паспрабуйце яшчэ раз або ўвядзіце даныя ўручную.'
+        );
+      }
 
       const slugNote = imported.snippet?.trim() || '';
       const isSlugGuess =
@@ -846,20 +859,13 @@ export default function BookAiLookupModal({
         extraTempIds.length > 0 || additionalDataUrls.length > 0;
       const hasAnyPhoto = hasCoverBytes || hasExtraBytes;
 
-      if (!hasAnyPhoto) {
-        adminTab?.close();
-        throw new Error(
-          'Няма байтаў фота на серверы (CDN заблакаваў). Паспрабуйце яшчэ раз або загрузіце фота ўручную.'
-        );
-      }
-
-      // Shell without media — photos via attach-draft-images.
+      // Shell without media — photos via attach-draft-images when available.
       const weightParsed = Number(editWeight.replace(',', '.'));
       const quantityParsed = quantityAtCreate;
       const pageCountParsed = Number(editPageCount.replace(',', '.'));
       const yearParsed = Number(editYear.replace(',', '.'));
       const seoImageIds = [
-        'cover',
+        ...(hasCoverBytes ? ['cover'] : []),
         ...extraTempIds.map((_, i) => `extra-${i + 1}`),
       ];
       const created = await createBookDraftShell({
@@ -905,40 +911,39 @@ export default function BookAiLookupModal({
       // Re-resolve after draft create awaits — style may have finished meanwhile.
       coverTempId = resolveAttachCoverTempMediaId() || coverTempId;
 
-      const coverAlt =
-        created.imageAlts.find((a) => a.imageId === 'cover')?.alt || undefined;
-      const additionalImageAlts = seoImageIds
-        .filter((id) => id !== 'cover')
-        .map(
-          (id) => created.imageAlts.find((a) => a.imageId === id)?.alt || ''
-        );
+      if (hasAnyPhoto) {
+        const coverAlt =
+          created.imageAlts.find((a) => a.imageId === 'cover')?.alt ||
+          undefined;
+        const additionalImageAlts = seoImageIds
+          .filter((id) => id !== 'cover')
+          .map(
+            (id) => created.imageAlts.find((a) => a.imageId === id)?.alt || ''
+          );
 
-      try {
-        const media = await attachDraftImages({
-          shopifyProductId: created.shopifyProductId,
-          // Only real data URLs — temp-media http URLs are not base64.
-          coverDataUrl: coverDataUrl.startsWith('data:') ? coverDataUrl : null,
-          coverTempMediaId: coverTempId,
-          // Never send CDN URL — server often cannot download it (this error).
-          coverImageUrl: null,
-          additionalDataUrls,
-          additionalImageUrls: [],
-          additionalTempMediaIds: extraTempIds,
-          coverImageAlt: coverAlt,
-          additionalImageAlts,
-        });
-        if (media.errors.length > 0) {
-          console.warn('attach-draft-images partial errors', media.errors);
+        try {
+          const media = await attachDraftImages({
+            shopifyProductId: created.shopifyProductId,
+            // Only real data URLs — temp-media http URLs are not base64.
+            coverDataUrl: coverDataUrl.startsWith('data:')
+              ? coverDataUrl
+              : null,
+            coverTempMediaId: hasCoverBytes ? coverTempId : null,
+            // Never send CDN URL — server often cannot download it.
+            coverImageUrl: null,
+            additionalDataUrls,
+            additionalImageUrls: [],
+            additionalTempMediaIds: extraTempIds,
+            coverImageAlt: coverAlt,
+            additionalImageAlts,
+          });
+          if (media.errors.length > 0) {
+            console.warn('attach-draft-images partial errors', media.errors);
+          }
+        } catch (mediaErr) {
+          // Draft already exists — allow create without photos when CDN blocks.
+          console.warn('attach-draft-images failed', mediaErr);
         }
-      } catch (mediaErr) {
-        const detail =
-          mediaErr instanceof Error
-            ? mediaErr.message
-            : 'Не ўдалося загрузіць фота ў Shopify';
-        adminTab?.close();
-        throw new Error(
-          `Чарнавік створаны, але фота не загрузіліся: ${detail}`
-        );
       }
 
       if (!created.shopifyAdminUrl) {

@@ -9,6 +9,8 @@ import {
   isTranslationAttributeLabel,
   isYearAttributeLabel,
   extractIllustratorFromText,
+  extractPlaceFromText,
+  extractPublisherFromText,
   normalizeBookFormat,
   normalizeIllustrator,
   normalizeLanguage,
@@ -23,45 +25,131 @@ import {
  * Read product title/author/ISBN from the shop itself in the browser via
  * WordPress JSONP (no CORS). Uses the visitor's IP, so Cloudflare that blocks
  * our server still allows the real product payload for that page URL.
+ *
+ * Kamunikat.shop quirk: WC Store `?slug=` often returns [] for broken/%-encoded
+ * slugs, while WP REST finds the product. Full attrs/price/weight live on
+ * WC Store `/products/{id}` — we resolve id via WP then fetch Store by id.
  */
-export function lookupProductFromShopPageInBrowser(
+export async function lookupProductFromShopPageInBrowser(
   productUrl: string
 ): Promise<BookLookupCandidate | null> {
-  return new Promise((resolve) => {
-    let parsed: URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(productUrl.trim());
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null;
+  }
+
+  const slugMatch = parsed.pathname.match(
+    /\/(?:pradukt|produkt|product)\/([^/]+)\/?/i
+  );
+  if (!slugMatch?.[1]) {
+    return null;
+  }
+
+  const host = parsed.host;
+  const slugVariants = buildSlugVariants(slugMatch[1], productUrl);
+  let best: BookLookupCandidate | null = null;
+  let productId: number | null = null;
+
+  const consider = (payload: unknown) => {
+    const product = Array.isArray(payload) ? payload[0] : payload;
+    const id = readProductId(product);
+    if (id != null) productId = id;
+    const mapped = mapShopProduct(product, parsed);
+    best = pickRicherCandidate(best, mapped);
+  };
+
+  for (const slug of slugVariants) {
+    for (const path of [
+      `/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}`,
+      `/wp-json/wc/store/products?slug=${encodeURIComponent(slug)}`,
+    ]) {
+      try {
+        consider(await jsonpFetch(`https://${host}${path}`));
+        if (candidateIsRich(best)) return best;
+      } catch {
+        // try next
+      }
+    }
+  }
+
+  for (const slug of slugVariants) {
+    for (const path of [
+      `/wp-json/wp/v2/product?slug=${encodeURIComponent(slug)}&_embed=1`,
+      `/wp-json/wp/v2/product?slug=${encodeURIComponent(slug)}`,
+    ]) {
+      try {
+        consider(await jsonpFetch(`https://${host}${path}`));
+        if (productId != null) break;
+      } catch {
+        // try next
+      }
+    }
+    if (productId != null) break;
+  }
+
+  if (productId != null) {
+    for (const path of [
+      `/wp-json/wc/store/v1/products/${productId}`,
+      `/wp-json/wc/store/products/${productId}`,
+    ]) {
+      try {
+        consider(await jsonpFetch(`https://${host}${path}`));
+        if (candidateIsRich(best)) break;
+      } catch {
+        // try next
+      }
+    }
+  }
+
+  return best;
+}
+
+function buildSlugVariants(pathSegment: string, rawUrl: string): string[] {
+  const out: string[] = [];
+  const add = (s: string | null | undefined) => {
+    const t = (s ?? '').trim().replace(/^\/+|\/+$/g, '');
+    if (!t || out.includes(t)) return;
+    out.push(t);
+  };
+
+  add(pathSegment);
+  try {
+    add(decodeURIComponent(pathSegment.replace(/\+/g, ' ')));
+  } catch {
+    // ignore malformed escape
+  }
+
+  // Prefer the still-encoded segment from the original URL (Kamunikat stores
+  // literal "%d0%bb" inside the slug).
+  const rawMatch = rawUrl.match(/\/(?:pradukt|produkt|product)\/([^/?#]+)/i);
+  if (rawMatch?.[1]) {
+    add(rawMatch[1]);
     try {
-      parsed = new URL(productUrl.trim());
+      add(decodeURIComponent(rawMatch[1].replace(/\+/g, ' ')));
     } catch {
-      resolve(null);
-      return;
+      // ignore
     }
+  }
 
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      resolve(null);
-      return;
-    }
+  return out;
+}
 
-    const slugMatch = parsed.pathname.match(
-      /\/(?:pradukt|produkt|product)\/([^/]+)\/?/i
-    );
-    if (!slugMatch?.[1]) {
-      resolve(null);
-      return;
-    }
-
-    const slug = decodeURIComponent(slugMatch[1]);
-    const host = parsed.host;
-    const callbackName = `__kirmaShopJsonp_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    const endpoints = [
-      `https://${host}/wp-json/wc/store/v1/products?slug=${encodeURIComponent(slug)}&_jsonp=${callbackName}`,
-      `https://${host}/wp-json/wc/store/products?slug=${encodeURIComponent(slug)}&_jsonp=${callbackName}`,
-      `https://${host}/wp-json/wp/v2/product?slug=${encodeURIComponent(slug)}&_jsonp=${callbackName}`,
-    ];
-
-    let endpointIndex = 0;
-    let settled = false;
-    let script: HTMLScriptElement | null = null;
+function jsonpFetch(endpointWithoutJsonp: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const callbackName = `__kirmaShopJsonp_${Date.now()}_${Math.floor(
+      Math.random() * 1e6
+    )}`;
+    const sep = endpointWithoutJsonp.includes('?') ? '&' : '?';
+    const src = `${endpointWithoutJsonp}${sep}_jsonp=${callbackName}`;
+    let script: HTMLScriptElement | null = document.createElement('script');
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
@@ -76,48 +164,65 @@ export function lookupProductFromShopPageInBrowser(
       }
     };
 
-    const finish = (value: BookLookupCandidate | null) => {
+    const done = (value: unknown, err?: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(value);
-    };
-
-    const tryNext = () => {
-      if (endpointIndex >= endpoints.length) {
-        finish(null);
-        return;
-      }
-
-      const src = endpoints[endpointIndex++];
-      if (script?.parentNode) script.parentNode.removeChild(script);
-
-      script = document.createElement('script');
-      script.async = true;
-      script.src = src;
-      script.onerror = () => tryNext();
-      document.head.appendChild(script);
+      if (err) reject(err);
+      else resolve(value);
     };
 
     (window as unknown as Record<string, unknown>)[callbackName] = (
       payload: unknown
-    ) => {
-      try {
-        const product = Array.isArray(payload) ? payload[0] : payload;
-        const mapped = mapShopProduct(product, parsed);
-        if (mapped?.title) {
-          finish(mapped);
-          return;
-        }
-      } catch {
-        // try next endpoint
-      }
-      tryNext();
-    };
+    ) => done(payload);
 
-    timer = setTimeout(() => finish(null), 15000);
-    tryNext();
+    script.async = true;
+    script.src = src;
+    script.onerror = () => done(null, new Error('JSONP load failed'));
+    timer = setTimeout(() => done(null, new Error('JSONP timeout')), 12000);
+    document.head.appendChild(script);
   });
+}
+
+function readProductId(product: unknown): number | null {
+  if (!product || typeof product !== 'object') return null;
+  const id = (product as { id?: unknown }).id;
+  if (typeof id === 'number' && Number.isFinite(id) && id > 0) return id;
+  if (typeof id === 'string' && /^\d+$/.test(id.trim())) return Number(id);
+  return null;
+}
+
+function candidateIsRich(cand: BookLookupCandidate | null): boolean {
+  if (!cand?.title?.trim()) return false;
+  return Boolean(
+    cand.author?.trim() &&
+      (cand.coverImageUrl?.trim() ||
+        (cand.salePrice != null && cand.salePrice > 0) ||
+        cand.isbn?.trim() ||
+        cand.description?.trim())
+  );
+}
+
+function pickRicherCandidate(
+  a: BookLookupCandidate | null,
+  b: BookLookupCandidate | null
+): BookLookupCandidate | null {
+  if (!a) return b;
+  if (!b) return a;
+  const score = (c: BookLookupCandidate) =>
+    (c.title?.trim() ? 1 : 0) +
+    (c.author?.trim() ? 3 : 0) +
+    (c.description?.trim() ? 2 : 0) +
+    (c.coverImageUrl?.trim() ? 2 : 0) +
+    (c.isbn?.trim() ? 2 : 0) +
+    (c.publisher?.trim() ? 1 : 0) +
+    (c.salePrice != null && c.salePrice > 0 ? 2 : 0) +
+    (c.weightKg != null && c.weightKg > 0 ? 1 : 0) +
+    (c.coverType ? 1 : 0) +
+    (c.year != null ? 1 : 0) +
+    (c.pageCount != null ? 1 : 0) +
+    (c.placeOfPublication?.trim() ? 1 : 0);
+  return score(b) > score(a) ? b : a;
 }
 
 function mapShopProduct(
@@ -197,8 +302,8 @@ function mapShopProduct(
     ) {
       weightRaw ??= values[0];
     } else if (
-      /cover|binding|opraw|voklad/i.test(taxonomy) ||
-      /воклад|облож|opraw|binding|cover|пераплёт|перепл/i.test(attrName)
+      /cover|binding|opraw|voklad|oklad/i.test(taxonomy) ||
+      /воклад|облож|opraw|binding|cover|пераплёт|перепл|okład/i.test(attrName)
     ) {
       coverRaw ??= values[0];
     } else if (isAgeAttributeLabel(taxonomy, attrName)) {
@@ -254,7 +359,14 @@ function mapShopProduct(
   const pageCount =
     normalizePageCount(pagesRaw) || normalizePageCount(description);
   const placeOfPublication =
-    normalizePlace(placeRaw) || normalizePlace(description) || placeRaw;
+    normalizePlace(placeRaw) ||
+    extractPlaceFromText(description) ||
+    extractPlaceFromText(name) ||
+    placeRaw;
+  const publisherResolved =
+    publisher ||
+    extractPublisherFromText(description) ||
+    extractPublisherFromText(name);
   const translation =
     normalizeTranslation(translationRaw) ||
     normalizeTranslation(description) ||
@@ -264,7 +376,7 @@ function mapShopProduct(
     title: title || name,
     author: formattedAuthors,
     isbn,
-    publisher,
+    publisher: publisherResolved,
     description,
     coverImageUrl,
     additionalImageUrls,
@@ -304,7 +416,7 @@ function formatAuthorFirstLast(name: string): string {
   const [a, b] = parts;
   const looksSurname = (t: string) =>
     /-/.test(t) ||
-    /віч$|вич$|ўна$|евна$|овна$|скі$|ская$|cki$|ska$|ski$|енка$|энка$|оў$|ёў$|ов$|ова$|ева$|ёва$|ина$|іна$|ына$|ук$|юк$|як$|ец$|шк$|ік$|ык$/i.test(
+    /віч$|вич$|ўна$|евна$|овна$|скі$|ская$|цкая$|cki$|cka$|ska$|ski$|енка$|энка$|оў$|ёў$|ов$|ова$|ева$|ёва$|ава$|ина$|іна$|ына$|ук$|юк$|як$|ец$|шк$|ік$|ык$/i.test(
       t
     );
   const looksGiven = (t: string) => {
@@ -377,24 +489,66 @@ function extractSalePrice(product: Record<string, unknown>): number | null {
 }
 
 function extractImageUrls(product: Record<string, unknown>): string[] {
-  const images = Array.isArray(product.images) ? product.images : [];
   const urls: string[] = [];
   const seen = new Set<string>();
-  for (const image of images) {
-    if (!image || typeof image !== 'object') continue;
-    const src = (image as { src?: unknown }).src;
-    if (typeof src !== 'string') continue;
+
+  const tryAdd = (src: unknown) => {
+    if (typeof src !== 'string') return;
     const trimmed = src.trim();
-    if (!/^https?:\/\//i.test(trimmed)) continue;
+    if (!/^https?:\/\//i.test(trimmed)) return;
     const normalized = trimmed.replace(
       /-\d+x\d+(?=\.(?:jpe?g|png|webp|gif)$)/i,
       ''
     );
     const key = normalized.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return;
     seen.add(key);
     urls.push(normalized);
+  };
+
+  const images = Array.isArray(product.images) ? product.images : [];
+  for (const image of images) {
+    if (!image || typeof image !== 'object') continue;
+    tryAdd((image as { src?: unknown }).src);
   }
+
+  // WP REST &_embed=1
+  const embedded = product._embedded;
+  if (embedded && typeof embedded === 'object') {
+    const emb = embedded as Record<string, unknown>;
+    for (const key of ['wp:featuredmedia', 'wp:featured_media'] as const) {
+      const mediaArr = emb[key];
+      if (!Array.isArray(mediaArr)) continue;
+      for (const media of mediaArr) {
+        if (!media || typeof media !== 'object') continue;
+        const m = media as Record<string, unknown>;
+        tryAdd(m.source_url);
+        const details = m.media_details;
+        if (details && typeof details === 'object') {
+          const sizes = (details as { sizes?: unknown }).sizes;
+          if (sizes && typeof sizes === 'object') {
+            const full = (sizes as { full?: unknown }).full;
+            if (full && typeof full === 'object') {
+              tryAdd((full as { source_url?: unknown }).source_url);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const yoast = product.yoast_head_json;
+  if (yoast && typeof yoast === 'object') {
+    const ogImages = (yoast as { og_image?: unknown }).og_image;
+    if (Array.isArray(ogImages)) {
+      for (const og of ogImages) {
+        if (og && typeof og === 'object') {
+          tryAdd((og as { url?: unknown }).url);
+        }
+      }
+    }
+  }
+
   return urls;
 }
 
@@ -436,7 +590,14 @@ function extractPlainDescription(
           typeof (product.description as { rendered?: string }).rendered ===
             'string'
         ? (product.description as { rendered: string }).rendered
-        : '';
+        : product.content &&
+            typeof product.content === 'object' &&
+            typeof (product.content as { rendered?: string }).rendered ===
+              'string'
+          ? (product.content as { rendered: string }).rendered
+          : typeof product.content === 'string'
+            ? product.content
+            : '';
 
   const candidates = [shortHtml, fullHtml]
     .map((html) => htmlToPlainText(html))
@@ -479,7 +640,21 @@ function splitAuthorFromTitle(
   title: string,
   knownAuthor: string | null
 ): { title: string; authorFromTitle: string | null } {
-  const t = title.trim();
+  let t = title.trim();
+  const labeled = t.match(
+    /^(.+?)\s*[.…]?\s*(?:Автор(?:ы)?|Аўтар(?:ы)?|Author(?:s)?)\s*[:：]\s*(.+)$/i
+  );
+  if (labeled) {
+    const titleOnly = unwrapTitleQuotes(labeled[1].trim());
+    const authorOnly = labeled[2].trim().replace(/[.,;]+$/g, '');
+    if (titleOnly.length >= 1 && authorOnly.length >= 2) {
+      return {
+        title: titleOnly,
+        authorFromTitle: knownAuthor || authorOnly,
+      };
+    }
+  }
+  t = unwrapTitleQuotes(t);
   const comma = t.indexOf(',');
   if (comma > 0 && comma < t.length - 3) {
     const prefix = t.slice(0, comma).trim();
@@ -493,4 +668,22 @@ function splitAuthorFromTitle(
     }
   }
   return { title: t, authorFromTitle: knownAuthor };
+}
+
+function unwrapTitleQuotes(title: string): string {
+  const t = title.trim();
+  if (t.length < 2) return t;
+  const a = t[0];
+  const b = t[t.length - 1];
+  if (
+    (a === '«' && b === '»') ||
+    (a === '"' && b === '"') ||
+    (a === "'" && b === "'") ||
+    (a === '“' && b === '”') ||
+    (a === '„' && b === '“') ||
+    (a === '„' && b === '”')
+  ) {
+    return t.slice(1, -1).trim();
+  }
+  return t;
 }

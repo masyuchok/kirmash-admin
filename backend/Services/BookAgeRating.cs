@@ -63,6 +63,32 @@ public static class BookAgeRating
         return null;
     }
 
+    /// <summary>
+    /// Value from an age-labeled field (e.g. LiveLib "Возрастные ограничения: 16").
+    /// Bare numbers are accepted as ratings.
+    /// </summary>
+    public static string? NormalizeLabeled( string? raw )
+    {
+        string? normalized = Normalize( raw );
+        if (normalized is not null)
+        {
+            return normalized;
+        }
+
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        Match bare = Regex.Match( raw.Trim(), @"^\s*(\d{1,2})\s*$" );
+        if (bare.Success && int.TryParse( bare.Groups[1].Value, out int age ))
+        {
+            return Canonical( age );
+        }
+
+        return null;
+    }
+
     public static bool IsAgeAttributeLabel( string taxonomy, string attrName )
     {
         string tax = taxonomy ?? string.Empty;

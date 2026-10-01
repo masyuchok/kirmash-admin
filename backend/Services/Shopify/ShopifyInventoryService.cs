@@ -2034,9 +2034,15 @@ public class ShopifyInventoryService
     {
         try
         {
+            string productGid = $"gid://shopify/Product/{productId}";
             string workingToken = accessToken;
-            List<object>? publicationInputs = await TryResolvePublicationInputsAsync( shop, workingToken );
-            if (publicationInputs is null || publicationInputs.Count == 0)
+
+            List<string> publicationIds = await ResolvePublicationIdsForProductAsync(
+                shop,
+                workingToken,
+                productGid );
+
+            if (publicationIds.Count == 0)
             {
                 string configToken = (_config["Shopify:AccessToken"] ?? string.Empty).Trim();
                 if (!string.IsNullOrWhiteSpace( configToken )
@@ -2045,15 +2051,15 @@ public class ShopifyInventoryService
                     _logger.LogWarning(
                         "Publications unavailable with session token; retrying with Shopify:AccessToken for product {ProductId}",
                         productId );
-                    publicationInputs = await TryResolvePublicationInputsAsync( shop, configToken );
-                    if (publicationInputs is { Count: > 0 })
-                    {
-                        workingToken = configToken;
-                    }
+                    workingToken = configToken;
+                    publicationIds = await ResolvePublicationIdsForProductAsync(
+                        shop,
+                        workingToken,
+                        productGid );
                 }
             }
 
-            if (publicationInputs is null || publicationInputs.Count == 0)
+            if (publicationIds.Count == 0)
             {
                 await LogMissingPublicationScopesAsync( shop, accessToken );
                 _logger.LogWarning(
@@ -2065,13 +2071,44 @@ public class ShopifyInventoryService
                 return;
             }
 
-            string productGid = $"gid://shopify/Product/{productId}";
+            List<Dictionary<string, object?>> publicationInputs = publicationIds
+                .Distinct( StringComparer.Ordinal )
+                .Select( id => new Dictionary<string, object?> { ["publicationId"] = id } )
+                .ToList();
+
+            Dictionary<string, object?> variables = new()
+            {
+                ["id"] = productGid,
+                ["input"] = publicationInputs,
+            };
+
             (bool publishOk, JsonDocument? publishDoc, string? publishError) =
                 await _graphql.TryExecuteAsync(
                     shop,
                     workingToken,
                     PublishablePublishMutation,
-                    new { id = productGid, input = publicationInputs } );
+                    variables );
+
+            // Session token may resolve IDs but lack write_publications — retry publish with offline token.
+            if ((!publishOk || publishDoc is null)
+                && string.Equals( workingToken, accessToken, StringComparison.Ordinal ))
+            {
+                string configToken = (_config["Shopify:AccessToken"] ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace( configToken )
+                    && !string.Equals( configToken, workingToken, StringComparison.Ordinal ))
+                {
+                    _logger.LogWarning(
+                        "publishablePublish failed with session token ({Error}); retrying with Shopify:AccessToken",
+                        publishError );
+                    workingToken = configToken;
+                    (publishOk, publishDoc, publishError) = await _graphql.TryExecuteAsync(
+                        shop,
+                        workingToken,
+                        PublishablePublishMutation,
+                        variables );
+                }
+            }
+
             if (!publishOk || publishDoc is null)
             {
                 await LogMissingPublicationScopesAsync( shop, workingToken );
@@ -2094,38 +2131,73 @@ public class ShopifyInventoryService
                         "publishablePublish userErrors for product {ProductId}: {Errors}",
                         productId,
                         userErrors.ToString() );
-                }
-                else
-                {
-                    List<string> cachedIds = new();
-                    foreach (object item in publicationInputs)
+
+                    // Retry each publication alone — one bad channel must not block Online Store.
+                    int okCount = 0;
+                    foreach (string publicationId in publicationIds)
                     {
-                        if (item is null)
+                        Dictionary<string, object?> one = new()
                         {
+                            ["id"] = productGid,
+                            ["input"] = new[]
+                            {
+                                new Dictionary<string, object?> { ["publicationId"] = publicationId },
+                            },
+                        };
+                        (bool oneOk, JsonDocument? oneDoc, string? oneError) =
+                            await _graphql.TryExecuteAsync(
+                                shop,
+                                workingToken,
+                                PublishablePublishMutation,
+                                one );
+                        if (!oneOk || oneDoc is null)
+                        {
+                            _logger.LogWarning(
+                                "publishablePublish single failed product={ProductId} publication={PublicationId}: {Error}",
+                                productId,
+                                publicationId,
+                                oneError );
                             continue;
                         }
 
-                        // Supports anonymous { publicationId = "..." }.
-                        System.Reflection.PropertyInfo? prop = item.GetType().GetProperty( "publicationId" );
-                        string? id = prop?.GetValue( item ) as string;
-                        if (!string.IsNullOrWhiteSpace( id ))
+                        using (oneDoc)
                         {
-                            cachedIds.Add( id );
+                            if (oneDoc.RootElement.TryGetProperty( "data", out JsonElement oneData )
+                                && oneData.TryGetProperty( "publishablePublish", out JsonElement onePublish )
+                                && onePublish.TryGetProperty( "userErrors", out JsonElement oneErrors )
+                                && oneErrors.ValueKind == JsonValueKind.Array
+                                && oneErrors.GetArrayLength() > 0)
+                            {
+                                _logger.LogWarning(
+                                    "publishablePublish single userErrors product={ProductId} publication={PublicationId}: {Errors}",
+                                    productId,
+                                    publicationId,
+                                    oneErrors.ToString() );
+                                continue;
+                            }
                         }
+
+                        okCount++;
                     }
 
-                    if (cachedIds.Count > 0)
+                    if (okCount > 0)
                     {
-                        PublicationIdsCache[shop] = cachedIds
-                            .Distinct( StringComparer.Ordinal )
-                            .ToList();
+                        PublicationIdsCache[shop] = publicationIds;
+                        _logger.LogInformation(
+                            "Published product {ProductId} to {OkCount}/{Total} sales channels (per-channel retry)",
+                            productId,
+                            okCount,
+                            publicationIds.Count );
                     }
 
-                    _logger.LogInformation(
-                        "Published product {ProductId} to {Count} sales channels",
-                        productId,
-                        publicationInputs.Count );
+                    return;
                 }
+
+                PublicationIdsCache[shop] = publicationIds;
+                _logger.LogInformation(
+                    "Published product {ProductId} to {Count} sales channels",
+                    productId,
+                    publicationIds.Count );
             }
         }
         catch (Exception ex)
@@ -2134,6 +2206,143 @@ public class ShopifyInventoryService
                 ex,
                 "Failed to publish product {ProductId} to sales channels",
                 productId );
+        }
+    }
+
+    private async Task<List<string>> ResolvePublicationIdsForProductAsync(
+        string shop,
+        string accessToken,
+        string productGid )
+    {
+        // 1) Best: publications this product is not yet on (works right after create).
+        List<string> unpublished = await TryLoadUnpublishedPublicationIdsAsync(
+            shop,
+            accessToken,
+            productGid );
+        if (unpublished.Count > 0)
+        {
+            return unpublished;
+        }
+
+        // 2) Explicit config / cache / shop publications / discover from other products.
+        List<object>? inputs = await TryResolvePublicationInputsAsync( shop, accessToken );
+        if (inputs is null || inputs.Count == 0)
+        {
+            return new List<string>();
+        }
+
+        List<string> ids = new();
+        foreach (object item in inputs)
+        {
+            if (item is Dictionary<string, object?> dict
+                && dict.TryGetValue( "publicationId", out object? raw )
+                && raw is string s
+                && !string.IsNullOrWhiteSpace( s ))
+            {
+                ids.Add( s );
+                continue;
+            }
+
+            System.Reflection.PropertyInfo? prop = item.GetType().GetProperty( "publicationId" );
+            string? id = prop?.GetValue( item ) as string;
+            if (!string.IsNullOrWhiteSpace( id ))
+            {
+                ids.Add( id );
+            }
+        }
+
+        return ids;
+    }
+
+    private async Task<List<string>> TryLoadUnpublishedPublicationIdsAsync(
+        string shop,
+        string accessToken,
+        string productGid )
+    {
+        (bool ok, JsonDocument? doc, string? error) = await _graphql.TryExecuteAsync(
+            shop,
+            accessToken,
+            ProductUnpublishedPublicationsQuery,
+            new Dictionary<string, object?> { ["id"] = productGid } );
+        if (!ok || doc is null)
+        {
+            _logger.LogWarning(
+                "Failed to load unpublishedPublications for {ProductGid}: {Error}",
+                productGid,
+                error );
+            return new List<string>();
+        }
+
+        List<string> ids = new();
+        using (doc)
+        {
+            if (!doc.RootElement.TryGetProperty( "data", out JsonElement data )
+                || !data.TryGetProperty( "product", out JsonElement product )
+                || product.ValueKind != JsonValueKind.Object)
+            {
+                return ids;
+            }
+
+            CollectPublicationIdsFromPublicationConnection(
+                product,
+                "unpublishedPublications",
+                ids );
+        }
+
+        if (ids.Count > 0)
+        {
+            _logger.LogInformation(
+                "Loaded {Count} unpublished publication IDs for {ProductGid}",
+                ids.Count,
+                productGid );
+        }
+
+        return ids;
+    }
+
+    private static void CollectPublicationIdsFromPublicationConnection(
+        JsonElement parent,
+        string fieldName,
+        List<string> ids )
+    {
+        if (!parent.TryGetProperty( fieldName, out JsonElement pubs ))
+        {
+            return;
+        }
+
+        void AddId( JsonElement node )
+        {
+            // PublicationConnection nodes are Publication { id }.
+            if (node.TryGetProperty( "id", out JsonElement idEl )
+                && idEl.ValueKind == JsonValueKind.String)
+            {
+                string? id = idEl.GetString();
+                if (!string.IsNullOrWhiteSpace( id )
+                    && id.Contains( "/Publication/", StringComparison.Ordinal )
+                    && !ids.Contains( id, StringComparer.Ordinal ))
+                {
+                    ids.Add( id );
+                }
+            }
+        }
+
+        if (pubs.TryGetProperty( "edges", out JsonElement edges ) && edges.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement edge in edges.EnumerateArray())
+            {
+                if (edge.TryGetProperty( "node", out JsonElement node ))
+                {
+                    AddId( node );
+                }
+            }
+        }
+
+        if (pubs.TryGetProperty( "nodes", out JsonElement nodes ) && nodes.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement node in nodes.EnumerateArray())
+            {
+                AddId( node );
+            }
         }
     }
 
@@ -2150,7 +2359,9 @@ public class ShopifyInventoryService
         if (PublicationIdsCache.TryGetValue( shop, out IReadOnlyList<string>? cached )
             && cached is { Count: > 0 })
         {
-            return cached.Select( id => (object)new { publicationId = id } ).ToList();
+            return cached
+                .Select( id => (object)new Dictionary<string, object?> { ["publicationId"] = id } )
+                .ToList();
         }
 
         // 3) publications query (needs read_publications).
@@ -2177,7 +2388,7 @@ public class ShopifyInventoryService
             .Select( s => s.Trim() )
             .Where( s => s.StartsWith( "gid://shopify/Publication/", StringComparison.OrdinalIgnoreCase ) )
             .Distinct( StringComparer.OrdinalIgnoreCase )
-            .Select( id => (object)new { publicationId = id } )
+            .Select( id => (object)new Dictionary<string, object?> { ["publicationId"] = id } )
             .ToList();
         return inputs.Count > 0 ? inputs : null;
     }
@@ -2198,30 +2409,59 @@ public class ShopifyInventoryService
         using (listDoc)
         {
             if (!listDoc.RootElement.TryGetProperty( "data", out JsonElement data )
-                || !data.TryGetProperty( "publications", out JsonElement publications )
-                || !publications.TryGetProperty( "edges", out JsonElement edges )
-                || edges.ValueKind != JsonValueKind.Array)
+                || !data.TryGetProperty( "publications", out JsonElement publications ))
             {
                 return publicationInputs;
             }
 
-            foreach (JsonElement edge in edges.EnumerateArray())
+            HashSet<string> seen = new( StringComparer.Ordinal );
+            void AddFromConnection( JsonElement pubs )
             {
-                if (!edge.TryGetProperty( "node", out JsonElement node )
-                    || !node.TryGetProperty( "id", out JsonElement idEl )
-                    || idEl.ValueKind != JsonValueKind.String)
+                if (pubs.TryGetProperty( "edges", out JsonElement edges )
+                    && edges.ValueKind == JsonValueKind.Array)
                 {
-                    continue;
+                    foreach (JsonElement edge in edges.EnumerateArray())
+                    {
+                        if (edge.TryGetProperty( "node", out JsonElement node )
+                            && node.TryGetProperty( "id", out JsonElement idEl )
+                            && idEl.ValueKind == JsonValueKind.String)
+                        {
+                            string? publicationId = idEl.GetString();
+                            if (!string.IsNullOrWhiteSpace( publicationId ) && seen.Add( publicationId ))
+                            {
+                                publicationInputs.Add(
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["publicationId"] = publicationId,
+                                    } );
+                            }
+                        }
+                    }
                 }
 
-                string? publicationId = idEl.GetString();
-                if (string.IsNullOrWhiteSpace( publicationId ))
+                if (pubs.TryGetProperty( "nodes", out JsonElement nodes )
+                    && nodes.ValueKind == JsonValueKind.Array)
                 {
-                    continue;
+                    foreach (JsonElement node in nodes.EnumerateArray())
+                    {
+                        if (node.TryGetProperty( "id", out JsonElement idEl )
+                            && idEl.ValueKind == JsonValueKind.String)
+                        {
+                            string? publicationId = idEl.GetString();
+                            if (!string.IsNullOrWhiteSpace( publicationId ) && seen.Add( publicationId ))
+                            {
+                                publicationInputs.Add(
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["publicationId"] = publicationId,
+                                    } );
+                            }
+                        }
+                    }
                 }
-
-                publicationInputs.Add( new { publicationId } );
             }
+
+            AddFromConnection( publications );
         }
 
         return publicationInputs;
@@ -2678,6 +2918,26 @@ public class ShopifyInventoryService
                 id
               }
             }
+            nodes {
+              id
+            }
+          }
+        }
+        """;
+
+    private const string ProductUnpublishedPublicationsQuery = """
+        query ProductUnpublishedPublications($id: ID!) {
+          product(id: $id) {
+            unpublishedPublications(first: 50) {
+              edges {
+                node {
+                  id
+                }
+              }
+              nodes {
+                id
+              }
+            }
           }
         }
         """;
@@ -2687,7 +2947,14 @@ public class ShopifyInventoryService
           products(first: 15, query: "status:active") {
             edges {
               node {
-                resourcePublications(first: 25) {
+                resourcePublications(first: 25, onlyPublished: true) {
+                  edges {
+                    node {
+                      publication { id }
+                    }
+                  }
+                }
+                resourcePublicationsV2(first: 25, onlyPublished: true, catalogType: APP) {
                   edges {
                     node {
                       publication { id }

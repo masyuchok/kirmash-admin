@@ -5,6 +5,12 @@ namespace backend.Services.Shopify;
 
 public class ShopifyGraphqlClient
 {
+    private static readonly JsonSerializerOptions GraphqlJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<ShopifyGraphqlClient> _logger;
 
@@ -44,7 +50,9 @@ public class ShopifyGraphqlClient
         CancellationToken cancellationToken = default )
     {
         HttpClient client = _httpClientFactory.CreateClient( "Shopify" );
-        string payload = JsonSerializer.Serialize( new { query, variables } );
+        string payload = JsonSerializer.Serialize(
+            new { query, variables },
+            GraphqlJsonOptions );
         using StringContent content = new( payload, Encoding.UTF8, "application/json" );
         using HttpResponseMessage response = await ShopifyAuthorizedHttp.SendAsync(
             client,

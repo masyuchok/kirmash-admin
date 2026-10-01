@@ -36,11 +36,13 @@ public static class BookProductCoverType
             || taxonomy.Contains( "binding", StringComparison.OrdinalIgnoreCase )
             || taxonomy.Contains( "opraw", StringComparison.OrdinalIgnoreCase )
             || taxonomy.Contains( "voklad", StringComparison.OrdinalIgnoreCase )
+            || taxonomy.Contains( "oklad", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "воклад", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "облож", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "opraw", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "binding", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "cover", StringComparison.OrdinalIgnoreCase )
+            || attrName.Contains( "okład", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "пераплёт", StringComparison.OrdinalIgnoreCase )
             || attrName.Contains( "перепл", StringComparison.OrdinalIgnoreCase );
     }

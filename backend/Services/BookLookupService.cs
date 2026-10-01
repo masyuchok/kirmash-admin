@@ -74,85 +74,34 @@ public sealed class BookLookupService
         }
 
         string cleanUrl = CleanProductUrl( uri );
+        BookLookupCandidateDto? heuristic = null;
+        string? pageBlob = null;
 
-        // 1) WooCommerce / WordPress product API for this exact slug —
-        // same title/author/ISBN as on the product page (HTML is Cloudflare-blocked;
-        // Tavily Extract also fails to fetch Kamunikat).
-        BookLookupCandidateDto? fromStore = await TryImportUrlViaWooStoreAsync(
-            cleanUrl,
-            cancellationToken );
-        if (fromStore is not null && !string.IsNullOrWhiteSpace( fromStore.Title ))
-        {
-            fromStore.Source = "manual";
-            fromStore.Url = cleanUrl;
-            return fromStore;
-        }
-
-        // 2) Tavily Extract — read page HTML via Tavily when the shop allows it.
-        BookLookupCandidateDto? fromExtract = await TryImportUrlViaExtractAsync(
-            cleanUrl,
-            cancellationToken );
-        if (fromExtract is not null && !string.IsNullOrWhiteSpace( fromExtract.Title ))
-        {
-            fromExtract.Source = "manual";
-            fromExtract.Url = cleanUrl;
-            return fromExtract;
-        }
-
-        // 3) Tavily Search index — title/snippet when extract is empty.
-        BookLookupCandidateDto? fromIndex = await TryImportUrlViaIndexerAsync(
-            cleanUrl,
-            cancellationToken );
-        if (fromIndex is not null && !string.IsNullOrWhiteSpace( fromIndex.Title ))
-        {
-            fromIndex.Source = "manual";
-            fromIndex.Url = cleanUrl;
-            return fromIndex;
-        }
-
-        // 3b) Broader web search (book often cited on FB/news with Cyrillic title).
-        BookLookupCandidateDto? fromWeb = await TryImportUrlViaWebMentionsAsync(
-            cleanUrl,
-            cancellationToken );
-        if (fromWeb is not null && !string.IsNullOrWhiteSpace( fromWeb.Title ))
-        {
-            fromWeb.Source = "manual";
-            fromWeb.Url = cleanUrl;
-            return fromWeb;
-        }
-
-        // 4) Direct HTML (non-Cloudflare shops).
+        // Universal: fetch page text, AI structures fields for ANY shop.
+        // Heuristics (Woo / label regex) only seed blanks.
         try
         {
             PageTitleHints pageHints = await TryFetchPageTitleHintsAsync(
                 cleanUrl,
                 cancellationToken );
-            string? directTitle = FirstNonEmpty(
-                pageHints.H1,
-                pageHints.OgTitle,
-                pageHints.HtmlTitle );
-            if (!string.IsNullOrWhiteSpace( directTitle )
-                && !LooksLikeBotWallTitle( directTitle ))
+            if (!string.IsNullOrWhiteSpace( pageHints.RawHtml ))
             {
-                (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle(
-                    directTitle,
-                    pageHints.AuthorHint );
-                string cleaned = CleanBookTitle(
-                    string.IsNullOrWhiteSpace( titleOnly ) ? directTitle : titleOnly );
-                if (!string.IsNullOrWhiteSpace( cleaned ))
+                pageBlob = TruncateForPrompt(
+                    HtmlToPlainPreserveLines( pageHints.RawHtml ),
+                    14000 );
+                BookLookupCandidateDto? fromHtml = ParseCatalogPageContent(
+                    pageHints.RawHtml,
+                    cleanUrl );
+                if (fromHtml is not null && !string.IsNullOrWhiteSpace( fromHtml.Title ))
                 {
-                    _logger.LogInformation(
-                        "Book lookup from-url via direct HTML: {Url} → {Title}",
-                        cleanUrl,
-                        cleaned );
-                    return new BookLookupCandidateDto
-                    {
-                        Title = cleaned,
-                        Author = authorFromTitle ?? pageHints.AuthorHint,
-                        Url = cleanUrl,
-                        Source = "manual",
-                    };
+                    fromHtml.Source = "manual";
+                    fromHtml.Url = cleanUrl;
+                    heuristic = PreferRicherCandidate( heuristic, fromHtml );
                 }
+            }
+            else
+            {
+                pageBlob = FirstNonEmpty( pageHints.Description, pageHints.OgTitle );
             }
         }
         catch (Exception ex)
@@ -160,9 +109,594 @@ public sealed class BookLookupService
             _logger.LogWarning( ex, "from-url direct HTML failed for {Url}", cleanUrl );
         }
 
-        // No URL-slug guessing: user requires fields from the shop page itself.
+        if ((pageBlob?.Length ?? 0) < 400)
+        {
+            try
+            {
+                TavilyExtractResult? extracted = await _tavily.ExtractAsync(
+                    cleanUrl,
+                    cancellationToken );
+                if (!string.IsNullOrWhiteSpace( extracted?.RawContent )
+                    && !LooksLikeBotWallTitle(
+                        extracted.RawContent[..Math.Min( extracted.RawContent.Length, 200 )] ))
+                {
+                    pageBlob = TruncateForPrompt( extracted.RawContent, 14000 );
+                    BookLookupCandidateDto? fromExtract = ParseCatalogPageContent(
+                        extracted.RawContent,
+                        cleanUrl );
+                    if (fromExtract is not null && !string.IsNullOrWhiteSpace( fromExtract.Title ))
+                    {
+                        fromExtract.Source = "manual";
+                        fromExtract.Url = cleanUrl;
+                        heuristic = PreferRicherCandidate( heuristic, fromExtract );
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning( ex, "from-url extract failed for {Url}", cleanUrl );
+            }
+        }
+
+        try
+        {
+            BookLookupCandidateDto? fromStore = await TryImportUrlViaWooStoreAsync(
+                cleanUrl,
+                cancellationToken );
+            if (fromStore is not null && !string.IsNullOrWhiteSpace( fromStore.Title ))
+            {
+                fromStore.Source = "manual";
+                fromStore.Url = cleanUrl;
+                heuristic = PreferRicherCandidate( heuristic, fromStore );
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "from-url Woo store failed for {Url}", cleanUrl );
+        }
+
+        BookLookupCandidateDto? ai = await TryParseProductPageWithAiAsync(
+            cleanUrl,
+            pageBlob,
+            seed: heuristic,
+            cancellationToken );
+
+        BookLookupCandidateDto? best = MergePreferAi( ai, heuristic );
+        if (best is null || string.IsNullOrWhiteSpace( best.Title ))
+        {
+            BookLookupCandidateDto? fromIndex = await TryImportUrlViaIndexerAsync(
+                cleanUrl,
+                cancellationToken );
+            if (fromIndex is not null)
+            {
+                fromIndex.Source = "manual";
+                fromIndex.Url = cleanUrl;
+                best = PreferRicherCandidate( best, fromIndex );
+            }
+
+            BookLookupCandidateDto? fromWeb = await TryImportUrlViaWebMentionsAsync(
+                cleanUrl,
+                cancellationToken );
+            if (fromWeb is not null)
+            {
+                fromWeb.Source = "manual";
+                fromWeb.Url = cleanUrl;
+                best = PreferRicherCandidate( best, fromWeb );
+            }
+        }
+
+        if (best is not null && !string.IsNullOrWhiteSpace( best.Title ))
+        {
+            best = PostProcessCatalogCandidate( best );
+            _logger.LogInformation(
+                "Book lookup from-url: {Url} → {Title} / {Author} (ai={HasAi})",
+                cleanUrl,
+                best.Title,
+                best.Author,
+                ai is not null );
+            return best;
+        }
+
         throw new InvalidOperationException(
-            "Не ўдалося прачытаць назву са старонкі крамы (Cloudflare). Паспрабуйце яшчэ раз або ўвядзіце даныя ўручную." );
+            "Не ўдалося прачытаць назву са старонкі крамы. Паспрабуйце яшчэ раз або ўвядзіце даныя ўручную." );
+    }
+
+    /// <summary>
+    /// AI fields win when present; heuristics only fill blanks.
+    /// </summary>
+    private static BookLookupCandidateDto? MergePreferAi(
+        BookLookupCandidateDto? ai,
+        BookLookupCandidateDto? heuristic )
+    {
+        if (ai is null || string.IsNullOrWhiteSpace( ai.Title ))
+        {
+            return heuristic is null ? null : PostProcessCatalogCandidate( heuristic );
+        }
+
+        if (heuristic is null || string.IsNullOrWhiteSpace( heuristic.Title ))
+        {
+            return PostProcessCatalogCandidate( ai );
+        }
+
+        return PostProcessCatalogCandidate( new BookLookupCandidateDto
+        {
+            Title = FirstNonEmpty( ai.Title, heuristic.Title ) ?? ai.Title,
+            Author = FirstNonEmpty(
+                NormalizeAuthorCandidate( ai.Author ),
+                NormalizeAuthorCandidate( heuristic.Author ) ),
+            Isbn = FirstNonEmpty( ai.Isbn, heuristic.Isbn ),
+            Publisher = FirstNonEmpty( ai.Publisher, heuristic.Publisher ),
+            Description = FirstNonEmpty(
+                CapDescription( ai.Description ),
+                CapDescription( heuristic.Description ) ),
+            CoverImageUrl = PreferRealCoverImageUrl( ai.CoverImageUrl, heuristic.CoverImageUrl ),
+            AdditionalImageUrls = heuristic.AdditionalImageUrls?.Count > 0
+                ? heuristic.AdditionalImageUrls
+                : ai.AdditionalImageUrls,
+            WeightKg = ai.WeightKg is > 0 ? ai.WeightKg : heuristic.WeightKg,
+            SalePrice = ai.SalePrice is > 0 ? ai.SalePrice : heuristic.SalePrice,
+            CoverType = FirstNonEmpty( ai.CoverType, heuristic.CoverType ),
+            AgeRating = FirstNonEmpty( ai.AgeRating, heuristic.AgeRating ),
+            Format = FirstNonEmpty( ai.Format, heuristic.Format ),
+            Illustrator = FirstNonEmpty( ai.Illustrator, heuristic.Illustrator ),
+            Language = FirstNonEmpty( ai.Language, heuristic.Language ),
+            PlaceOfPublication = FirstNonEmpty(
+                ai.PlaceOfPublication,
+                heuristic.PlaceOfPublication ),
+            PageCount = ai.PageCount is > 0 ? ai.PageCount : heuristic.PageCount,
+            Translation = FirstNonEmpty( ai.Translation, heuristic.Translation ),
+            Year = ai.Year is > 0 ? ai.Year : heuristic.Year,
+            Url = FirstNonEmpty( ai.Url, heuristic.Url ) ?? ai.Url,
+            Source = "manual",
+            Snippet = FirstNonEmpty( ai.Snippet, heuristic.Snippet ),
+        } );
+    }
+
+    private async Task<BookLookupCandidateDto> FinalizeFromUrlCandidateAsync(
+        BookLookupCandidateDto candidate,
+        string cleanUrl,
+        string? pageBlob,
+        CancellationToken cancellationToken )
+    {
+        candidate.Url = cleanUrl;
+        candidate.Source = "manual";
+
+        string? blob = pageBlob;
+        if ((blob?.Length ?? 0) < 400)
+        {
+            try
+            {
+                PageTitleHints hints = await TryFetchPageTitleHintsAsync(
+                    cleanUrl,
+                    cancellationToken );
+                blob = FirstNonEmpty(
+                    TruncateForPrompt(
+                        HtmlToPlainPreserveLines( hints.RawHtml ?? string.Empty ),
+                        14000 ),
+                    hints.Description,
+                    blob,
+                    candidate.Description,
+                    candidate.Snippet );
+
+                if ((blob?.Length ?? 0) < 400)
+                {
+                    TavilyExtractResult? extracted = await _tavily.ExtractAsync(
+                        cleanUrl,
+                        cancellationToken );
+                    if (!string.IsNullOrWhiteSpace( extracted?.RawContent ))
+                    {
+                        blob = TruncateForPrompt( extracted.RawContent, 14000 );
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug( ex, "AI enrich: page re-fetch failed for {Url}", cleanUrl );
+            }
+        }
+
+        BookLookupCandidateDto? ai = await TryParseProductPageWithAiAsync(
+            cleanUrl,
+            blob,
+            candidate,
+            cancellationToken );
+        return MergePreferAi( ai, candidate )
+            ?? PostProcessCatalogCandidate( candidate );
+    }
+
+    private async Task<BookLookupCandidateDto?> TryParseProductPageWithAiAsync(
+        string pageUrl,
+        string? pageText,
+        BookLookupCandidateDto? seed,
+        CancellationToken cancellationToken )
+    {
+        string blob = (pageText ?? string.Empty).Trim();
+        if (blob.Length < 40 && seed is null)
+        {
+            return null;
+        }
+
+        string openAiKey = (_config["OpenAI:ApiKey"] ?? string.Empty).Trim();
+        string groqKey = (_config["Groq:ApiKey"] ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace( openAiKey ) && string.IsNullOrWhiteSpace( groqKey ))
+        {
+            _logger.LogWarning( "No OpenAI/Groq key — skip AI page extract for {Url}", pageUrl );
+            return null;
+        }
+
+        string systemPrompt =
+            """
+            You extract bookstore product metadata from an arbitrary product page (HTML or plain text).
+            Return ONLY valid JSON with keys:
+            title, author, isbn, publisher, description, salePrice, coverImageUrl,
+            coverType, year, pageCount, language, placeOfPublication, format, ageRating, weightKg.
+            Rules:
+            - title = book title ONLY (no author, no shop name).
+            - author = person name(s), never buttons like "Add to cart".
+            - description = main product blurb only; no related products, tags, nav, scripts.
+            - salePrice = numeric price as shown (e.g. 6 for £6.00); null if unknown.
+            - coverType = "soft" or "hard" when page says soft/paperback/мяккая/твёрдая; else null.
+            - language = language of the book text (e.g. беларуская), not the shop UI language.
+            - format like 130×200 when dimensions given.
+            - Use null for unknown fields. Prefer Cyrillic Belarusian names when present on page.
+            """;
+
+        string seedJson = seed is null
+            ? "{}"
+            : JsonSerializer.Serialize( new
+            {
+                seed.Title,
+                seed.Author,
+                seed.Isbn,
+                seed.Publisher,
+                seed.Description,
+                seed.SalePrice,
+                seed.CoverImageUrl,
+                seed.CoverType,
+                seed.Year,
+                seed.PageCount,
+                seed.Language,
+                seed.PlaceOfPublication,
+                seed.Format,
+                seed.AgeRating,
+                seed.WeightKg,
+            } );
+
+        string userPrompt =
+            $"""
+            Product URL: {pageUrl}
+
+            Current heuristic extract (may be wrong — fix it):
+            {seedJson}
+
+            Page content:
+            {TruncateForPrompt( blob, 12000 )}
+            """;
+
+        try
+        {
+            string body;
+            if (!string.IsNullOrWhiteSpace( openAiKey ))
+            {
+                Dictionary<string, object?> payload = new()
+                {
+                    ["model"] = ResolveOpenAiModel(),
+                    ["max_completion_tokens"] = 1200,
+                    ["reasoning_effort"] = "low",
+                    ["response_format"] = new { type = "json_object" },
+                    ["messages"] = new object[]
+                    {
+                        new { role = "system", content = systemPrompt },
+                        new { role = "user", content = userPrompt },
+                    },
+                };
+                body = await SendOpenAiChatAsync( openAiKey, payload, cancellationToken );
+            }
+            else
+            {
+                Dictionary<string, object?> payload = new()
+                {
+                    ["model"] = ResolveTextModel(),
+                    ["temperature"] = 0.1,
+                    ["max_tokens"] = 1200,
+                    ["response_format"] = new { type = "json_object" },
+                    ["messages"] = new object[]
+                    {
+                        new { role = "system", content = systemPrompt },
+                        new { role = "user", content = userPrompt },
+                    },
+                };
+                body = await SendGroqChatAsync( groqKey, payload, cancellationToken );
+            }
+
+            BookLookupCandidateDto? parsed = ParseAiProductPageJson( body, pageUrl );
+            if (parsed is not null)
+            {
+                _logger.LogInformation(
+                    "AI page extract for {Url}: {Title} / {Author} price={Price}",
+                    pageUrl,
+                    parsed.Title,
+                    parsed.Author,
+                    parsed.SalePrice );
+            }
+
+            return parsed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning( ex, "AI page extract failed for {Url}", pageUrl );
+            return null;
+        }
+    }
+
+    private static BookLookupCandidateDto? ParseAiProductPageJson( string apiBody, string pageUrl )
+    {
+        string? content = ExtractOpenAiMessageContent( apiBody );
+        if (string.IsNullOrWhiteSpace( content ))
+        {
+            return null;
+        }
+
+        content = content.Trim();
+        if (content.StartsWith( "```", StringComparison.Ordinal ))
+        {
+            content = Regex.Replace( content, @"^```(?:json)?\s*", string.Empty );
+            content = Regex.Replace( content, @"\s*```$", string.Empty );
+        }
+
+        using JsonDocument doc = JsonDocument.Parse( content );
+        JsonElement root = doc.RootElement;
+
+        string title = ReadJsonFlexibleString( root, "title" );
+        if (string.IsNullOrWhiteSpace( title ))
+        {
+            return null;
+        }
+
+        (string titleOnly, string? authorFromTitle) = SplitCatalogTitleWithAuthor( title );
+        string cleaned = CleanBookTitle(
+            string.IsNullOrWhiteSpace( titleOnly ) ? title : titleOnly );
+        if (string.IsNullOrWhiteSpace( cleaned ))
+        {
+            return null;
+        }
+
+        string? author = NormalizeAuthorCandidate(
+            FirstNonEmpty( ReadJsonFlexibleString( root, "author" ), authorFromTitle ) );
+        if (!string.IsNullOrWhiteSpace( author ))
+        {
+            author = FormatAuthorFirstLast( author, null );
+        }
+
+        string? description = CapDescription( ReadJsonFlexibleString( root, "description" ) );
+        string? cover = PreferRealCoverImageUrl( ReadJsonFlexibleString( root, "coverImageUrl" ) );
+        decimal? salePrice = ReadJsonFlexibleDecimal( root, "salePrice" );
+        if (salePrice is <= 0 or > 100_000)
+        {
+            salePrice = null;
+        }
+
+        string? isbnRaw = ReadJsonFlexibleString( root, "isbn" );
+        return new BookLookupCandidateDto
+        {
+            Title = cleaned,
+            Author = author,
+            Isbn = IsbnUtil.NormalizePreferHyphens( isbnRaw )
+                ?? ExtractIsbnFromText( isbnRaw ?? string.Empty ),
+            Publisher = NullIfWhiteSpace( ReadJsonFlexibleString( root, "publisher" ) ),
+            Description = description,
+            CoverImageUrl = cover,
+            SalePrice = salePrice,
+            CoverType = BookProductCoverType.Normalize( ReadJsonFlexibleString( root, "coverType" ) ),
+            AgeRating = BookAgeRating.NormalizeLabeled( ReadJsonFlexibleString( root, "ageRating" ) ),
+            Format = BookBibliographicFields.NormalizeFormat( ReadJsonFlexibleString( root, "format" ) ),
+            Language = BookBibliographicFields.NormalizeLanguage(
+                ReadJsonFlexibleString( root, "language" ) ),
+            PlaceOfPublication = BookBibliographicFields.NormalizePlace(
+                ReadJsonFlexibleString( root, "placeOfPublication" ) ),
+            PageCount = ReadJsonFlexibleInt( root, "pageCount" )
+                ?? BookBibliographicFields.NormalizePageCount(
+                    ReadJsonFlexibleString( root, "pageCount" ) ),
+            Year = ReadJsonFlexibleInt( root, "year" )
+                ?? BookBibliographicFields.NormalizeYear( ReadJsonFlexibleString( root, "year" ) ),
+            WeightKg = ReadJsonFlexibleDecimal( root, "weightKg" ),
+            Url = pageUrl,
+            Source = "manual",
+            Snippet = TruncateSnippet( description ),
+        };
+    }
+
+    private static string? ExtractOpenAiMessageContent( string apiBody )
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse( apiBody );
+            if (doc.RootElement.TryGetProperty( "choices", out JsonElement choices )
+                && choices.ValueKind == JsonValueKind.Array
+                && choices.GetArrayLength() > 0)
+            {
+                JsonElement msg = choices[0].GetProperty( "message" );
+                if (msg.TryGetProperty( "content", out JsonElement contentEl )
+                    && contentEl.ValueKind == JsonValueKind.String)
+                {
+                    return contentEl.GetString();
+                }
+            }
+        }
+        catch
+        {
+            // fall through
+        }
+
+        return null;
+    }
+
+    private static string ReadJsonFlexibleString( JsonElement root, string name )
+    {
+        if (!root.TryGetProperty( name, out JsonElement el )
+            || el.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return string.Empty;
+        }
+
+        return el.ValueKind == JsonValueKind.String
+            ? (el.GetString() ?? string.Empty).Trim()
+            : el.ToString().Trim();
+    }
+
+    private static decimal? ReadJsonFlexibleDecimal( JsonElement root, string name )
+    {
+        if (!root.TryGetProperty( name, out JsonElement el )
+            || el.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetDecimal( out decimal n ))
+        {
+            return n;
+        }
+
+        if (el.ValueKind == JsonValueKind.String
+            && decimal.TryParse(
+                (el.GetString() ?? string.Empty).Replace( ',', '.' ),
+                NumberStyles.Number,
+                CultureInfo.InvariantCulture,
+                out decimal fromStr ))
+        {
+            return fromStr;
+        }
+
+        return null;
+    }
+
+    private static int? ReadJsonFlexibleInt( JsonElement root, string name )
+    {
+        if (!root.TryGetProperty( name, out JsonElement el )
+            || el.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32( out int n ))
+        {
+            return n;
+        }
+
+        if (el.ValueKind == JsonValueKind.String
+            && int.TryParse(
+                el.GetString(),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out int fromStr ))
+        {
+            return fromStr;
+        }
+
+        return null;
+    }
+
+    private static BookLookupCandidateDto MergeCatalogCandidates(
+        BookLookupCandidateDto primary,
+        BookLookupCandidateDto? secondary )
+    {
+        if (secondary is null || string.IsNullOrWhiteSpace( secondary.Title ))
+        {
+            return primary;
+        }
+
+        static string? PreferClean( string? current, string? incoming, bool junkCheck )
+        {
+            bool curBad = string.IsNullOrWhiteSpace( current )
+                || (junkCheck && LooksLikeJunkDescription( current ));
+            bool incBad = string.IsNullOrWhiteSpace( incoming )
+                || (junkCheck && LooksLikeJunkDescription( incoming ));
+            if (curBad && !incBad)
+            {
+                return incoming;
+            }
+
+            if (!curBad)
+            {
+                return current;
+            }
+
+            return incoming ?? current;
+        }
+
+        string? author = PreferClean( primary.Author, secondary.Author, junkCheck: true );
+        if (!string.IsNullOrWhiteSpace( author )
+            && Regex.IsMatch( author, @"add to cart|корзин|кошык", RegexOptions.IgnoreCase ))
+        {
+            author = secondary.Author;
+        }
+
+        return new BookLookupCandidateDto
+        {
+            Title = PreferTitle( primary.Title, secondary.Title ),
+            Author = NormalizeAuthorCandidate( author ),
+            Isbn = FirstNonEmpty( primary.Isbn, secondary.Isbn ),
+            Publisher = FirstNonEmpty( primary.Publisher, secondary.Publisher ),
+            Description = PreferClean( primary.Description, secondary.Description, junkCheck: true ),
+            CoverImageUrl = PreferRealCoverImageUrl( primary.CoverImageUrl, secondary.CoverImageUrl ),
+            AdditionalImageUrls = primary.AdditionalImageUrls?.Count > 0
+                ? primary.AdditionalImageUrls
+                : secondary.AdditionalImageUrls,
+            WeightKg = primary.WeightKg is > 0 ? primary.WeightKg : secondary.WeightKg,
+            SalePrice = primary.SalePrice is > 0 ? primary.SalePrice : secondary.SalePrice,
+            CoverType = FirstNonEmpty( primary.CoverType, secondary.CoverType ),
+            AgeRating = FirstNonEmpty( primary.AgeRating, secondary.AgeRating ),
+            Format = FirstNonEmpty( primary.Format, secondary.Format ),
+            Illustrator = FirstNonEmpty( primary.Illustrator, secondary.Illustrator ),
+            Language = FirstNonEmpty( primary.Language, secondary.Language ),
+            PlaceOfPublication = FirstNonEmpty(
+                primary.PlaceOfPublication,
+                secondary.PlaceOfPublication ),
+            PageCount = primary.PageCount is > 0 ? primary.PageCount : secondary.PageCount,
+            Translation = FirstNonEmpty( primary.Translation, secondary.Translation ),
+            Year = primary.Year is > 0 ? primary.Year : secondary.Year,
+            Url = FirstNonEmpty( primary.Url, secondary.Url ) ?? primary.Url,
+            Source = primary.Source,
+            Snippet = FirstNonEmpty( primary.Snippet, secondary.Snippet ),
+        };
+
+        static string PreferTitle( string? current, string? incoming )
+        {
+            bool curGlued = !string.IsNullOrWhiteSpace( current )
+                && Regex.IsMatch( current, @"\s/\s+\S+" );
+            bool incOk = !string.IsNullOrWhiteSpace( incoming )
+                && !Regex.IsMatch( incoming, @"\s/\s+\S+" );
+            if (curGlued && incOk)
+            {
+                return incoming!;
+            }
+
+            return FirstNonEmpty( current, incoming ) ?? string.Empty;
+        }
+    }
+
+    private static BookLookupCandidateDto PostProcessCatalogCandidate( BookLookupCandidateDto c )
+    {
+        (string titleOnly, string? authorFromTitle) = SplitCatalogTitleWithAuthor( c.Title );
+        string cleaned = CleanBookTitle(
+            string.IsNullOrWhiteSpace( titleOnly ) ? c.Title : titleOnly );
+        string? author = NormalizeAuthorCandidate( c.Author )
+            ?? NormalizeAuthorCandidate( authorFromTitle );
+        if (!string.IsNullOrWhiteSpace( author ))
+        {
+            author = FormatAuthorFirstLast( author, null );
+        }
+
+        c.Title = cleaned;
+        c.Author = author;
+        c.Description = CapDescription( c.Description );
+        c.CoverImageUrl = PreferRealCoverImageUrl( c.CoverImageUrl );
+        if (c.SalePrice is <= 0)
+        {
+            c.SalePrice = null;
+        }
+
+        return c;
     }
 
     private async Task<BookLookupCandidateDto?> TryImportUrlViaWooStoreAsync(
@@ -175,20 +709,43 @@ public sealed class BookLookupService
         }
 
         string? slug = TryGetProductSlugFromPath( uri.AbsolutePath );
-        if (string.IsNullOrWhiteSpace( slug ))
+        string? rawSlug = TryGetRawProductSlugFromUrl( cleanUrl );
+        List<string> slugVariants = new();
+        foreach (string? candidate in new[] { rawSlug, slug })
+        {
+            if (string.IsNullOrWhiteSpace( candidate ))
+            {
+                continue;
+            }
+
+            string trimmed = candidate.Trim().Trim( '/' );
+            if (trimmed.Length > 0
+                && !slugVariants.Contains( trimmed, StringComparer.Ordinal ))
+            {
+                slugVariants.Add( trimmed );
+            }
+        }
+
+        if (slugVariants.Count == 0)
         {
             return null;
         }
 
         string host = uri.Host.Trim().TrimEnd( '.' );
-        string[] endpoints =
+        List<string> endpoints = new();
+        foreach (string slugVariant in slugVariants)
         {
-            $"https://{host}/wp-json/wc/store/v1/products?slug={Uri.EscapeDataString( slug )}",
-            $"https://{host}/wp-json/wc/store/products?slug={Uri.EscapeDataString( slug )}",
-            $"https://{host}/wp-json/wp/v2/product?slug={Uri.EscapeDataString( slug )}",
-        };
+            string escaped = Uri.EscapeDataString( slugVariant );
+            endpoints.Add( $"https://{host}/wp-json/wc/store/v1/products?slug={escaped}" );
+            endpoints.Add( $"https://{host}/wp-json/wc/store/products?slug={escaped}" );
+            endpoints.Add( $"https://{host}/wp-json/wp/v2/product?slug={escaped}&_embed=1" );
+            endpoints.Add( $"https://{host}/wp-json/wp/v2/product?slug={escaped}" );
+        }
 
         HttpClient client = _httpClientFactory.CreateClient( "BookLookupJson" );
+        BookLookupCandidateDto? best = null;
+        long? productId = null;
+
         foreach (string endpoint in endpoints)
         {
             try
@@ -220,21 +777,42 @@ public sealed class BookLookupService
                     continue;
                 }
 
+                productId ??= TryReadProductIdFromJson( body );
                 BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( body, cleanUrl );
-                if (parsed is not null && !string.IsNullOrWhiteSpace( parsed.Title ))
+                best = PreferRicherCandidate( best, parsed );
+                if (IsRichShopCandidate( best ) && productId is not null)
                 {
-                    _logger.LogInformation(
-                        "Book lookup from-url via shop API: {Url} → {Title} / {Author}",
-                        cleanUrl,
-                        parsed.Title,
-                        parsed.Author );
-                    return parsed;
+                    break;
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogWarning( ex, "from-url Woo/WP store failed for {Url}", endpoint );
             }
+        }
+
+        // Kamunikat.shop: slug filter on WC Store often returns []; WP finds id,
+        // then Store /products/{id} has attributes/price/weight/description.
+        if (productId is long id && id > 0 && !IsRichShopCandidate( best ))
+        {
+            BookLookupCandidateDto? byId = await TryFetchWooStoreProductByIdAsync(
+                client,
+                host,
+                id,
+                cleanUrl,
+                cancellationToken );
+            best = PreferRicherCandidate( best, byId );
+        }
+
+        if (best is not null && !string.IsNullOrWhiteSpace( best.Title ))
+        {
+            _logger.LogInformation(
+                "Book lookup from-url via shop API: {Url} → {Title} / {Author} price={Price}",
+                cleanUrl,
+                best.Title,
+                best.Author,
+                best.SalePrice );
+            return best;
         }
 
         // Direct shop API blocked (Cloudflare on our IP) — ask Tavily to fetch the JSON URL.
@@ -258,15 +836,12 @@ public sealed class BookLookupService
                     continue;
                 }
 
+                productId ??= TryReadProductIdFromJson( json );
                 BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( json, cleanUrl );
-                if (parsed is not null && !string.IsNullOrWhiteSpace( parsed.Title ))
+                best = PreferRicherCandidate( best, parsed );
+                if (IsRichShopCandidate( best ))
                 {
-                    _logger.LogInformation(
-                        "Book lookup from-url via Tavily→shop API: {Url} → {Title} / {Author}",
-                        cleanUrl,
-                        parsed.Title,
-                        parsed.Author );
-                    return parsed;
+                    break;
                 }
             }
             catch (Exception ex)
@@ -278,7 +853,294 @@ public sealed class BookLookupService
             }
         }
 
+        if (productId is long tavilyId && tavilyId > 0 && !IsRichShopCandidate( best ))
+        {
+            foreach (string idEndpoint in new[]
+                     {
+                         $"https://{host}/wp-json/wc/store/v1/products/{tavilyId}",
+                         $"https://{host}/wp-json/wc/store/products/{tavilyId}",
+                     })
+            {
+                try
+                {
+                    TavilyExtractResult? extracted = await _tavily.ExtractAsync(
+                        idEndpoint,
+                        cancellationToken );
+                    if (extracted is null || string.IsNullOrWhiteSpace( extracted.RawContent ))
+                    {
+                        continue;
+                    }
+
+                    string? json = ExtractJsonPayload( extracted.RawContent.Trim() );
+                    if (string.IsNullOrWhiteSpace( json ))
+                    {
+                        continue;
+                    }
+
+                    BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( json, cleanUrl );
+                    best = PreferRicherCandidate( best, parsed );
+                    if (IsRichShopCandidate( best ))
+                    {
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "from-url Tavily store-by-id failed for {Url}",
+                        idEndpoint );
+                }
+            }
+        }
+
+        if (best is not null && !string.IsNullOrWhiteSpace( best.Title ))
+        {
+            _logger.LogInformation(
+                "Book lookup from-url via Tavily→shop API: {Url} → {Title} / {Author}",
+                cleanUrl,
+                best.Title,
+                best.Author );
+            return best;
+        }
+
         return null;
+    }
+
+    private async Task<BookLookupCandidateDto?> TryFetchWooStoreProductByIdAsync(
+        HttpClient client,
+        string host,
+        long productId,
+        string cleanUrl,
+        CancellationToken cancellationToken )
+    {
+        string[] endpoints =
+        {
+            $"https://{host}/wp-json/wc/store/v1/products/{productId}",
+            $"https://{host}/wp-json/wc/store/products/{productId}",
+        };
+
+        foreach (string endpoint in endpoints)
+        {
+            try
+            {
+                using HttpResponseMessage response = await client.GetAsync(
+                    endpoint,
+                    cancellationToken );
+                string body = await response.Content.ReadAsStringAsync( cancellationToken );
+                string? mediaType = response.Content.Headers.ContentType?.MediaType;
+                if (!response.IsSuccessStatusCode
+                    || LooksLikeCloudflareOrHtmlPayload( body, mediaType ))
+                {
+                    continue;
+                }
+
+                BookLookupCandidateDto? parsed = TryParseWooOrWpProductJson( body, cleanUrl );
+                if (parsed is not null && !string.IsNullOrWhiteSpace( parsed.Title ))
+                {
+                    _logger.LogInformation(
+                        "Book lookup enriched via WC Store by id {ProductId}: {Title} / {Author}",
+                        productId,
+                        parsed.Title,
+                        parsed.Author );
+                    return parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning( ex, "WC Store by id failed for {Url}", endpoint );
+            }
+        }
+
+        return null;
+    }
+
+    private static string? TryGetRawProductSlugFromUrl( string url )
+    {
+        Match m = Regex.Match(
+            url ?? string.Empty,
+            @"/(?:pradukt|produkt|product)/(?<slug>[^/?#]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        string slug = m.Groups["slug"].Value.Trim().Trim( '/' );
+        return string.IsNullOrWhiteSpace( slug ) ? null : slug;
+    }
+
+    private static long? TryReadProductIdFromJson( string body )
+    {
+        if (string.IsNullOrWhiteSpace( body )
+            || LooksLikeCloudflareOrHtmlPayload( body, null ))
+        {
+            return null;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse( body );
+            JsonElement root = doc.RootElement;
+            JsonElement product = root;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                if (root.GetArrayLength() == 0)
+                {
+                    return null;
+                }
+
+                product = root[0];
+            }
+            else if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (product.TryGetProperty( "id", out JsonElement idEl ))
+            {
+                if (idEl.ValueKind == JsonValueKind.Number
+                    && idEl.TryGetInt64( out long id )
+                    && id > 0)
+                {
+                    return id;
+                }
+
+                if (idEl.ValueKind == JsonValueKind.String
+                    && long.TryParse( idEl.GetString(), out long parsed )
+                    && parsed > 0)
+                {
+                    return parsed;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private static bool IsRichShopCandidate( BookLookupCandidateDto? cand )
+    {
+        if (cand is null || string.IsNullOrWhiteSpace( cand.Title ))
+        {
+            return false;
+        }
+
+        if (NeedsAiPageEnrichment( cand ))
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace( cand.Author )
+            && (!string.IsNullOrWhiteSpace( cand.CoverImageUrl )
+                || cand.SalePrice is > 0
+                || !string.IsNullOrWhiteSpace( cand.Isbn )
+                || !string.IsNullOrWhiteSpace( cand.Description ));
+    }
+
+    /// <summary>
+    /// Heuristic parse missed critical fields or filled chrome junk — run AI page extract.
+    /// </summary>
+    private static bool NeedsAiPageEnrichment( BookLookupCandidateDto? cand )
+    {
+        if (cand is null || string.IsNullOrWhiteSpace( cand.Title ))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace( cand.Author )
+            || LooksLikeJunkDescription( cand.Author )
+            || Regex.IsMatch(
+                cand.Author,
+                @"add to cart|корзин|кошык|browse shop|in stock",
+                RegexOptions.IgnoreCase ))
+        {
+            return true;
+        }
+
+        if (LooksLikeJunkDescription( cand.Description ?? string.Empty ))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace( cand.Description )
+            || (cand.Description?.Length ?? 0) < 40)
+        {
+            return true;
+        }
+
+        if (cand.SalePrice is null or <= 0)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace( cand.CoverImageUrl ))
+        {
+            return true;
+        }
+
+        // Title still glued with author: "Title / Author"
+        if (Regex.IsMatch( cand.Title, @"\s/\s+\S+\s+\S+" ))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static BookLookupCandidateDto? PreferRicherCandidate(
+        BookLookupCandidateDto? current,
+        BookLookupCandidateDto? incoming )
+    {
+        if (incoming is null || string.IsNullOrWhiteSpace( incoming.Title ))
+        {
+            return current;
+        }
+
+        if (current is null || string.IsNullOrWhiteSpace( current.Title ))
+        {
+            return incoming;
+        }
+
+        return ScoreShopCandidate( incoming ) > ScoreShopCandidate( current )
+            ? incoming
+            : current;
+    }
+
+    private static int ScoreShopCandidate( BookLookupCandidateDto c )
+    {
+        int score = 0;
+        if (!string.IsNullOrWhiteSpace( c.Title )) score += 1;
+        if (!string.IsNullOrWhiteSpace( c.Author )
+            && NormalizeAuthorCandidate( c.Author ) is not null)
+        {
+            score += 3;
+        }
+
+        if (!string.IsNullOrWhiteSpace( c.Description )
+            && !LooksLikeJunkDescription( c.Description ))
+        {
+            score += 2;
+        }
+
+        if (!string.IsNullOrWhiteSpace( c.CoverImageUrl )
+            && !IsSocialCardImageUrl( c.CoverImageUrl ))
+        {
+            score += 2;
+        }
+
+        if (!string.IsNullOrWhiteSpace( c.Isbn )) score += 2;
+        if (!string.IsNullOrWhiteSpace( c.Publisher )) score += 1;
+        if (c.SalePrice is > 0) score += 2;
+        if (c.WeightKg is > 0) score += 1;
+        if (!string.IsNullOrWhiteSpace( c.CoverType )) score += 1;
+        if (c.Year is > 0) score += 1;
+        if (c.PageCount is > 0) score += 1;
+        if (!string.IsNullOrWhiteSpace( c.PlaceOfPublication )) score += 1;
+        return score;
     }
 
     private static bool LooksLikeCloudflareOrHtmlPayload( string body, string? mediaType )
@@ -537,21 +1399,34 @@ public sealed class BookLookupService
             return null;
         }
 
-        string? isbn = IsbnUtil.NormalizePreferHyphens( isbnAttr ) ?? ExtractIsbnFromText( name );
-        string? author = FormatAuthorsList( authorParts );
-        if (string.IsNullOrWhiteSpace( author ) && !string.IsNullOrWhiteSpace( authorFromTitle ))
-        {
-            author = FormatAuthorFirstLast( authorFromTitle, null );
-        }
-
         string? description = ExtractWooProductDescription( product );
         List<string> imageUrls = ExtractWooProductImageUrls( product );
         string? coverUrl = imageUrls.Count > 0 ? imageUrls[0] : null;
         List<string> additionalUrls = imageUrls.Skip( 1 ).ToList();
         decimal? weightKg = ExtractWooProductWeightKg( product, weightAttr );
         decimal? salePrice = ExtractWooProductSalePrice( product );
-        string? coverType = BookProductCoverType.Normalize( coverAttr );
+        string? coverType = BookProductCoverType.Normalize( coverAttr )
+            ?? BookProductCoverType.Normalize(
+                ExtractLabeledField(
+                    description ?? string.Empty,
+                    "Вокладка",
+                    "Обложка",
+                    "Переплёт",
+                    "Переплет",
+                    "Binding",
+                    "Cover" ) );
+        string? ageFromDesc = ExtractLabeledField(
+            description ?? string.Empty,
+            "Возрастные ограничения",
+            "Возрастное ограничение",
+            "Возрастная категория",
+            "Узрост",
+            "Ўзрост",
+            "Возраст",
+            "Age",
+            "Age rating" );
         string? ageRating = ageAttr
+            ?? BookAgeRating.NormalizeLabeled( ageFromDesc )
             ?? BookAgeRating.Normalize( description )
             ?? BookAgeRating.Normalize( name );
         string? format = formatAttr
@@ -565,18 +1440,37 @@ public sealed class BookLookupService
         int? pageCount = BookBibliographicFields.NormalizePageCount( pageCountAttr )
             ?? BookBibliographicFields.NormalizePageCount( description );
         string? place = placeAttr
-            ?? BookBibliographicFields.NormalizePlace( description );
+            ?? BookBibliographicFields.ExtractPlaceFromText( description );
+        string? publisher = NullIfWhiteSpace( publisherAttr )
+            ?? BookBibliographicFields.ExtractPublisherFromText( description );
         string? translation = translationAttr
             ?? BookBibliographicFields.NormalizeTranslation( description );
         int? year = BookBibliographicFields.NormalizeYear( yearAttr )
             ?? BookBibliographicFields.NormalizeYear( description );
+        string? isbn = IsbnUtil.NormalizePreferHyphens( isbnAttr )
+            ?? ExtractIsbnFromText( name )
+            ?? ExtractIsbnFromText( description ?? string.Empty );
+
+        string? author = FormatAuthorsList( authorParts );
+        if (string.IsNullOrWhiteSpace( author ) && !string.IsNullOrWhiteSpace( authorFromTitle ))
+        {
+            author = FormatAuthorFirstLast( authorFromTitle, null );
+        }
+
+        // Kamunikat often puts Given-Surname in the URL slug when attributes omit author.
+        if (string.IsNullOrWhiteSpace( author )
+            && TryParseProductUrlSlug( cleanUrl, out _, out string? slugAuthor )
+            && !string.IsNullOrWhiteSpace( slugAuthor ))
+        {
+            author = FormatAuthorFirstLast( slugAuthor, null );
+        }
 
         return new BookLookupCandidateDto
         {
             Title = cleaned,
             Author = author,
             Isbn = isbn,
-            Publisher = publisherAttr,
+            Publisher = publisher,
             Description = description,
             CoverImageUrl = coverUrl,
             AdditionalImageUrls = additionalUrls,
@@ -852,31 +1746,20 @@ public sealed class BookLookupService
     {
         List<string> urls = new();
         HashSet<string> seen = new( StringComparer.OrdinalIgnoreCase );
-        if (!product.TryGetProperty( "images", out JsonElement images )
-            || images.ValueKind != JsonValueKind.Array)
-        {
-            return urls;
-        }
 
-        foreach (JsonElement image in images.EnumerateArray())
+        void TryAdd( string? src )
         {
-            if (!image.TryGetProperty( "src", out JsonElement srcEl )
-                || srcEl.ValueKind != JsonValueKind.String)
-            {
-                continue;
-            }
-
-            string? src = srcEl.GetString()?.Trim();
             if (string.IsNullOrWhiteSpace( src )
-                || !Uri.TryCreate( src, UriKind.Absolute, out Uri? uri )
+                || !Uri.TryCreate( src.Trim(), UriKind.Absolute, out Uri? uri )
                 || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             {
-                continue;
+                return;
             }
 
+            string trimmed = src.Trim();
             // Prefer full-size: strip common WP size suffixes when possible.
             string normalized = Regex.Replace(
-                src,
+                trimmed,
                 @"-\d+x\d+(?=\.(?:jpe?g|png|webp|gif)$)",
                 string.Empty,
                 RegexOptions.IgnoreCase );
@@ -884,9 +1767,73 @@ public sealed class BookLookupService
             {
                 urls.Add( normalized );
             }
-            else if (seen.Add( src ))
+            else if (seen.Add( trimmed ))
             {
-                urls.Add( src );
+                urls.Add( trimmed );
+            }
+        }
+
+        if (product.TryGetProperty( "images", out JsonElement images )
+            && images.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement image in images.EnumerateArray())
+            {
+                if (image.TryGetProperty( "src", out JsonElement srcEl )
+                    && srcEl.ValueKind == JsonValueKind.String)
+                {
+                    TryAdd( srcEl.GetString() );
+                }
+            }
+        }
+
+        // WP REST with &_embed=1 — featured media lives under _embedded, not images[].
+        if (product.TryGetProperty( "_embedded", out JsonElement embedded )
+            && embedded.ValueKind == JsonValueKind.Object)
+        {
+            foreach (string key in new[] { "wp:featuredmedia", "wp:featured_media" })
+            {
+                if (!embedded.TryGetProperty( key, out JsonElement mediaArr )
+                    || mediaArr.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement media in mediaArr.EnumerateArray())
+                {
+                    if (media.TryGetProperty( "source_url", out JsonElement sourceUrl )
+                        && sourceUrl.ValueKind == JsonValueKind.String)
+                    {
+                        TryAdd( sourceUrl.GetString() );
+                    }
+
+                    if (media.TryGetProperty( "media_details", out JsonElement details )
+                        && details.ValueKind == JsonValueKind.Object
+                        && details.TryGetProperty( "sizes", out JsonElement sizes )
+                        && sizes.ValueKind == JsonValueKind.Object
+                        && sizes.TryGetProperty( "full", out JsonElement full )
+                        && full.ValueKind == JsonValueKind.Object
+                        && full.TryGetProperty( "source_url", out JsonElement fullUrl )
+                        && fullUrl.ValueKind == JsonValueKind.String)
+                    {
+                        TryAdd( fullUrl.GetString() );
+                    }
+                }
+            }
+        }
+
+        if (product.TryGetProperty( "yoast_head_json", out JsonElement yoast )
+            && yoast.ValueKind == JsonValueKind.Object
+            && yoast.TryGetProperty( "og_image", out JsonElement ogImages )
+            && ogImages.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement og in ogImages.EnumerateArray())
+            {
+                if (og.ValueKind == JsonValueKind.Object
+                    && og.TryGetProperty( "url", out JsonElement ogUrl )
+                    && ogUrl.ValueKind == JsonValueKind.String)
+                {
+                    TryAdd( ogUrl.GetString() );
+                }
             }
         }
 
@@ -923,36 +1870,36 @@ public sealed class BookLookupService
             }
         }
 
-        // Prefer the longer useful blurb (shop short_description is often the card text).
-        string? chosen = FirstNonEmpty( shortHtml, fullHtml );
-        if (string.IsNullOrWhiteSpace( chosen ))
+        // WP REST uses content.rendered instead of description.
+        if (string.IsNullOrWhiteSpace( fullHtml )
+            && product.TryGetProperty( "content", out JsonElement contentEl ))
         {
-            return null;
-        }
-
-        string plain = StripHtmlTags( DecodeHtml( chosen ) ?? string.Empty ).Trim();
-        if (plain.Length < 20)
-        {
-            string? other = string.Equals( chosen, shortHtml, StringComparison.Ordinal )
-                ? fullHtml
-                : shortHtml;
-            if (!string.IsNullOrWhiteSpace( other ))
+            if (contentEl.ValueKind == JsonValueKind.String)
             {
-                string otherPlain = StripHtmlTags( DecodeHtml( other ) ?? string.Empty ).Trim();
-                if (otherPlain.Length > plain.Length)
-                {
-                    plain = otherPlain;
-                }
+                fullHtml = contentEl.GetString();
+            }
+            else if (contentEl.ValueKind == JsonValueKind.Object
+                && contentEl.TryGetProperty( "rendered", out JsonElement contentRendered ))
+            {
+                fullHtml = contentRendered.GetString();
             }
         }
 
-        if (plain.Length < 20)
+        // Prefer the longer useful blurb (shop short_description is often truncated card text).
+        string? shortPlain = string.IsNullOrWhiteSpace( shortHtml )
+            ? null
+            : StripHtmlTags( DecodeHtml( shortHtml ) ?? string.Empty ).Trim();
+        string? fullPlain = string.IsNullOrWhiteSpace( fullHtml )
+            ? null
+            : StripHtmlTags( DecodeHtml( fullHtml ) ?? string.Empty ).Trim();
+        string? plain = PreferRicherDescription( shortPlain, fullPlain );
+        if (string.IsNullOrWhiteSpace( plain ) || plain.Length < 20)
         {
             return null;
         }
 
         // Cap for the edit form / Shopify body.
-        return plain.Length <= 4000 ? plain : plain[..4000].TrimEnd() + "…";
+        return CapDescription( plain );
     }
 
     private static string? FirstWooAttributeTermName( JsonElement attr )
@@ -1244,73 +2191,839 @@ public sealed class BookLookupService
                 return null;
             }
 
-            string plain = StripHtmlTags( raw );
-            string? title = ExtractMetaContent( raw, "og:title" )
-                ?? ExtractHtmlTagText( raw, "h1" )
-                ?? ExtractMarkdownHeading( raw )
-                ?? ExtractHtmlTagText( raw, "title" )
-                ?? ExtractLabeledField( plain, "Назва", "Title", "Тытул" );
-            title = DecodeHtml( title );
-            if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
-            {
-                // First substantial content line (skip nav crumbs).
-                title = plain
-                    .Split( '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries )
-                    .Select( l => Regex.Replace( l, @"^#+\s*", string.Empty ).Trim() )
-                    .Where( l => l.Length is >= 8 and <= 220 )
-                    .FirstOrDefault( l =>
-                        !LooksLikeBotWallTitle( l )
-                        && !l.StartsWith( "http", StringComparison.OrdinalIgnoreCase )
-                        && !Regex.IsMatch( l, @"^(Home|Галоўная|Каш|Cart|Menu)\b", RegexOptions.IgnoreCase ) );
-            }
-
-            if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
-            {
-                return null;
-            }
-
-            string? author = DecodeHtml(
-                ExtractMetaContent( raw, "book:author" )
-                ?? ExtractMetaContent( raw, "author" )
-                ?? ExtractRelAuthor( raw )
-                ?? ExtractLabeledField( plain, "Аўтар", "Автор", "Author", "Аўтары" ) );
-            string? publisher = ExtractLabeledField(
-                plain,
-                "Выдавец",
-                "Выдавецтва",
-                "Издательство",
-                "Publisher" );
-            string? isbn = ExtractIsbnFromText( plain );
-
-            (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle( title, author );
-            string cleaned = CleanBookTitle(
-                string.IsNullOrWhiteSpace( titleOnly ) ? title : titleOnly );
-            if (string.IsNullOrWhiteSpace( cleaned ))
+            BookLookupCandidateDto? parsed = ParseCatalogPageContent( raw, cleanUrl );
+            if (parsed is null || string.IsNullOrWhiteSpace( parsed.Title ))
             {
                 return null;
             }
 
             _logger.LogInformation(
-                "Book lookup from-url via Tavily extract: {Url} → {Title} / {Author}",
+                "Book lookup from-url via Tavily extract: {Url} → {Title} / {Author} cover={HasCover}",
                 cleanUrl,
-                cleaned,
-                authorFromTitle ?? author );
-            return new BookLookupCandidateDto
-            {
-                Title = cleaned,
-                Author = authorFromTitle ?? author,
-                Isbn = isbn,
-                Publisher = publisher,
-                Url = cleanUrl,
-                Source = "manual",
-                Snippet = TruncateSnippet( plain ),
-            };
+                parsed.Title,
+                parsed.Author,
+                !string.IsNullOrWhiteSpace( parsed.CoverImageUrl ) );
+            return parsed;
         }
         catch (Exception ex)
         {
             _logger.LogWarning( ex, "from-url extract failed for {Url}", cleanUrl );
             return null;
         }
+    }
+
+    /// <summary>
+    /// Parse shop / catalog HTML or Tavily markdown/plain into a book candidate.
+    /// Handles LiveLib-style labels where the value is on the next line after "Издательство:".
+    /// </summary>
+    private static BookLookupCandidateDto? ParseCatalogPageContent( string raw, string cleanUrl )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        // Keep newlines so LiveLib "Label:\nValue" fields parse; StripHtmlTags collapses
+        // everything to one line and ExtractLabeledField then swallows the whole page tail.
+        string plain = HtmlToPlainPreserveLines( raw );
+        string? rawTitle = ExtractMetaContent( raw, "og:title" )
+            ?? ExtractHtmlTagText( raw, "h1" )
+            ?? ExtractMarkdownHeading( raw )
+            ?? ExtractHtmlTagText( raw, "title" )
+            ?? ExtractLabeledField( plain, "Назва", "Title", "Тытул", "Название" );
+        rawTitle = DecodeHtml( rawTitle );
+
+        (string titleFromCatalog, string? authorFromCatalogTitle) =
+            SplitCatalogTitleWithAuthor( rawTitle );
+        string? title = FirstNonEmpty( titleFromCatalog, rawTitle );
+
+        if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
+        {
+            title = plain
+                .Split( '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries )
+                .Select( l => Regex.Replace( l, @"^#+\s*", string.Empty ).Trim() )
+                .Where( l => l.Length is >= 3 and <= 220 )
+                .FirstOrDefault( l =>
+                    !LooksLikeBotWallTitle( l )
+                    && !l.StartsWith( "http", StringComparison.OrdinalIgnoreCase )
+                    && !Regex.IsMatch(
+                        l,
+                        @"^(Home|Галоўная|Главная|Каш|Cart|Menu|Хочу|Ещё|Еще)\b",
+                        RegexOptions.IgnoreCase ) );
+            (titleFromCatalog, authorFromCatalogTitle) = SplitCatalogTitleWithAuthor( title );
+            title = FirstNonEmpty( titleFromCatalog, title );
+        }
+
+        if (string.IsNullOrWhiteSpace( title ) || LooksLikeBotWallTitle( title ))
+        {
+            return null;
+        }
+
+        string? author = DecodeHtml(
+            authorFromCatalogTitle
+            ?? ExtractMetaContent( raw, "book:author" )
+            ?? ExtractRelAuthor( raw )
+            ?? ExtractAuthorNearTitle( plain, title )
+            ?? ExtractLabeledField(
+                plain,
+                "Аўтар",
+                "Автор",
+                "Author",
+                "Аўтары",
+                "Авторы" )
+            // LiveLib often puts the profile URL in <meta name="author"> — try last and sanitize.
+            ?? ExtractMetaContent( raw, "author" ) );
+        author = NormalizeAuthorCandidate( author );
+
+        string? coverImageUrl = PreferRealCoverImageUrl(
+            ExtractCatalogCoverImageUrl( raw, cleanUrl ),
+            DecodeHtml( ExtractMetaContent( raw, "og:image" ) ),
+            DecodeHtml( ExtractMetaContent( raw, "twitter:image" ) ),
+            DecodeHtml( ExtractMetaContent( raw, "twitter:image:src" ) ) );
+
+        string? metaDescription = DecodeHtml(
+            ExtractMetaContent( raw, "og:description" )
+            ?? ExtractMetaContent( raw, "description" ) );
+        if (!string.IsNullOrWhiteSpace( metaDescription ))
+        {
+            metaDescription = StripHtmlTags( metaDescription ).Trim();
+        }
+
+        string? bodyDescription = ExtractDescriptionParagraph( plain, title, author )
+            ?? ExtractDescriptionFromHtml( raw );
+        string? description = PreferRicherDescription( metaDescription, bodyDescription );
+        description = CapDescription( description );
+
+        // Free-text blob for universal label scraping (any shop / catalog / blog).
+        string textBlob = string.Join(
+            "\n",
+            new[] { plain, description }.Where( s => !string.IsNullOrWhiteSpace( s ) ) );
+
+        string? publisher = ExtractLabeledField(
+            textBlob,
+            "Выдавец",
+            "Выдавецтва",
+            "Издатель",
+            "Издательство",
+            "Publisher",
+            "Wydawca",
+            "Wydawnictwo" );
+        if (string.IsNullOrWhiteSpace( publisher ))
+        {
+            publisher = BookBibliographicFields.ExtractPublisherFromText( textBlob );
+        }
+
+        string? isbn = ExtractIsbnFromText( textBlob );
+
+        string? yearRaw = ExtractLabeledField(
+            textBlob,
+            "Год издания",
+            "Год выдання",
+            "Год издательства",
+            "Year",
+            "Year of publication",
+            "Rok wydania",
+            "Rok" );
+        string? languageRaw = ExtractLabeledField(
+            textBlob,
+            "Язык",
+            "Мова",
+            "Language",
+            "Język" );
+        string? placeRaw = ExtractLabeledField(
+            textBlob,
+            "Месца выхаду",
+            "Месца выдання",
+            "Место издания",
+            "Miejsce wydania",
+            "Place of publication",
+            "City" );
+        if (string.IsNullOrWhiteSpace( placeRaw ))
+        {
+            placeRaw = BookBibliographicFields.ExtractPlaceFromText( textBlob );
+        }
+
+        string? ageRaw = ExtractLabeledField(
+            textBlob,
+            "Возрастные ограничения",
+            "Возрастное ограничение",
+            "Возрастная категория",
+            "Узрост",
+            "Ўзрост",
+            "Возраст",
+            "Age",
+            "Age rating",
+            "Age restriction" );
+        string? pagesRaw = ExtractLabeledField(
+            textBlob,
+            "Количество страниц",
+            "Колькасць старонак",
+            "Старонак",
+            "Pages",
+            "Page count",
+            "Liczba stron" );
+        string? coverRaw = ExtractLabeledField(
+            textBlob,
+            "Вокладка",
+            "Обложка",
+            "Переплёт",
+            "Переплет",
+            "Binding",
+            "Cover",
+            "Oprawa" );
+
+        if (!string.IsNullOrWhiteSpace( placeRaw ))
+        {
+            // LiveLib: "Беласток. Выдавец: Offset-Print" → city + publisher.
+            Match vyd = Regex.Match(
+                placeRaw,
+                @"^(?<city>.+?)\s*(?:Выдавец|Издатель|Publisher)\s*:\s*(?<pub>.+)$",
+                RegexOptions.IgnoreCase );
+            if (vyd.Success)
+            {
+                if (string.IsNullOrWhiteSpace( publisher ))
+                {
+                    publisher = vyd.Groups["pub"].Value.Trim().Trim( '*', '_', '#' );
+                }
+
+                placeRaw = vyd.Groups["city"].Value.Trim().TrimEnd( '.', ';', '|', ' ' );
+            }
+            else
+            {
+                int cut = placeRaw.IndexOfAny( ['.', ';', '|'] );
+                if (cut > 1 && cut < 40)
+                {
+                    placeRaw = placeRaw[..cut].Trim();
+                }
+            }
+        }
+
+        decimal? salePrice = ExtractPriceFromPlainText( plain );
+        (string titleOnly, string? authorFromTitle) = SplitAuthorFromTitle( title, author );
+        string cleaned = CleanBookTitle(
+            string.IsNullOrWhiteSpace( titleOnly ) ? title : titleOnly );
+        if (string.IsNullOrWhiteSpace( cleaned ))
+        {
+            return null;
+        }
+
+        string? resolvedAuthor = authorFromTitle ?? author;
+        if (!string.IsNullOrWhiteSpace( resolvedAuthor ))
+        {
+            resolvedAuthor = NormalizeAuthorCandidate( resolvedAuthor );
+            if (!string.IsNullOrWhiteSpace( resolvedAuthor ))
+            {
+                resolvedAuthor = FormatAuthorFirstLast( resolvedAuthor.Trim(), null );
+            }
+        }
+        else if (IsWooProductPathUrl( cleanUrl )
+            && TryParseProductUrlSlug( cleanUrl, out _, out string? slugAuthor )
+            && !string.IsNullOrWhiteSpace( slugAuthor ))
+        {
+            // Kamunikat-style /pradukt/firstname-lastname-title only — not LiveLib /book/id-…
+            resolvedAuthor = FormatAuthorFirstLast( slugAuthor, null );
+        }
+
+        return new BookLookupCandidateDto
+        {
+            Title = cleaned,
+            Author = resolvedAuthor,
+            Isbn = isbn,
+            Publisher = NullIfWhiteSpace( publisher ),
+            Description = NullIfWhiteSpace( description ),
+            CoverImageUrl = coverImageUrl,
+            SalePrice = salePrice,
+            CoverType = BookProductCoverType.Normalize( coverRaw ),
+            AgeRating = BookAgeRating.NormalizeLabeled( ageRaw )
+                ?? BookAgeRating.Normalize( description )
+                ?? BookAgeRating.Normalize( plain ),
+            Language = BookBibliographicFields.ResolveLanguage(
+                languageRaw,
+                description,
+                cleaned ),
+            PlaceOfPublication = BookBibliographicFields.NormalizePlace( placeRaw )
+                ?? BookBibliographicFields.ExtractPlaceFromText( placeRaw )
+                ?? BookBibliographicFields.ExtractPlaceFromText( textBlob ),
+            PageCount = BookBibliographicFields.NormalizePageCount( pagesRaw ),
+            Year = BookBibliographicFields.NormalizeYear( yearRaw )
+                ?? BookBibliographicFields.NormalizeYear( description ),
+            Url = cleanUrl,
+            Source = "manual",
+            Snippet = TruncateSnippet( plain ),
+        };
+    }
+
+    private static bool IsWooProductPathUrl( string url )
+    {
+        if (!Uri.TryCreate( url, UriKind.Absolute, out Uri? uri ))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(
+            uri.AbsolutePath,
+            @"/(?:pradukt|produkt|product|kniharnia|kniha|shop|store)/",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+    }
+
+    private static (string Title, string? Author) SplitCatalogTitleWithAuthor( string? raw )
+    {
+        string t = (raw ?? string.Empty).Trim();
+        if (t.Length < 3)
+        {
+            return (t, null);
+        }
+
+        // Shop/card blurbs: «Siva zozula». Автор: Виктор Стахвюк
+        Match labeled = Regex.Match(
+            t,
+            @"^(?<title>.+?)\s*[.…]?\s*(?:Автор(?:ы)?|Аўтар(?:ы)?|Author(?:s)?)\s*[:：]\s*(?<author>.+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (labeled.Success)
+        {
+            string title = UnwrapTitleQuotes( labeled.Groups["title"].Value.Trim() );
+            string author = labeled.Groups["author"].Value.Trim().Trim( '.', ';', ',' );
+            if (title.Length >= 1 && author.Length >= 2)
+            {
+                return (title, author);
+            }
+        }
+
+        // LiveLib og:title: "Книга Siva zozula — Виктор Стахвюк"
+        Match m = Regex.Match(
+            t,
+            @"^(?:Книга|Book)\s+(?<title>.+?)\s*[—–−|]\s*(?<author>.+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (m.Success)
+        {
+            return (UnwrapTitleQuotes( m.Groups["title"].Value.Trim() ), m.Groups["author"].Value.Trim());
+        }
+
+        m = Regex.Match(
+            t,
+            @"^(?<title>.{3,160}?)\s+[—–−]\s+(?<author>[^\d]{3,80})$",
+            RegexOptions.CultureInvariant );
+        if (m.Success)
+        {
+            string author = m.Groups["author"].Value.Trim();
+            if (author.Split( ' ', StringSplitOptions.RemoveEmptyEntries ).Length is >= 1 and <= 4)
+            {
+                return (UnwrapTitleQuotes( m.Groups["title"].Value.Trim() ), author);
+            }
+        }
+
+        // Skaryna / many shops: "Title / Author"
+        Match slash = Regex.Match(
+            t,
+            @"^(?<title>.{3,160}?)\s*/\s*(?<author>[^\d/]{3,80})$",
+            RegexOptions.CultureInvariant );
+        if (slash.Success)
+        {
+            string author = slash.Groups["author"].Value.Trim();
+            string[] authorParts = author.Split( ' ', StringSplitOptions.RemoveEmptyEntries );
+            if (authorParts.Length is >= 1 and <= 5
+                && !Regex.IsMatch( author, @"add to cart|shop|cart|price|£|\$", RegexOptions.IgnoreCase ))
+            {
+                return (UnwrapTitleQuotes( slash.Groups["title"].Value.Trim() ), author);
+            }
+        }
+
+        return (UnwrapTitleQuotes( t ), null);
+    }
+
+    private static string UnwrapTitleQuotes( string title )
+    {
+        string t = title.Trim();
+        if (t.Length >= 2)
+        {
+            char a = t[0];
+            char b = t[^1];
+            if ((a == '«' && b == '»')
+                || (a == '"' && b == '"')
+                || (a == '\'' && b == '\'')
+                || (a == '“' && b == '”')
+                || (a == '„' && b == '“')
+                || (a == '„' && b == '”'))
+            {
+                t = t[1..^1].Trim();
+            }
+        }
+
+        return t;
+    }
+
+    private static string? ExtractAuthorNearTitle( string plain, string title )
+    {
+        if (string.IsNullOrWhiteSpace( plain ) || string.IsNullOrWhiteSpace( title ))
+        {
+            return null;
+        }
+
+        string[] lines = plain
+            .Split( '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries )
+            .Select( l => Regex.Replace( l, @"^#+\s*", string.Empty ).Trim() )
+            .Where( l => l.Length > 0 )
+            .ToArray();
+
+        string titleKey = Regex.Replace( title, @"\s+", " " ).Trim();
+        for (int i = 0; i < lines.Length - 1; i++)
+        {
+            string line = Regex.Replace( lines[i], @"\s+", " " ).Trim();
+            if (!line.Equals( titleKey, StringComparison.OrdinalIgnoreCase )
+                && !line.Contains( titleKey, StringComparison.OrdinalIgnoreCase ))
+            {
+                continue;
+            }
+
+            string next = Regex.Replace( lines[i + 1], @"\s+", " " ).Trim();
+            if (LooksLikePersonNameLine( next ))
+            {
+                return next;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool LooksLikePersonNameLine( string line )
+    {
+        if (string.IsNullOrWhiteSpace( line ) || line.Length is < 3 or > 80)
+        {
+            return false;
+        }
+
+        if (Regex.IsMatch(
+                line,
+                @"ISBN|Издател|Выдавец|Год|Язык|Мова|Хочу|реценз|цитат|http|www\.|livelib|/author/|\d{4}",
+                RegexOptions.IgnoreCase ))
+        {
+            return false;
+        }
+
+        string[] parts = line.Split( ' ', StringSplitOptions.RemoveEmptyEntries );
+        return parts.Length is >= 2 and <= 4
+            && parts.All( p => p.Length >= 2 && !p.Any( char.IsDigit ) );
+    }
+
+    private static string? ExtractDescriptionParagraph(
+        string plain,
+        string? title,
+        string? author )
+    {
+        if (string.IsNullOrWhiteSpace( plain ))
+        {
+            return null;
+        }
+
+        string? best = null;
+        foreach (string line in plain.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries ))
+        {
+            string t = Regex.Replace( line, @"^#+\s*", string.Empty ).Trim();
+            t = StripDescriptionChrome( t );
+            if (t.Length < 80 || LooksLikeJunkDescription( t ))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace( title )
+                && t.Contains( title, StringComparison.OrdinalIgnoreCase )
+                && t.Length < title.Length + 40)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace( author )
+                && t.Equals( author, StringComparison.OrdinalIgnoreCase ))
+            {
+                continue;
+            }
+
+            if (Regex.IsMatch(
+                    t,
+                    @"^(Издател|Выдавец|ISBN|Год|Язык|Мова|Месца|Место|Возраст|Хочу|Реценз|Скрыть|Подробнее)",
+                    RegexOptions.IgnoreCase ))
+            {
+                continue;
+            }
+
+            // Skip obvious truncated blurbs when a fuller paragraph exists.
+            if (LooksLikeTruncatedBlurb( t ) && t.Length < 220)
+            {
+                continue;
+            }
+
+            if (best is null || t.Length > best.Length)
+            {
+                best = t;
+            }
+        }
+
+        return CapDescription( best );
+    }
+
+    /// <summary>
+    /// LiveLib / catalog HTML often keeps the full annotation in a dedicated block
+    /// while og:description is a short preview ending with "…".
+    /// </summary>
+    private static string? ExtractDescriptionFromHtml( string raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        string[] patterns =
+        [
+            // LiveLib annotation / about blocks
+            @"<(?:div|section|p)[^>]*(?:class|itemprop)=[""'][^""']*(?:annotation|description|about|item-about|book-description|lenta-card__text)[^""']*[""'][^>]*>(?<c>[\s\S]{80,12000}?)</(?:div|section|p)>",
+            @"<meta[^>]+itemprop=[""']description[""'][^>]+content=[""'](?<c>[^""']{80,})[""']",
+            @"<meta[^>]+content=[""'](?<c>[^""']{80,})[""'][^>]+itemprop=[""']description[""']",
+        ];
+
+        string? best = null;
+        foreach (string pattern in patterns)
+        {
+            foreach (Match m in Regex.Matches( raw, pattern, RegexOptions.IgnoreCase ))
+            {
+                string chunk = StripHtmlTags( DecodeHtml( m.Groups["c"].Value ) ?? string.Empty );
+                chunk = StripDescriptionChrome( chunk );
+                if (chunk.Length < 80 || LooksLikeJunkDescription( chunk ))
+                {
+                    continue;
+                }
+
+                if (best is null || chunk.Length > best.Length)
+                {
+                    best = chunk;
+                }
+            }
+        }
+
+        return CapDescription( best );
+    }
+
+    private static string? PreferRicherDescription( string? a, string? b )
+    {
+        string? left = SanitizeDescriptionCandidate( a );
+        string? right = SanitizeDescriptionCandidate( b );
+        if (left is null)
+        {
+            return right;
+        }
+
+        if (right is null)
+        {
+            return left;
+        }
+
+        bool leftTrunc = LooksLikeTruncatedBlurb( left );
+        bool rightTrunc = LooksLikeTruncatedBlurb( right );
+        if (leftTrunc && !rightTrunc && right.Length >= left.Length)
+        {
+            return right;
+        }
+
+        if (rightTrunc && !leftTrunc && left.Length >= right.Length)
+        {
+            return left;
+        }
+
+        // Prefer substantially longer body text over short meta preview.
+        if (right.Length >= left.Length + 40)
+        {
+            return right;
+        }
+
+        if (left.Length >= right.Length + 40)
+        {
+            return left;
+        }
+
+        return right.Length > left.Length ? right : left;
+    }
+
+    private static string? SanitizeDescriptionCandidate( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ) || raw.Trim().Length < 20)
+        {
+            return null;
+        }
+
+        string t = StripDescriptionChrome( raw );
+        if (LooksLikeJunkDescription( t ))
+        {
+            return null;
+        }
+
+        return NullIfWhiteSpace( t );
+    }
+
+    private static bool LooksLikeTruncatedBlurb( string text )
+    {
+        string t = text.TrimEnd();
+        return t.EndsWith( "…", StringComparison.Ordinal )
+            || t.EndsWith( "...", StringComparison.Ordinal )
+            || t.EndsWith( "..", StringComparison.Ordinal );
+    }
+
+    /// <summary>
+    /// Reject Next.js/PageSpeed/script blobs accidentally scraped into "description".
+    /// </summary>
+    private static bool LooksLikeJunkDescription( string text )
+    {
+        if (string.IsNullOrWhiteSpace( text ))
+        {
+            return true;
+        }
+
+        string t = text.Trim();
+        if (Regex.IsMatch(
+                t,
+                @"pagespeed\.|lazyLoadImages|__next_f|\$Sreact|self\.__next|\$RB\s*=|\$RV\s*=|function\s*\(|=>\s*\{|performance\.now\(|webpackJsonp|__NEXT_DATA__|window\.__|document\.cookie|<\/?script\b",
+                RegexOptions.IgnoreCase ))
+        {
+            return true;
+        }
+
+        // Dense code-ish punctuation vs letters.
+        int letters = t.Count( char.IsLetter );
+        int codey = t.Count( c => c is '{' or '}' or ';' or '=' or '(' or ')' or '[' or ']' or '$' or '_' );
+        if (letters > 0 && codey >= 12 && codey * 2 >= letters)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string StripDescriptionChrome( string text )
+    {
+        string t = Regex.Replace( text ?? string.Empty, @"\s+", " " ).Trim();
+        // Cut shop chrome / related products that Tavily often appends after the blurb.
+        Match cut = Regex.Match(
+            t,
+            @"\s*(?:Additional information|You May Also Like|Related products|Related\b|Tags:|ShareTweet|Add to cart|##\s*Additional|##\s*You May|##\s*Related)\b",
+            RegexOptions.IgnoreCase );
+        if (cut.Success && cut.Index >= 60)
+        {
+            t = t[..cut.Index].Trim();
+        }
+
+        t = Regex.Replace(
+            t,
+            @"\s*(?:Скрыть|Подробнее|Показать\s+полностью|Читать\s+(?:далее|дальше)|Read\s+more|Show\s+more)\s*$",
+            string.Empty,
+            RegexOptions.IgnoreCase );
+        // Drop leftover markdown image crumbs.
+        t = Regex.Replace( t, @"!\[[^\]]*\]\([^)]+\)", " " );
+        t = Regex.Replace( t, @"\[[^\]]*\]\([^)]+\)", " " );
+        t = Regex.Replace( t, @"\*+", " " );
+        t = Regex.Replace( t, @"\s+", " " ).Trim();
+        return t;
+    }
+
+    private static string? CapDescription( string? text )
+    {
+        string? cleaned = SanitizeDescriptionCandidate( text );
+        if (cleaned is null)
+        {
+            return null;
+        }
+
+        return cleaned.Length <= 8000 ? cleaned : cleaned[..8000].TrimEnd() + "…";
+    }
+
+    /// <summary>
+    /// Prefer real book-cover CDN assets over social cards (LiveLib /opengraph-image).
+    /// </summary>
+    private static string? PreferRealCoverImageUrl( params string?[] candidates )
+    {
+        string? fallback = null;
+        foreach (string? raw in candidates)
+        {
+            string? url = NormalizeAbsoluteImageUrl( raw );
+            if (url is null)
+            {
+                continue;
+            }
+
+            if (IsSocialCardImageUrl( url ))
+            {
+                fallback ??= url;
+                continue;
+            }
+
+            return UpgradeCatalogCoverImageUrl( url );
+        }
+
+        return fallback is null ? null : UpgradeCatalogCoverImageUrl( fallback );
+    }
+
+    private static string? ExtractCatalogCoverImageUrl( string raw, string pageUrl )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        string? bookId = null;
+        Match idMatch = Regex.Match(
+            pageUrl ?? string.Empty,
+            @"/book/(?<id>\d+)",
+            RegexOptions.IgnoreCase );
+        if (idMatch.Success)
+        {
+            bookId = idMatch.Groups["id"].Value;
+        }
+
+        string? best = null;
+        int bestScore = -1;
+        foreach (Match img in Regex.Matches(
+                     raw,
+                     @"<img\b(?<attrs>[^>]*)>",
+                     RegexOptions.IgnoreCase ))
+        {
+            string attrs = img.Groups["attrs"].Value;
+            string? src = FirstImgSrc( attrs );
+            if (string.IsNullOrWhiteSpace( src ))
+            {
+                continue;
+            }
+
+            string? abs = NormalizeAbsoluteImageUrl( src, pageUrl );
+            if (abs is null || IsSocialCardImageUrl( abs ))
+            {
+                continue;
+            }
+
+            int score = ScoreCatalogCoverCandidate( abs, attrs, bookId );
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = abs;
+            }
+        }
+
+        return bestScore >= 20 ? best : null;
+    }
+
+    private static string? FirstImgSrc( string attrs )
+    {
+        foreach (string attr in new[]
+                 {
+                     "data-pagespeed-lazy-src",
+                     "data-src",
+                     "data-original",
+                     "src",
+                 })
+        {
+            Match m = Regex.Match(
+                attrs,
+                $@"{attr}\s*=\s*[""'](?<v>[^""']+)[""']",
+                RegexOptions.IgnoreCase );
+            if (m.Success)
+            {
+                string v = m.Groups["v"].Value.Trim();
+                if (!string.IsNullOrWhiteSpace( v )
+                    && !v.StartsWith( "data:", StringComparison.OrdinalIgnoreCase ))
+                {
+                    return v;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int ScoreCatalogCoverCandidate( string url, string attrs, string? bookId )
+    {
+        string low = url.ToLowerInvariant();
+        string a = attrs.ToLowerInvariant();
+        int score = 0;
+
+        if (low.Contains( "/boocover/", StringComparison.Ordinal ))
+        {
+            score += 80;
+        }
+
+        if (a.Contains( "cover_covermedia", StringComparison.Ordinal )
+            || a.Contains( "book-cover", StringComparison.Ordinal )
+            || a.Contains( "cover-image", StringComparison.Ordinal )
+            || a.Contains( "product-image", StringComparison.Ordinal ))
+        {
+            score += 40;
+        }
+
+        if (!string.IsNullOrWhiteSpace( bookId )
+            && low.Contains( "/" + bookId + "/", StringComparison.Ordinal ))
+        {
+            score += 50;
+        }
+
+        if (low.Contains( "userpic", StringComparison.Ordinal )
+            || low.Contains( "selepic", StringComparison.Ordinal )
+            || low.Contains( "/avatar", StringComparison.Ordinal )
+            || a.Contains( "userimage", StringComparison.Ordinal )
+            || a.Contains( "selectioncard", StringComparison.Ordinal ))
+        {
+            score -= 100;
+        }
+
+        if (Regex.IsMatch( low, @"/\d{2,3}x\d{2,3}/" ))
+        {
+            score += 5; // sized cover variants
+        }
+
+        return score;
+    }
+
+    private static bool IsSocialCardImageUrl( string url )
+    {
+        string low = url.ToLowerInvariant();
+        return low.Contains( "/opengraph-image", StringComparison.Ordinal )
+            || low.Contains( "opengraph", StringComparison.Ordinal )
+            || low.Contains( "/twitter-image", StringComparison.Ordinal )
+            || low.Contains( "og-image", StringComparison.Ordinal )
+            || low.Contains( "share-image", StringComparison.Ordinal )
+            || low.Contains( "social-card", StringComparison.Ordinal );
+    }
+
+    private static string UpgradeCatalogCoverImageUrl( string url )
+    {
+        // LiveLib: …/boocover/{id}/200x305/… → …/l/… (slightly larger real cover JPEG).
+        string upgraded = Regex.Replace(
+            url,
+            @"(/boocover/\d+)/(\d+x\d+)/",
+            "$1/l/",
+            RegexOptions.IgnoreCase );
+        return upgraded;
+    }
+
+    private static string? NormalizeAbsoluteImageUrl( string? raw, string? pageUrl = null )
+    {
+        string? decoded = DecodeHtml( raw )?.Trim();
+        if (string.IsNullOrWhiteSpace( decoded ))
+        {
+            return null;
+        }
+
+        if (Uri.TryCreate( decoded, UriKind.Absolute, out Uri? abs )
+            && (abs.Scheme == Uri.UriSchemeHttp || abs.Scheme == Uri.UriSchemeHttps))
+        {
+            return abs.ToString();
+        }
+
+        if (!string.IsNullOrWhiteSpace( pageUrl )
+            && Uri.TryCreate( pageUrl, UriKind.Absolute, out Uri? page )
+            && Uri.TryCreate( page, decoded, out Uri? resolved )
+            && (resolved.Scheme == Uri.UriSchemeHttp || resolved.Scheme == Uri.UriSchemeHttps))
+        {
+            return resolved.ToString();
+        }
+
+        return null;
     }
 
     private static string? ExtractMarkdownHeading( string markdown )
@@ -1340,17 +3053,84 @@ public sealed class BookLookupService
             return null;
         }
 
-        string alt = string.Join( "|", labels.Select( Regex.Escape ) );
+        // Longer labels first so "Возрастные ограничения" wins over "Возраст".
+        string[] ordered = labels
+            .Where( l => !string.IsNullOrWhiteSpace( l ) )
+            .Distinct( StringComparer.OrdinalIgnoreCase )
+            .OrderByDescending( l => l.Length )
+            .ToArray();
+        string alt = string.Join( "|", ordered.Select( Regex.Escape ) );
+        // Stop before the next bibliographic label on the same collapsed line.
+        const string NextLabelStop =
+            @"(?=\s*(?:$|\r?\n|(?:Выдавец(?:тва)?|Издател(?:ьство|ь)?|Publisher|Wydawca|Wydawnictwo|ISBN|ІСБН|Год(?:\s+издания|\s+выдання)?|Year|Язык|Мова|Language|Месца|Место|Place|Возраст(?:ные\s+ограничения|ное\s+ограничение|ная\s+категория)?|Узрост|Ўзрост|Age|Количество|Колькасць|Старонок|Pages|Вокладка|Обложка|Перепл[её]т|Binding|Cover|Аўтар|Автор|Author|Назва|Title|Рэдактар|Редактор|Editor)\s*[:：\-–—]))";
+
+        // Same line: "Издательство: Offset-Print"
         Match m = Regex.Match(
             text,
-            $@"(?im)^\s*(?:{alt})\s*[:：\-–—]\s*(?<v>.+?)\s*$" );
+            $@"(?im)^\s*(?:{alt})\s*[:：\-–—]\s*(?<v>\S.*?){NextLabelStop}" );
+        if (m.Success)
+        {
+            string? cleaned = CleanLabeledValue( m.Groups["v"].Value, alt );
+            if (cleaned is not null)
+            {
+                return cleaned;
+            }
+        }
+
+        // Inline anywhere (after StripHtmlTags collapsed newlines into spaces):
+        // "… Возрастные ограничения: 16+ Год издания: 2006 …"
+        m = Regex.Match(
+            text,
+            $@"(?i)(?:{alt})\s*[:：\-–—]\s*(?<v>\S.*?){NextLabelStop}" );
+        if (m.Success)
+        {
+            string? cleaned = CleanLabeledValue( m.Groups["v"].Value, alt );
+            if (cleaned is not null)
+            {
+                return cleaned;
+            }
+        }
+
+        // Next line value (LiveLib layout):
+        // Издательство:
+        // Offset-Print
+        m = Regex.Match(
+            text,
+            $@"(?im)^\s*(?:{alt})\s*[:：\-–—]\s*\r?\n+\s*(?<v>[^\r\n]{{1,220}})\s*$" );
         if (!m.Success)
         {
             return null;
         }
 
-        string v = m.Groups["v"].Value.Trim().Trim( '*', '_', '#' );
-        return v.Length is >= 2 and <= 180 ? v : null;
+        return CleanLabeledValue( m.Groups["v"].Value, alt );
+    }
+
+    private static string? CleanLabeledValue( string raw, string alt )
+    {
+        string v = raw.Trim().Trim( '*', '_', '#', '"', '\'', '«', '»' );
+        // LiveLib sometimes repeats the label: "ISBN: ISBN: 83-…"
+        v = Regex.Replace(
+            v,
+            $@"^(?:{alt})\s*[:：\-–—]\s*",
+            string.Empty,
+            RegexOptions.IgnoreCase );
+        v = v.Trim().Trim( '*', '_', '#', '"', '\'', '«', '»' );
+        if (v.Length is < 1 or > 220)
+        {
+            return null;
+        }
+
+        // Truncate if a mid-value label slipped through.
+        Match cut = Regex.Match(
+            v,
+            @"\s+(?:Выдавец|Издател|Publisher|ISBN|Год|Year|Язык|Мова|Language|Месца|Место|Возраст|Узрост|Age|Количество|Pages|Обложка|Вокладка|Аўтар|Автор|Author)\s*[:：\-–—]",
+            RegexOptions.IgnoreCase );
+        if (cut.Success && cut.Index > 0)
+        {
+            v = v[..cut.Index].Trim();
+        }
+
+        return v.Length is >= 1 and <= 220 ? v : null;
     }
 
     private static string? TruncateSnippet( string? text )
@@ -1368,7 +3148,7 @@ public sealed class BookLookupService
     {
         Match m = Regex.Match(
             absolutePath ?? string.Empty,
-            @"/(?:pradukt|produkt|product)/(?<slug>[^/]+)/?",
+            @"/(?:pradukt|produkt|product|kniharnia)/(?<slug>[^/]+)/?",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
         if (!m.Success)
         {
@@ -3577,23 +5357,6 @@ public sealed class BookLookupService
             return new BookSuggestGenresResultDto();
         }
 
-        // Explicit sources only: supplier page + price list (not description).
-        string pageAndPriceBlob = string.Join(
-            "\n",
-            new[]
-            {
-                request.SupplierPageSnippet,
-                request.PriceListRowText,
-            }.Where( s => !string.IsNullOrWhiteSpace( s ) ) );
-
-        IReadOnlyList<string> fromPageOrPrice =
-            ShopifyInventoryService.MatchGenresInText( pageAndPriceBlob, allowed );
-        if (fromPageOrPrice.Count > 0)
-        {
-            return new BookSuggestGenresResultDto { Genres = fromPageOrPrice.ToList() };
-        }
-
-        // No genre on page/price — ask Groq to infer from description/title.
         string descriptionBlob = string.Join(
             "\n",
             new[]
@@ -3602,7 +5365,36 @@ public sealed class BookLookupService
                 request.Author,
                 request.Publisher,
                 request.Description,
+                request.SupplierPageSnippet,
+                request.PriceListRowText,
             }.Where( s => !string.IsNullOrWhiteSpace( s ) ) );
+
+        string openAiKey = (_config["OpenAI:ApiKey"] ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace( openAiKey ))
+        {
+            try
+            {
+                List<string> suggested = await SuggestGenresWithOpenAiAsync(
+                    openAiKey,
+                    request,
+                    allowed,
+                    cancellationToken );
+                IReadOnlyList<string> filtered =
+                    ShopifyInventoryService.FilterGenresToAllowed( suggested, allowed );
+                if (filtered.Count > 0)
+                {
+                    return new BookSuggestGenresResultDto { Genres = filtered.ToList() };
+                }
+            }
+            catch (Exception ex) when (
+                ex is InvalidOperationException
+                || ex is HttpRequestException
+                || ex is TaskCanceledException
+                || ex is JsonException)
+            {
+                _logger.LogWarning( ex, "Genre suggest via OpenAI failed; trying Groq/local." );
+            }
+        }
 
         try
         {
@@ -3616,11 +5408,6 @@ public sealed class BookLookupService
             {
                 return new BookSuggestGenresResultDto { Genres = filtered.ToList() };
             }
-
-            // Last resort: match allowed labels inside description/title.
-            IReadOnlyList<string> fromDescription =
-                ShopifyInventoryService.MatchGenresInText( descriptionBlob, allowed );
-            return new BookSuggestGenresResultDto { Genres = fromDescription.ToList() };
         }
         catch (Exception ex) when (
             ex is InvalidOperationException
@@ -3629,10 +5416,77 @@ public sealed class BookLookupService
             || ex is TaskCanceledException)
         {
             _logger.LogWarning( ex, "Genre suggest via Groq failed; trying local text match." );
-            IReadOnlyList<string> fallback =
-                ShopifyInventoryService.MatchGenresInText( descriptionBlob, allowed );
-            return new BookSuggestGenresResultDto { Genres = fallback.ToList() };
         }
+
+        IReadOnlyList<string> fallback =
+            ShopifyInventoryService.MatchGenresInText( descriptionBlob, allowed );
+        return new BookSuggestGenresResultDto { Genres = fallback.ToList() };
+    }
+
+    private async Task<List<string>> SuggestGenresWithOpenAiAsync(
+        string apiKey,
+        BookSuggestGenresRequest request,
+        IReadOnlyList<string> allowed,
+        CancellationToken cancellationToken )
+    {
+        string model = ResolveOpenAiModel();
+        string description = TruncateForPrompt( request.Description, 2500 );
+        string snippet = TruncateForPrompt( request.SupplierPageSnippet, 1200 );
+        string priceRow = TruncateForPrompt( request.PriceListRowText, 800 );
+        string allowedJson = JsonSerializer.Serialize( allowed );
+
+        const string systemPrompt =
+            """
+            You assign book genres for a Belarusian bookstore catalog (Kirma.sh).
+            Reply with ONE JSON object: {"genres":["..."]}.
+
+            Rules:
+            - Read title, author, description, supplier snippet and price-list row carefully.
+            - Select ALL genres from Allowed that reasonably fit the book (not only the single best one).
+            - Include every specific label that applies (e.g. both «Паэзія» and «Дзіцячая літаратура» when both fit).
+            - Prefer specific labels, but still include broader ones when they are clearly correct too.
+            - Every string in "genres" MUST be copied EXACTLY from the Allowed genres list (same spelling and language).
+            - Do not invent new genres. Do not translate or paraphrase labels.
+            - Return {"genres":[]} only when nothing in Allowed fits.
+            - Order: most specific / central first, then additional fits.
+            """;
+
+        string userPrompt =
+            $"""
+            Title: {request.Title ?? ""}
+            Author: {request.Author ?? ""}
+            Publisher: {request.Publisher ?? ""}
+            ISBN: {request.Isbn ?? ""}
+            Cover type: {request.CoverType ?? ""}
+            Description:
+            {description}
+
+            Supplier page snippet:
+            {snippet}
+
+            Price list row:
+            {priceRow}
+
+            Allowed genres (JSON array — copy strings exactly):
+            {allowedJson}
+            """;
+
+        Dictionary<string, object?> payload = new()
+        {
+            ["model"] = model,
+            // gpt-5.6-terra rejects custom temperature — omit (API default only).
+            ["max_completion_tokens"] = 600,
+            ["reasoning_effort"] = "low",
+            ["response_format"] = new { type = "json_object" },
+            ["messages"] = new object[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt },
+            }
+        };
+
+        string body = await SendOpenAiChatAsync( apiKey, payload, cancellationToken );
+        return ParseSuggestedGenreList( body );
     }
 
     private async Task<List<string>> SuggestGenresWithGroqAsync(
@@ -3653,11 +5507,11 @@ public sealed class BookLookupService
             You assign book genres for a Belarusian bookstore catalog.
             Reply with ONE JSON object: {"genres":["..."]}.
             Rules:
-            - Read the title and description carefully and infer the best-fitting genres.
-            - When title/description are present, pick 1 to 3 genres (never leave genres empty if any label fits).
+            - Read the title and description carefully and infer ALL fitting genres.
+            - Select every Allowed label that reasonably fits (not only 1–3).
             - Every string in "genres" MUST be copied EXACTLY from the Allowed genres list (same spelling and language).
             - Do not invent new genres. Do not translate labels.
-            - Prefer the most specific matching labels (e.g. «Фэнтэзі» over a vague catch-all when both fit).
+            - Prefer specific matching labels, but include all that apply.
             """;
 
         string userPrompt =
@@ -3684,7 +5538,7 @@ public sealed class BookLookupService
         {
             model,
             temperature = 0,
-            max_completion_tokens = 400,
+            max_completion_tokens = 600,
             response_format = new { type = "json_object" },
             messages = new object[]
             {
@@ -3694,7 +5548,12 @@ public sealed class BookLookupService
         };
 
         string body = await SendGroqChatAsync( apiKey, payload, cancellationToken );
-        if (!TryGetMessageContent( body, out string? content ) || string.IsNullOrWhiteSpace( content ))
+        return ParseSuggestedGenreList( body );
+    }
+
+    private static List<string> ParseSuggestedGenreList( string chatBody )
+    {
+        if (!TryGetMessageContent( chatBody, out string? content ) || string.IsNullOrWhiteSpace( content ))
         {
             return new List<string>();
         }
@@ -4265,6 +6124,11 @@ public sealed class BookLookupService
         public string? HtmlTitle { get; init; }
         public string? H1 { get; init; }
         public string? AuthorHint { get; init; }
+        public string? OgImage { get; init; }
+        public string? Description { get; init; }
+        public decimal? SalePrice { get; init; }
+        /// <summary>Raw HTML body (capped) for full catalog field parsing.</summary>
+        public string? RawHtml { get; init; }
 
         public string? BestRawTitle =>
             FirstNonEmpty( H1, OgTitle, HtmlTitle );
@@ -4306,7 +6170,7 @@ public sealed class BookLookupService
             await using Stream stream = await response.Content.ReadAsStreamAsync( cancellationToken );
             using MemoryStream buffer = new();
             byte[] chunk = new byte[8192];
-            const int maxBytes = 250_000;
+            const int maxBytes = 400_000;
             int total = 0;
             while (total < maxBytes)
             {
@@ -4331,6 +6195,30 @@ public sealed class BookLookupService
             string? authorHint = ExtractMetaContent( html, "book:author" )
                 ?? ExtractMetaContent( html, "author" )
                 ?? ExtractRelAuthor( html );
+            string? ogImage = PreferRealCoverImageUrl(
+                ExtractCatalogCoverImageUrl( html, url ),
+                ExtractMetaContent( html, "og:image" ),
+                ExtractMetaContent( html, "twitter:image" ),
+                ExtractMetaContent( html, "twitter:image:src" ) );
+
+            string? description = DecodeHtml(
+                ExtractMetaContent( html, "og:description" )
+                ?? ExtractMetaContent( html, "description" ) );
+            if (!string.IsNullOrWhiteSpace( description ))
+            {
+                description = StripHtmlTags( description ).Trim();
+                if (description.Length < 20)
+                {
+                    description = null;
+                }
+                else if (description.Length > 4000)
+                {
+                    description = description[..4000].TrimEnd() + "…";
+                }
+            }
+
+            string plain = StripHtmlTags( html );
+            decimal? salePrice = ExtractPriceFromPlainText( plain );
 
             return new PageTitleHints
             {
@@ -4338,6 +6226,10 @@ public sealed class BookLookupService
                 HtmlTitle = DecodeHtml( htmlTitle ),
                 H1 = DecodeHtml( h1 ),
                 AuthorHint = DecodeHtml( authorHint ),
+                OgImage = DecodeHtml( ogImage ),
+                Description = description,
+                SalePrice = salePrice,
+                RawHtml = html,
             };
         }
         catch (Exception ex)
@@ -4345,6 +6237,34 @@ public sealed class BookLookupService
             _logger.LogDebug( ex, "Could not fetch page title hints for {Url}", url );
             return new PageTitleHints();
         }
+    }
+
+    private static decimal? ExtractPriceFromPlainText( string plain )
+    {
+        if (string.IsNullOrWhiteSpace( plain ))
+        {
+            return null;
+        }
+
+        // "35,00 zł" / "35.00 PLN" / "£6.00" / "$12" near product price wording.
+        Match m = Regex.Match(
+            plain,
+            @"(?:£|\$|€)\s*(?<v>\d{1,4}(?:[.,]\d{2})?)\b|(?<!\d)(?<v>\d{1,4}(?:[.,]\d{2})?)\s*(?:zł|zl|PLN|Br|BYN|€|EUR|GBP|USD)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (!m.Success)
+        {
+            return null;
+        }
+
+        string raw = m.Groups["v"].Value.Replace( ',', '.' );
+        if (!decimal.TryParse( raw, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal value )
+            || value <= 0
+            || value > 100_000)
+        {
+            return null;
+        }
+
+        return Math.Round( value, 2, MidpointRounding.AwayFromZero );
     }
 
     private static string? FirstNonEmpty( params string?[] values )
@@ -4391,10 +6311,10 @@ public sealed class BookLookupService
             RegexOptions.IgnoreCase | RegexOptions.Singleline );
         if (!m.Success)
         {
-            // Kamunikat-style: author link often right under h1; grab first product author link text.
+            // Kamunikat / LiveLib: author profile link under the title.
             m = Regex.Match(
                 html,
-                @"<a\b[^>]*href\s*=\s*[""'][^""']*(?:author|autor|auhtar|аўтар)[^""']*[""'][^>]*>(?<v>.*?)</a>",
+                @"<a\b[^>]*href\s*=\s*[""'](?<href>[^""']*(?:/author/|author|autor|auhtar|аўтар)[^""']*)[""'][^>]*>(?<v>.*?)</a>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline );
         }
 
@@ -4404,7 +6324,112 @@ public sealed class BookLookupService
         }
 
         string inner = Regex.Replace( m.Groups["v"].Value, "<[^>]+>", " " );
-        return Regex.Replace( inner, @"\s+", " " ).Trim();
+        inner = Regex.Replace( inner, @"\s+", " " ).Trim();
+        string? normalized = NormalizeAuthorCandidate( inner );
+        if (!string.IsNullOrWhiteSpace( normalized ))
+        {
+            return normalized;
+        }
+
+        if (m.Groups["href"].Success)
+        {
+            return NormalizeAuthorCandidate( m.Groups["href"].Value );
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Drop profile URLs mistakenly used as author; recover a name from LiveLib author slugs.
+    /// </summary>
+    private static string? NormalizeAuthorCandidate( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        string t = DecodeHtml( raw )?.Trim() ?? string.Empty;
+        if (t.Length == 0)
+        {
+            return null;
+        }
+
+        // Bare or absolute author profile URLs (LiveLib meta/og often does this).
+        if (Regex.IsMatch(
+                t,
+                @"^(?:https?:\/\/)?(?:www\.)?livelib\.ru\/author\/",
+                RegexOptions.IgnoreCase )
+            || Regex.IsMatch( t, @"^https?:\/\/", RegexOptions.IgnoreCase )
+            || t.Contains( "/author/", StringComparison.OrdinalIgnoreCase ))
+        {
+            Match slug = Regex.Match(
+                t,
+                @"/author/(?:\d+-)?(?<slug>[a-z0-9\-_%]+)/?",
+                RegexOptions.IgnoreCase );
+            if (slug.Success)
+            {
+                string fromSlug = HumanizeAuthorSlug( slug.Groups["slug"].Value );
+                return string.IsNullOrWhiteSpace( fromSlug ) ? null : fromSlug;
+            }
+
+            return null;
+        }
+
+        if (t.Contains( "://", StringComparison.Ordinal )
+            || t.Contains( "www.", StringComparison.OrdinalIgnoreCase ))
+        {
+            return null;
+        }
+
+        // Reject leftover nav / shop chrome junk.
+        if (Regex.IsMatch(
+                t,
+                @"^(Home|Галоўная|Главная|Хочу|ISBN|Издател|Выдавец|Add to cart|Добавить в корзину|Дадаць у кошык|In stock|Out of stock|Browse Shop|Your cart|Share|Tweet|Quantity|Колькасць)\b",
+                RegexOptions.IgnoreCase ))
+        {
+            return null;
+        }
+
+        if (Regex.IsMatch(
+                t,
+                @"add to cart|добавить в корзину|дадаць у кошык|browse shop|your cart is empty",
+                RegexOptions.IgnoreCase ))
+        {
+            return null;
+        }
+
+        return t.Length is >= 2 and <= 120 ? t : null;
+    }
+
+    private static string HumanizeAuthorSlug( string slug )
+    {
+        string s = Uri.UnescapeDataString( (slug ?? string.Empty).Trim() )
+            .Replace( '_', '-' );
+        if (string.IsNullOrWhiteSpace( s ))
+        {
+            return string.Empty;
+        }
+
+        // Drop trailing truncated bits that are clearly incomplete alone.
+        string[] parts = s.Split( '-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries );
+        if (parts.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string p = parts[i];
+            if (p.Length == 0)
+            {
+                continue;
+            }
+
+            parts[i] = char.ToUpperInvariant( p[0] ) + p[1..].ToLowerInvariant();
+        }
+
+        return string.Join( " ", parts );
     }
 
     private static string? DecodeHtml( string? value )
@@ -4424,9 +6449,42 @@ public sealed class BookLookupService
             return string.Empty;
         }
 
-        string text = Regex.Replace( value, "<[^>]+>", " " );
+        string text = StripScriptAndStyleBlocks( value );
+        text = Regex.Replace( text, "<[^>]+>", " " );
         return Regex.Replace( text, @"\s+", " " ).Trim();
     }
+
+    /// <summary>
+    /// HTML/markdown → plain text keeping line breaks (needed for LiveLib labeled fields).
+    /// </summary>
+    private static string HtmlToPlainPreserveLines( string? value )
+    {
+        if (string.IsNullOrWhiteSpace( value ))
+        {
+            return string.Empty;
+        }
+
+        string text = StripScriptAndStyleBlocks( value );
+        text = Regex.Replace(
+            text,
+            @"<(?:br|/?p|/?div|/?li|/?tr|/?h[1-6]|/?section|/?article|/?header|/?footer)[^>]*>",
+            "\n",
+            RegexOptions.IgnoreCase );
+        text = Regex.Replace( text, "<[^>]+>", " " );
+        text = System.Net.WebUtility.HtmlDecode( text ) ?? text;
+        text = text.Replace( '\u00a0', ' ' );
+        text = Regex.Replace( text, @"[^\S\r\n]+", " " );
+        text = Regex.Replace( text, @"\r\n?|\n", "\n" );
+        text = Regex.Replace( text, @"\n{3,}", "\n\n" );
+        return text.Trim();
+    }
+
+    private static string StripScriptAndStyleBlocks( string html ) =>
+        Regex.Replace(
+            html,
+            @"<(script|style|noscript|template|svg)\b[^>]*>[\s\S]*?</\1\s*>",
+            " ",
+            RegexOptions.IgnoreCase );
 
     /// <summary>
     /// Strip site junk (" - Facebook") and keep the book title only.
@@ -4454,7 +6512,13 @@ public sealed class BookLookupService
             @"\s*[|•]\s*Kamunikat(?:\s*Shop)?\s*$",
             string.Empty,
             RegexOptions.IgnoreCase );
-        return t.Trim().Trim( ',', ';', '.', ':', '—' ).Trim();
+        // Drop trailing "Автор: …" if still glued to the title.
+        t = Regex.Replace(
+            t,
+            @"\s*[.…]?\s*(?:Автор(?:ы)?|Аўтар(?:ы)?|Author(?:s)?)\s*[:：].*$",
+            string.Empty,
+            RegexOptions.IgnoreCase );
+        return UnwrapTitleQuotes( t.Trim().Trim( ',', ';', '.', ':', '—' ).Trim() );
     }
 
     /// <summary>
@@ -4470,6 +6534,25 @@ public sealed class BookLookupService
         }
 
         string t = CleanBookTitle( title.Trim() );
+
+        // «Title». Автор: Name  /  "Title". Author: Name
+        Match labeledAuthor = Regex.Match(
+            t,
+            @"^(?<title>.+?)\s*[.…]?\s*(?:Автор(?:ы)?|Аўтар(?:ы)?|Author(?:s)?)\s*[:：]\s*(?<author>.+)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (labeledAuthor.Success)
+        {
+            string titleOnly = UnwrapTitleQuotes( labeledAuthor.Groups["title"].Value.Trim() );
+            string authorOnly = labeledAuthor.Groups["author"].Value.Trim().Trim( '.', ';', ',' );
+            if (titleOnly.Length >= 1 && authorOnly.Length >= 2)
+            {
+                return (
+                    titleOnly,
+                    FormatAuthorFirstLast( authorOnly, knownAuthor ) );
+            }
+        }
+
+        t = UnwrapTitleQuotes( t );
 
         if (!string.IsNullOrWhiteSpace( knownAuthor ))
         {
@@ -4639,7 +6722,9 @@ public sealed class BookLookupService
             || t.EndsWith( "овна", StringComparison.Ordinal )
             || t.EndsWith( "скі", StringComparison.Ordinal )
             || t.EndsWith( "ская", StringComparison.Ordinal )
+            || t.EndsWith( "цкая", StringComparison.Ordinal )
             || t.EndsWith( "cki", StringComparison.Ordinal )
+            || t.EndsWith( "cka", StringComparison.Ordinal )
             || t.EndsWith( "ska", StringComparison.Ordinal )
             || t.EndsWith( "ski", StringComparison.Ordinal )
             || t.EndsWith( "енка", StringComparison.Ordinal )
@@ -4650,6 +6735,8 @@ public sealed class BookLookupService
             || t.EndsWith( "ова", StringComparison.Ordinal )
             || t.EndsWith( "ева", StringComparison.Ordinal )
             || t.EndsWith( "ёва", StringComparison.Ordinal )
+            // Багданава, Купалава — беларускія жаночыя на -ава
+            || t.EndsWith( "ава", StringComparison.Ordinal )
             || t.EndsWith( "ина", StringComparison.Ordinal )
             || t.EndsWith( "іна", StringComparison.Ordinal )
             || t.EndsWith( "ына", StringComparison.Ordinal )
@@ -4781,9 +6868,33 @@ public sealed class BookLookupService
             return null;
         }
 
+        // LiveLib often repeats the label: "ISBN: ISBN: 83-60456-03-8"
+        string? labeled = ExtractLabeledField( text, "ISBN", "ІСБН", "Isbn" );
+        if (!string.IsNullOrWhiteSpace( labeled ))
+        {
+            string? fromLabel = IsbnUtil.NormalizePreferHyphens( labeled );
+            if (!string.IsNullOrWhiteSpace( fromLabel ))
+            {
+                return fromLabel;
+            }
+        }
+
         foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
             text,
             @"\b97[89][\d\- ]{10,20}\b" ))
+        {
+            string? normalized = IsbnUtil.NormalizePreferHyphens( m.Value );
+            if (!string.IsNullOrWhiteSpace( normalized ))
+            {
+                return normalized;
+            }
+        }
+
+        // ISBN-10 (e.g. 83-60456-03-8) — checksum filters false positives.
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+            text,
+            @"\b[\dXx](?:[\dXx]|[\- ]){8,14}[\dXx]\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase ))
         {
             string? normalized = IsbnUtil.NormalizePreferHyphens( m.Value );
             if (!string.IsNullOrWhiteSpace( normalized ))

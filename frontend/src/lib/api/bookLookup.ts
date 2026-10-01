@@ -5,6 +5,7 @@ import {
 } from '@/lib/api/common';
 import { normalizeAgeRating } from '@/lib/books/ageRating';
 import {
+  extractPlaceFromText,
   languageFromOcrCode,
   normalizeBookFormat,
   normalizeIllustrator,
@@ -130,6 +131,10 @@ function mapBibliographicFields(raw: Record<string, unknown>): {
       mapOptionalInt(pagesRaw),
     placeOfPublication:
       normalizePlace(placeRaw == null ? null : String(placeRaw)) ||
+      extractPlaceFromText(placeRaw == null ? null : String(placeRaw)) ||
+      extractPlaceFromText(
+        toOptionalString(raw.description ?? raw.Description)
+      ) ||
       mapOptionalText(placeRaw),
     translation:
       normalizeTranslation(
@@ -185,6 +190,72 @@ export async function lookupBookFromUrl(input: {
   }
   const raw = (await res.json()) as Record<string, unknown>;
   return mapCandidate(raw);
+}
+
+/** Prefer non-empty fields from the richer of browser vs backend lookups. */
+export function mergeBookCandidates(
+  primary: BookLookupCandidate | null | undefined,
+  secondary: BookLookupCandidate | null | undefined
+): BookLookupCandidate | null {
+  if (!primary && !secondary) return null;
+  if (!primary) return secondary ?? null;
+  if (!secondary) return primary;
+
+  const text = (a?: string | null, b?: string | null) => {
+    const x = (a ?? '').trim();
+    return x || (b ?? '').trim() || null;
+  };
+  const num = (a?: number | null, b?: number | null) =>
+    a != null && Number(a) > 0 ? a : b != null && Number(b) > 0 ? b : null;
+  const list = (a?: string[] | null, b?: string[] | null) => {
+    const left = (a ?? []).map((u) => u.trim()).filter(Boolean);
+    return left.length > 0
+      ? left
+      : (b ?? []).map((u) => u.trim()).filter(Boolean);
+  };
+
+  return {
+    title:
+      text(primary.title, secondary.title) || primary.title || secondary.title,
+    author: text(primary.author, secondary.author),
+    isbn: text(primary.isbn, secondary.isbn),
+    publisher: text(primary.publisher, secondary.publisher),
+    description: text(primary.description, secondary.description),
+    coverImageUrl: text(primary.coverImageUrl, secondary.coverImageUrl),
+    additionalImageUrls: list(
+      primary.additionalImageUrls,
+      secondary.additionalImageUrls
+    ),
+    weightKg: num(primary.weightKg, secondary.weightKg),
+    salePrice: num(primary.salePrice, secondary.salePrice),
+    coverType: text(primary.coverType, secondary.coverType),
+    ageRating: text(primary.ageRating, secondary.ageRating),
+    format: text(primary.format, secondary.format),
+    illustrator: text(primary.illustrator, secondary.illustrator),
+    language: text(primary.language, secondary.language),
+    pageCount: num(primary.pageCount, secondary.pageCount),
+    placeOfPublication: text(
+      primary.placeOfPublication,
+      secondary.placeOfPublication
+    ),
+    translation: text(primary.translation, secondary.translation),
+    year: num(primary.year, secondary.year),
+    url: text(primary.url, secondary.url) || primary.url || secondary.url,
+    source: primary.source || secondary.source,
+    snippet: text(primary.snippet, secondary.snippet),
+  };
+}
+
+/** True when browser/page payload is missing fields that the backend may still fill. */
+export function bookCandidateNeedsEnrichment(
+  cand: BookLookupCandidate | null | undefined
+): boolean {
+  if (!cand?.title?.trim()) return true;
+  if (!cand.coverImageUrl?.trim()) return true;
+  if (!cand.author?.trim()) return true;
+  if (!cand.description?.trim()) return true;
+  if (!(cand.salePrice != null && Number(cand.salePrice) > 0)) return true;
+  return false;
 }
 
 export async function lookupSupplierCost(input: {

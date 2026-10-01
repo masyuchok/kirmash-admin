@@ -185,13 +185,30 @@ public sealed class SupplierPriceListLookupService
         int isbnCol = FindColumnIndex( header, "isbn", "іsbn", "штрих", "barcode", "ean" );
         int titleCol = FindColumnIndex(
             header,
-            "назван", "nazwa", "title", "tytuł", "tytul", "book", "кніга", "книга", "pozycja" );
+            "назва",
+            "назван",
+            "nazwa",
+            "title",
+            "tytuł",
+            "tytul",
+            "book",
+            "кніга",
+            "книга",
+            "pozycja",
+            "name" );
+        // Prefer the plain title column over "назва ў краме / Shopify" variants.
+        int plainTitleCol = FindColumnIndexExactish( header, "назва", "nazwa", "title", "name" );
+        if (plainTitleCol >= 0)
+        {
+            titleCol = plainTitleCol;
+        }
+
         int authorCol = FindColumnIndex(
             header,
             "аўтар", "автор", "author", "autor", "аўтары" );
         int priceCol = FindColumnIndex(
             header,
-            "брутто", "brutto", "брута", "cena", "price", "цэн", "цен", "zł", "zl", "pln", "koszt", "netto" );
+            "брутто", "brutto", "брута", "цана", "цена", "cena", "price", "цэн", "цен", "zł", "zl", "pln", "koszt", "netto" );
         int weightCol = FindColumnIndex(
             header,
             "вага", "вес", "weight", "waga", "кг", "gram", "грам", "masa" );
@@ -216,9 +233,14 @@ public sealed class SupplierPriceListLookupService
         int yearCol = FindColumnIndex(
             header, "год", "rok", "year", "выдан", "издан", "wydan" );
 
-        // Prefer brutto-named column if several price-like headers exist.
+        // Prefer Kirma / brutto purchase-price columns when several price-like headers exist.
+        int kirmaPriceCol = FindColumnIndex( header, "kirma" );
         int bruttoCol = FindColumnIndex( header, "брутто", "brutto", "брута", "gross" );
-        if (bruttoCol >= 0)
+        if (kirmaPriceCol >= 0 && LooksLikePriceHeader( header[kirmaPriceCol] ))
+        {
+            priceCol = kirmaPriceCol;
+        }
+        else if (bruttoCol >= 0)
         {
             priceCol = bruttoCol;
         }
@@ -249,7 +271,7 @@ public sealed class SupplierPriceListLookupService
         }
 
         string? wantIsbn = IsbnUtil.Normalize( isbn );
-        string wantTitle = NormalizeText( title );
+        string wantTitle = NormalizeText( StripAuthorLabelFromTitle( title ) );
         string wantAuthor = NormalizeText( author );
 
         decimal? bestPrice = null;
@@ -369,14 +391,13 @@ public sealed class SupplierPriceListLookupService
             if (!string.IsNullOrWhiteSpace( wantTitle ))
             {
                 if (!string.IsNullOrWhiteSpace( rowTitleCore )
-                    && (rowTitleCore.Contains( wantTitle, StringComparison.Ordinal )
-                        || wantTitle.Contains( rowTitleCore, StringComparison.Ordinal )))
+                    && TitlesSoftMatch( wantTitle, rowTitleCore ))
                 {
                     score += 40;
                 }
-                else if (rowBlob.Contains( wantTitle, StringComparison.Ordinal ))
+                else if (TitlesSoftMatch( wantTitle, rowBlob ))
                 {
-                    score += 25;
+                    score += 30;
                 }
                 else
                 {
@@ -384,14 +405,19 @@ public sealed class SupplierPriceListLookupService
                         ? rowBlob
                         : rowTitleCore;
                     int overlap = CountTokenOverlap( wantTitle, titleHaystack );
-                    if (overlap >= 3)
+                    int wantTokens = CountSignificantTokens( wantTitle );
+                    // Short titles like "Siva zozula" (2 tokens): full token hit is enough.
+                    if (wantTokens > 0 && overlap >= wantTokens)
                     {
-                        // Strong partial title match (subtitle differs, price list is shorter).
+                        score += 40;
+                    }
+                    else if (overlap >= 3)
+                    {
                         score += 30 + overlap;
                     }
                     else if (overlap >= 2)
                     {
-                        score += 10 + overlap;
+                        score += 15 + overlap;
                     }
                 }
             }
@@ -427,7 +453,7 @@ public sealed class SupplierPriceListLookupService
             }
         }
 
-        if (bestScore < 25)
+        if (bestScore < 20)
         {
             return null;
         }
@@ -519,6 +545,70 @@ public sealed class SupplierPriceListLookupService
 
         return b.Split( ' ', StringSplitOptions.RemoveEmptyEntries )
             .Count( t => t.Length >= 3 && ta.Contains( t ) );
+    }
+
+    private static int CountSignificantTokens( string text ) =>
+        text.Split( ' ', StringSplitOptions.RemoveEmptyEntries ).Count( t => t.Length >= 3 );
+
+    private static bool TitlesSoftMatch( string wantTitle, string haystack )
+    {
+        if (string.IsNullOrWhiteSpace( wantTitle ) || string.IsNullOrWhiteSpace( haystack ))
+        {
+            return false;
+        }
+
+        if (haystack.Contains( wantTitle, StringComparison.Ordinal )
+            || wantTitle.Contains( haystack, StringComparison.Ordinal ))
+        {
+            return true;
+        }
+
+        int wantTokens = CountSignificantTokens( wantTitle );
+        if (wantTokens == 0)
+        {
+            return false;
+        }
+
+        return CountTokenOverlap( wantTitle, haystack ) >= wantTokens;
+    }
+
+    /// <summary>
+    /// "«Siva zozula». Автор: Виктор Стахвюк" → "Siva zozula" for price-list matching.
+    /// </summary>
+    private static string? StripAuthorLabelFromTitle( string? title )
+    {
+        if (string.IsNullOrWhiteSpace( title ))
+        {
+            return title;
+        }
+
+        Match m = Regex.Match(
+            title.Trim(),
+            @"^(?<t>.+?)\s*[.…]?\s*(?:Автор(?:ы)?|Аўтар(?:ы)?|Author(?:s)?)\s*[:：]\s*.+$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant );
+        if (m.Success)
+        {
+            return m.Groups["t"].Value.Trim().Trim( '«', '»', '"', '\'', '“', '”', '„' );
+        }
+
+        return title;
+    }
+
+    private static bool LooksLikePriceHeader( string header )
+    {
+        string h = (header ?? string.Empty).Trim().ToLowerInvariant();
+        return h.Contains( "цэн", StringComparison.Ordinal )
+            || h.Contains( "цен", StringComparison.Ordinal )
+            || h.Contains( "цана", StringComparison.Ordinal )
+            || h.Contains( "цена", StringComparison.Ordinal )
+            || h.Contains( "cena", StringComparison.Ordinal )
+            || h.Contains( "price", StringComparison.Ordinal )
+            || h.Contains( "pln", StringComparison.Ordinal )
+            || h.Contains( "zł", StringComparison.Ordinal )
+            || h.Contains( "brutt", StringComparison.Ordinal )
+            || h.Contains( "брут", StringComparison.Ordinal )
+            || h.Contains( "koszt", StringComparison.Ordinal )
+            || h.Contains( "netto", StringComparison.Ordinal );
     }
 
     /// <summary>
@@ -682,6 +772,50 @@ public sealed class SupplierPriceListLookupService
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// Prefer a header that is essentially just the label (e.g. "Назва"),
+    /// not a longer variant like "назва ў Kirma / Shopify".
+    /// </summary>
+    private static int FindColumnIndexExactish( string[] header, params string[] labels )
+    {
+        int best = -1;
+        int bestLen = int.MaxValue;
+        for (int i = 0; i < header.Length; i++)
+        {
+            string h = Regex.Replace( header[i].Trim().ToLowerInvariant(), @"\s+", " " );
+            if (string.IsNullOrWhiteSpace( h ))
+            {
+                continue;
+            }
+
+            foreach (string label in labels)
+            {
+                if (h.Equals( label, StringComparison.OrdinalIgnoreCase )
+                    || h.StartsWith( label + " ", StringComparison.OrdinalIgnoreCase )
+                    || h.StartsWith( label + "(", StringComparison.OrdinalIgnoreCase ))
+                {
+                    // Skip "назва ў …" / "title in shop" style columns.
+                    if (Regex.IsMatch(
+                            h,
+                            @"\b(у|ў|в|in|shop|shopify|kirma|крам|магаз)\b",
+                            RegexOptions.IgnoreCase )
+                        && !h.Equals( label, StringComparison.OrdinalIgnoreCase ))
+                    {
+                        continue;
+                    }
+
+                    if (h.Length < bestLen)
+                    {
+                        bestLen = h.Length;
+                        best = i;
+                    }
+                }
+            }
+        }
+
+        return best;
     }
 
     private static decimal? ParseMoney( string? raw )

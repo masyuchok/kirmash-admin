@@ -498,9 +498,19 @@ public static class BookBibliographicFields
         string t = Collapse( raw );
         t = Regex.Replace(
             t,
-            @"^(?:месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication|город|горад)\s*:?\s*",
+            @"^(?:месца\s+выхаду|месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication|город|горад)\s*:?\s*",
             "",
             RegexOptions.IgnoreCase );
+        // "Беласток. Выдавец: …" / "Warszawa; Wydawca: …"
+        Match withPublisher = Regex.Match(
+            t,
+            @"^(?<city>.+?)\s*[.;|]\s*(?:Выдавец|Издатель|Publisher|Wydawca)\s*:",
+            RegexOptions.IgnoreCase );
+        if (withPublisher.Success)
+        {
+            t = withPublisher.Groups["city"].Value.Trim();
+        }
+
         t = t.Trim().Trim( ',', ';', '.', ':' );
         if (t.Length is < 2 or > 80)
         {
@@ -513,6 +523,62 @@ public static class BookBibliographicFields
         }
 
         return t;
+    }
+
+    /// <summary>
+    /// Pull place of publication from free text / shop description on any site
+    /// (e.g. "Месца выхаду: Беласток. Выдавец: …").
+    /// </summary>
+    public static string? ExtractPlaceFromText( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        Match labeled = Regex.Match(
+            raw,
+            @"(?is)(?:месца\s+выхаду|месца\s+выдання|место\s+издания|miejsce\s+wydania|place\s+of\s+publication)\s*[:：\-–—]\s*(?<v>.+?)(?=\s*(?:$|[\r\n]|(?:Выдавец|Издатель(?:ство)?|Publisher|Wydawca|ISBN|ІСБН|Год|Рэдактар|Редактор|Язык|Мова|Language)\s*[:：\-–—]|\.\s*(?:Выдавец|Издатель|Publisher|Wydawca)\s*:))",
+            RegexOptions.IgnoreCase );
+        if (labeled.Success)
+        {
+            string? fromLabel = NormalizePlace( labeled.Groups["v"].Value );
+            if (fromLabel is not null)
+            {
+                return fromLabel;
+            }
+        }
+
+        // Short dedicated cell / already-normalized value.
+        return NormalizePlace( raw );
+    }
+
+    /// <summary>
+    /// Pull publisher/vendor from free text when Shopify/Woo attributes omit it.
+    /// </summary>
+    public static string? ExtractPublisherFromText( string? raw )
+    {
+        if (string.IsNullOrWhiteSpace( raw ))
+        {
+            return null;
+        }
+
+        Match labeled = Regex.Match(
+            raw,
+            @"(?is)(?:Выдавец(?:тва)?|Издатель(?:ство)?|Publisher|Wydawca|Wydawnictwo)\s*[:：\-–—]\s*(?<v>.+?)(?=\s*(?:$|[\r\n]|(?:ISBN|ІСБН|Год|Рэдактар|Редактор|Язык|Мова|Language|Месца|Место|Place|Возраст|Узрост|Age)\s*[:：\-–—]))",
+            RegexOptions.IgnoreCase );
+        if (!labeled.Success)
+        {
+            return null;
+        }
+
+        string v = labeled.Groups["v"].Value.Trim().Trim( '*', '_', '#', '"', '\'', '«', '»', '.', ';', ',' );
+        if (v.Length is < 2 or > 220)
+        {
+            return null;
+        }
+
+        return v;
     }
 
     public static string? NormalizeTranslation( string? raw )
@@ -636,6 +702,7 @@ public static class BookBibliographicFields
             "месца",
             "место",
             "miejsce",
+            "miasto",
             "город",
             "горад" );
 
