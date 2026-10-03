@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FiX } from 'react-icons/fi';
 import {
   attachDraftImages,
@@ -28,6 +28,11 @@ type Step = 'menu' | 'link' | 'edit' | 'busy';
 type Props = {
   open: boolean;
   supplierId?: string;
+  /** Sits above another modal (acceptance) without changing the supplies flow. */
+  overlayClassName?: string;
+  initialSalePrice?: number | null;
+  initialUnitCost?: number | null;
+  initialQuantity?: string;
   onClose: () => void;
   onCreated: (product: {
     shopifyProductId: string;
@@ -52,6 +57,10 @@ const labelClass = 'mb-0.5 block text-xs font-medium text-gray-600';
 export default function BookAiLookupModal({
   open,
   supplierId,
+  overlayClassName,
+  initialSalePrice,
+  initialUnitCost,
+  initialQuantity,
   onClose,
   onCreated,
   onOpenShopifyManual,
@@ -464,16 +473,19 @@ export default function BookAiLookupModal({
     async (urls: string[], pageUrl?: string | null) => {
       const idEntries: Record<string, string> = {};
       const dataEntries: Record<string, string> = {};
-      for (const url of urls) {
-        const item = await ensureRemoteImageInTemp(url, { pageUrl });
-        if (!item?.found) continue;
+      const cached = await Promise.all(
+        urls.map((url) => ensureRemoteImageInTemp(url, { pageUrl }))
+      );
+      urls.forEach((url, index) => {
+        const item = cached[index];
+        if (!item?.found) return;
         if (item.tempMediaId) idEntries[url] = item.tempMediaId;
         if (item.tempMediaPath) {
           dataEntries[url] = tempMediaAbsoluteUrl(item.tempMediaPath);
         } else if (item.dataUrl?.startsWith('data:')) {
           dataEntries[url] = item.dataUrl;
         }
-      }
+      });
       if (Object.keys(idEntries).length > 0) {
         setAdditionalTempMediaIds((prev) => ({ ...prev, ...idEntries }));
       }
@@ -579,6 +591,27 @@ export default function BookAiLookupModal({
     []
   );
 
+  const salePriceDefault =
+    initialSalePrice != null &&
+    Number.isFinite(initialSalePrice) &&
+    initialSalePrice > 0
+      ? String(initialSalePrice)
+      : '0';
+  const unitCostDefault =
+    initialUnitCost != null &&
+    Number.isFinite(initialUnitCost) &&
+    initialUnitCost > 0
+      ? String(initialUnitCost)
+      : '0';
+  const quantityDefault = initialQuantity ?? '1';
+
+  useEffect(() => {
+    if (!open || step !== 'menu') return;
+    setSalePrice(salePriceDefault);
+    setUnitCost(unitCostDefault);
+    setQuantity(quantityDefault);
+  }, [open, step, salePriceDefault, unitCostDefault, quantityDefault]);
+
   if (!open) return null;
 
   const resetToMenu = () => {
@@ -599,9 +632,9 @@ export default function BookAiLookupModal({
     setCoverLightboxOpen(false);
     setLightboxSrc(null);
     setEditWeight('');
-    setSalePrice('0');
-    setUnitCost('0');
-    setQuantity('1');
+    setSalePrice(salePriceDefault);
+    setUnitCost(unitCostDefault);
+    setQuantity(quantityDefault);
     setEditCoverType('');
     setEditAgeRating('');
     setEditFormat('');
@@ -763,111 +796,106 @@ export default function BookAiLookupModal({
 
       const previewSrc =
         styledCoverPreviewRef.current || styledCoverPreview || null;
-      let coverDataUrl = previewSrc?.startsWith('data:')
+      const coverDataUrlAtStart = previewSrc?.startsWith('data:')
         ? previewSrc.trim()
         : '';
-
-      // Resolve attach id from styled/current — never stale fetch/source after style.
-      let coverTempId = resolveAttachCoverTempMediaId();
-
-      // Only fetch when we have no final cover temp and no data URL.
-      if (!coverTempId && !coverDataUrl && coverImageUrl) {
-        const cached = await ensureRemoteImageInTemp(coverImageUrl, {
-          pageUrl: candidate?.url,
-        });
-        if (cached?.tempMediaId) {
-          setSourceCoverTemp(cached.tempMediaId);
-          setCurrentCoverTemp(cached.tempMediaId);
-          coverTempId = cached.tempMediaId;
-        }
-        if (cached?.dataUrl?.startsWith('data:') && !coverDataUrl) {
-          coverDataUrl = cached.dataUrl;
-        }
-        if (cached?.tempMediaPath && !previewSrc) {
-          setStyledPreview(tempMediaAbsoluteUrl(cached.tempMediaPath));
-        }
-        coverTempId = resolveAttachCoverTempMediaId() || coverTempId;
-      }
-
-      // Style only when we still have raw source bytes and no styled result yet.
-      const hasStyledCover =
+      const coverTempIdAtStart = resolveAttachCoverTempMediaId();
+      const hasStyledCoverAtStart =
         Boolean(styledCoverTempMediaIdRef.current) ||
         Boolean(tempMediaIdFromSrc(previewSrc)) ||
         Boolean(previewSrc?.includes('/temp-media/'));
-      if (coverTempId && !hasStyledCover && !coverDataUrl) {
-        try {
-          const styled = await styleBookCover({
-            coverTempMediaId: coverTempId,
-            coverImageBase64: coverDataUrl || undefined,
-          });
-          if (styled.tempMediaId) {
-            setStyledCoverTemp(styled.tempMediaId);
-            setCurrentCoverTemp(styled.tempMediaId);
-            coverTempId = styled.tempMediaId;
-          }
-          if (styled.tempMediaPath) {
-            setStyledPreview(tempMediaAbsoluteUrl(styled.tempMediaPath));
-          } else if (styled.dataUrl) {
-            coverDataUrl = styled.dataUrl;
-            setStyledPreview(styled.dataUrl);
-          }
-          coverTempId = resolveAttachCoverTempMediaId() || coverTempId;
-        } catch {
-          // keep raw temp bytes
-        }
-      }
+      const pageUrlAtStart = candidate?.url;
+      const extraUrlsAtStart = additionalImageUrls;
+      const extraTempIdsAtStart = additionalTempMediaIds;
+      const extraDataUrlsAtStart = additionalImageDataUrls;
+      const expectCover = Boolean(
+        coverImageUrl || coverTempIdAtStart || coverDataUrlAtStart
+      );
+      const seoImageIds = [
+        ...(expectCover ? ['cover'] : []),
+        ...extraUrlsAtStart.map((_, index) => `extra-${index + 1}`),
+      ];
 
-      // Final resolve right before extras / shell (refs may have updated).
-      coverTempId = resolveAttachCoverTempMediaId() || coverTempId;
-      const additionalDataUrls: string[] = [];
-      const extraTempIds: string[] = [];
-      for (const url of additionalImageUrls) {
-        let tempId = additionalTempMediaIds[url];
-        if (!tempId) {
-          const ensured = await ensureRemoteImageInTemp(url, {
-            pageUrl: candidate?.url,
+      // Image bytes are not needed to create the Shopify draft. Prepare them
+      // in parallel and upload after the product id exists.
+      const imagesPromise = (async () => {
+        let coverDataUrl = coverDataUrlAtStart;
+        let coverTempId = coverTempIdAtStart;
+
+        if (!coverTempId && !coverDataUrl && coverImageUrl) {
+          const cached = await ensureRemoteImageInTemp(coverImageUrl, {
+            pageUrl: pageUrlAtStart,
           });
-          if (ensured?.tempMediaId) {
-            tempId = ensured.tempMediaId;
-            setAdditionalTempMediaIds((prev) => ({
-              ...prev,
-              [url]: ensured.tempMediaId!,
-            }));
-          } else if (ensured?.dataUrl?.startsWith('data:')) {
-            additionalDataUrls.push(ensured.dataUrl);
-            continue;
+          if (cached?.tempMediaId) {
+            coverTempId = cached.tempMediaId;
+          }
+          if (cached?.dataUrl?.startsWith('data:') && !coverDataUrl) {
+            coverDataUrl = cached.dataUrl;
           }
         }
-        if (tempId) {
-          extraTempIds.push(tempId);
-          continue;
-        }
-        const cached = additionalImageDataUrls[url];
-        if (cached?.startsWith('data:')) {
-          additionalDataUrls.push(cached);
-          continue;
-        }
-        const fromImg = dataUrlFromImgElement(additionalImgRefs.current[url]);
-        if (fromImg?.startsWith('data:')) {
-          additionalDataUrls.push(fromImg);
-        }
-      }
 
-      const hasCoverBytes =
-        Boolean(coverTempId) || coverDataUrl.startsWith('data:');
-      const hasExtraBytes =
-        extraTempIds.length > 0 || additionalDataUrls.length > 0;
-      const hasAnyPhoto = hasCoverBytes || hasExtraBytes;
+        if (coverTempId && !hasStyledCoverAtStart && !coverDataUrl) {
+          try {
+            const styled = await styleBookCover({
+              coverTempMediaId: coverTempId,
+              coverImageBase64: coverDataUrl || undefined,
+            });
+            if (styled.tempMediaId) coverTempId = styled.tempMediaId;
+            else if (styled.dataUrl) coverDataUrl = styled.dataUrl;
+          } catch {
+            // keep raw temp bytes
+          }
+        }
+
+        const extras = await Promise.all(
+          extraUrlsAtStart.map(async (url, index) => {
+            const seoId = `extra-${index + 1}`;
+            const tempId = extraTempIdsAtStart[url];
+            if (!tempId) {
+              const ensured = await ensureRemoteImageInTemp(url, {
+                pageUrl: pageUrlAtStart,
+              });
+              if (ensured?.tempMediaId) {
+                return { seoId, tempId: ensured.tempMediaId, dataUrl: '' };
+              }
+              if (ensured?.dataUrl?.startsWith('data:')) {
+                return { seoId, tempId: '', dataUrl: ensured.dataUrl };
+              }
+            }
+            if (tempId) return { seoId, tempId, dataUrl: '' };
+            const cached = extraDataUrlsAtStart[url];
+            if (cached?.startsWith('data:')) {
+              return { seoId, tempId: '', dataUrl: cached };
+            }
+            const fromImg = dataUrlFromImgElement(
+              additionalImgRefs.current[url]
+            );
+            if (fromImg?.startsWith('data:')) {
+              return { seoId, tempId: '', dataUrl: fromImg };
+            }
+            return { seoId, tempId: '', dataUrl: '' };
+          })
+        );
+
+        const readyExtras = extras.filter(
+          (item) => item.tempId || item.dataUrl.startsWith('data:')
+        );
+        const hasCoverBytes =
+          Boolean(coverTempId) || coverDataUrl.startsWith('data:');
+        return {
+          coverTempId,
+          coverDataUrl,
+          hasCoverBytes,
+          readyExtras,
+          hasAnyPhoto: hasCoverBytes || readyExtras.length > 0,
+        };
+      })();
 
       // Shell without media — photos via attach-draft-images when available.
       const weightParsed = Number(editWeight.replace(',', '.'));
       const quantityParsed = quantityAtCreate;
       const pageCountParsed = Number(editPageCount.replace(',', '.'));
       const yearParsed = Number(editYear.replace(',', '.'));
-      const seoImageIds = [
-        ...(hasCoverBytes ? ['cover'] : []),
-        ...extraTempIds.map((_, i) => `extra-${i + 1}`),
-      ];
       const created = await createBookDraftShell({
         title: editTitle.trim(),
         descriptionHtml: descriptionHtml || undefined,
@@ -908,43 +936,43 @@ export default function BookAiLookupModal({
         throw new Error('Няма Shopify product id.');
       }
 
-      // Re-resolve after draft create awaits — style may have finished meanwhile.
-      coverTempId = resolveAttachCoverTempMediaId() || coverTempId;
-
-      if (hasAnyPhoto) {
-        const coverAlt =
-          created.imageAlts.find((a) => a.imageId === 'cover')?.alt ||
-          undefined;
-        const additionalImageAlts = seoImageIds
-          .filter((id) => id !== 'cover')
-          .map(
-            (id) => created.imageAlts.find((a) => a.imageId === id)?.alt || ''
+      const shopifyProductId = created.shopifyProductId;
+      const imageAlts = created.imageAlts;
+      void imagesPromise
+        .then(async (images) => {
+          if (!images.hasAnyPhoto) return;
+          const coverAlt =
+            imageAlts.find((alt) => alt.imageId === 'cover')?.alt || undefined;
+          const additionalDataUrls = images.readyExtras
+            .map((item) => item.dataUrl)
+            .filter((url) => url.startsWith('data:'));
+          const additionalTempMediaIds = images.readyExtras
+            .map((item) => item.tempId)
+            .filter((id) => id.length > 0);
+          const additionalImageAlts = images.readyExtras.map(
+            (item) =>
+              imageAlts.find((alt) => alt.imageId === item.seoId)?.alt || ''
           );
-
-        try {
           const media = await attachDraftImages({
-            shopifyProductId: created.shopifyProductId,
-            // Only real data URLs — temp-media http URLs are not base64.
-            coverDataUrl: coverDataUrl.startsWith('data:')
-              ? coverDataUrl
+            shopifyProductId,
+            coverDataUrl: images.coverDataUrl.startsWith('data:')
+              ? images.coverDataUrl
               : null,
-            coverTempMediaId: hasCoverBytes ? coverTempId : null,
-            // Never send CDN URL — server often cannot download it.
+            coverTempMediaId: images.hasCoverBytes ? images.coverTempId : null,
             coverImageUrl: null,
             additionalDataUrls,
             additionalImageUrls: [],
-            additionalTempMediaIds: extraTempIds,
+            additionalTempMediaIds,
             coverImageAlt: coverAlt,
             additionalImageAlts,
           });
           if (media.errors.length > 0) {
             console.warn('attach-draft-images partial errors', media.errors);
           }
-        } catch (mediaErr) {
-          // Draft already exists — allow create without photos when CDN blocks.
+        })
+        .catch((mediaErr: unknown) => {
           console.warn('attach-draft-images failed', mediaErr);
-        }
-      }
+        });
 
       if (!created.shopifyAdminUrl) {
         adminTab?.close();
@@ -1117,7 +1145,12 @@ export default function BookAiLookupModal({
   const isWideStep = step === 'edit';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3 sm:p-4">
+    <div
+      className={
+        overlayClassName ??
+        'fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3 sm:p-4'
+      }
+    >
       <div
         className={`max-h-[92vh] w-full overflow-hidden rounded-2xl bg-white shadow-xl ${
           isWideStep ? 'max-w-4xl' : 'max-w-md'

@@ -2,7 +2,12 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+# Lockfile is produced on Windows, so npm ci on Alpine skips the musl
+# native binaries Tailwind needs at build time.
+RUN npm ci \
+  && npm install --no-save --include=optional \
+    lightningcss-linux-x64-musl@1.29.2 \
+    @tailwindcss/oxide-linux-x64-musl@4.1.4
 
 COPY . .
 
